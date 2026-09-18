@@ -1,0 +1,70 @@
+[project]
+name = "guru-ji"
+version = "0.1.0"
+description = "A federated, read-only institutional AI assistant with text and voice channels."
+readme = "README.md"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+    "asyncpg>=0.30,<1.0",
+    "fastapi>=0.115,<1.0",
+    "httpx>=0.28,<1.0",
+    "orjson>=3.10,<4.0",
+    "PyJWT[crypto]>=2.10,<3.0",
+    "pydantic>=2.10,<3.0",
+    "pydantic-settings>=2.7,<3.0",
+    "python-multipart>=0.0.20,<1.0",
+    "sse-starlette>=2.2,<3.0",
+    "sqlalchemy>=2.0,<3.0",
+    "structlog>=25.1,<26.0",
+    "tenacity>=9.0,<10.0",
+    "uvicorn[standard]>=0.34,<1.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.14,<2.0",
+    "pip-audit>=2.7,<3.0",
+    "pre-commit>=4.0,<5.0",
+    "pytest-asyncio>=0.25,<1.0",
+    "pytest>=8.3,<9.0",
+    "ruff>=0.9,<1.0",
+]
+search = [
+    "tavily-python>=0.5,<1.0",
+]
+voice = [
+    "aiortc>=1.10,<2.0",
+]
+
+[tool.uv]
+# The repository is an application monorepo, not an installable library yet.
+# This keeps dependency synchronization independent from the future package layout.
+package = false
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+extend-exclude = ["migrations/versions"]
+
+[tool.ruff.lint]
+select = ["A", "ASYNC", "B", "C4", "E", "F", "I", "N", "S", "UP"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+asyncio_mode = "auto"
+pythonpath = ["apps/api"]
+testpaths = ["tests"]
+
+[tool.mypy]
+check_untyped_defs = true
+disallow_any_generics = true
+mypy_path = ["apps/api"]
+no_implicit_optional = true
+python_version = "3.12"
+warn_redundant_casts = true
+warn_unused_configs = true
+warn_unused_ignores = true
