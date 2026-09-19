@@ -13,6 +13,7 @@ from ..connectors.registry import ConnectorRegistry
 from ..orchestration.assistant_service import AssistantService
 from ..persistence.database import InMemoryControlStore, PostgresControlStore, SqliteControlStore
 from ..policy.query_limits import QueryLimits
+from ..providers.ollama import OllamaProvider
 from ..tools.college_tools import COLLEGE_TOOLS
 from ..tools.health_tools import HEALTH_TOOLS
 from ..tools.registry import ToolRegistry
@@ -61,6 +62,16 @@ def _build_store(settings: AppSettings) -> ControlStore:
     raise ValueError("CONTROL_DATABASE_URL must use sqlite://, postgresql://, or postgres://")
 
 
+def _build_model(settings: AppSettings):
+    if settings.model_provider == "ollama":
+        return OllamaProvider(
+            base_url=settings.ollama_base_url,
+            model_id=settings.ollama_model_id,
+            timeout_seconds=settings.model_timeout_seconds,
+        )
+    return None
+
+
 def build_runtime(settings: AppSettings | None = None) -> Runtime:
     settings = settings or AppSettings.from_env()
     settings.ensure_safe_for_production()
@@ -69,6 +80,7 @@ def build_runtime(settings: AppSettings | None = None) -> Runtime:
     connectors = ConnectorRegistry((CollegeADemoConnector(),))
     store = _build_store(settings)
     auth_verifier = None if settings.environment in {"development", "test"} else JwtVerifier(settings)
+    model = _build_model(settings)
     return Runtime(
         settings=settings,
         sources=sources,
@@ -81,6 +93,8 @@ def build_runtime(settings: AppSettings | None = None) -> Runtime:
             connectors=connectors,
             store=store,
             limits=QueryLimits(),
+            model=model,
+            model_max_tokens=settings.model_max_tokens,
         ),
         voice=VoiceSessionManager(ttl_seconds=300, max_active=10),
         auth_verifier=auth_verifier,
