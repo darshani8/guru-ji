@@ -1,0 +1,12 @@
+services:
+  api:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.api
+    environment:
+      GURU_ENVIRONMENT: development
+      GURU_DEV_BEARER_TOKEN: dev-token
+    ports:
+      - "8000:8000"
+    volumes:
+      - ../../apps:/app/apps:ro
