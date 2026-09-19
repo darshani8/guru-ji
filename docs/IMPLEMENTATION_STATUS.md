@@ -11,6 +11,7 @@
 - Policy-aware orchestration with plan classification, sequential connector execution, citations, warnings, complete/partial/refused statuses, and DENIED audit outcomes for unauthorized requests.
 - Development-only identity adapter using Authorization: Bearer dev-token plus demo headers.
 - JWKS-backed OIDC/JWT verification boundary for production, with issuer, audience, expiry, required-claim, and safe-algorithm checks; verified claims map only to explicit roles, capabilities, and institution scopes.
+- Optional local Ollama wording provider selected only by explicit configuration. It receives the deterministic approved-source answer, preserves application-owned citations/status, rejects output that drops numeric facts, and falls back deterministically on provider failure.
 - Voice session lifecycle with a ten-session cap and ephemeral audio-retention semantics; realtime provider credentials are deliberately disabled.
 - Optional public-web boundary with domain allowlisting and prompt-injection warnings. Web content remains untrusted data.
 - FastAPI routes for liveness/readiness, JSON chat, SSE chat (`stream=true` or `/v1/chat/stream`), daily briefings, sources, audit, and voice session lifecycle.
@@ -23,11 +24,11 @@
 
 ## Validation
 
-The exported branch snapshot was checked with Python 3.12 and the declared runtime dependencies installed. Fifty-two automated tests pass, including HTTP contract, JSON/SSE chat, persistence, OIDC/JWT verification, configuration-hardening, and request-size tests. Python compilation passes. The live Uvicorn smoke test passes with `LIVE_SMOKE_OK` and covers readiness, source metadata, chat, briefing creation, audit history, and the mounted frontend. PostgreSQL adapter construction and configuration paths are covered, but no live PostgreSQL server was available in this validation run.
+The exported branch snapshot was checked with Python 3.12 and the declared runtime dependencies installed. Sixty automated tests pass, including HTTP contract, JSON/SSE chat, persistence, OIDC/JWT verification, model-provider fallback, configuration-hardening, and request-size tests. Python compilation passes. The live Uvicorn smoke test passes with `LIVE_SMOKE_OK` and covers readiness, source metadata, chat, briefing creation, audit history, and the mounted frontend. PostgreSQL adapter construction and configuration paths are covered, but no live PostgreSQL server was available in this validation run.
 
 ## Intentionally not claimed
 
-This is a hardened local vertical slice, not a production deployment. It does not include a live institutional database, the institution's real OIDC issuer/JWKS configuration, hosted-model credentials, WebRTC signaling, secret management, or production observability. The College A connector remains deterministic demo data. Those integrations need the actual institution contracts, security approvals, and deployment secrets rather than invented placeholders. A PostgreSQL adapter and OIDC/JWT verification boundary now exist, but they still need private services, credentials, connection-pool tuning, identity-claim mapping approval, and deployment testing before production use.
+This is a hardened local vertical slice, not a production deployment. It does not include a live institutional database, the institution's real OIDC issuer/JWKS configuration, a production Ollama/model deployment, hosted-model credentials, WebRTC signaling, secret management, or production observability. The College A connector remains deterministic demo data. Those integrations need the actual institution contracts, security approvals, and deployment secrets rather than invented placeholders. PostgreSQL, OIDC/JWT verification, and the optional local model boundary now exist, but they still need private services, credentials, connection-pool tuning, identity-claim mapping approval, model evaluation, and deployment testing before production use.
 
 ## Local flow
 
@@ -37,5 +38,6 @@ This is a hardened local vertical slice, not a production deployment. It does no
 4. Run `make test` and `make compile`.
 5. Run `make run`.
 6. Run `make smoke` against the running API.
-7. For deployment, set `GURU_ENVIRONMENT=production`, explicit approved `GURU_ALLOWED_ORIGINS`, a non-default identity configuration, and a private `CONTROL_DATABASE_URL` using PostgreSQL.
-8. Connect real institutional systems only through reviewed read-only connector implementations.
+7. To exercise local model wording, set `GURU_MODEL_PROVIDER=ollama`, `GURU_OLLAMA_BASE_URL`, and `GURU_OLLAMA_MODEL_ID`; otherwise deterministic wording remains the default.
+8. For deployment, set `GURU_ENVIRONMENT=production`, explicit approved `GURU_ALLOWED_ORIGINS`, a non-default identity configuration, and a private `CONTROL_DATABASE_URL` using PostgreSQL.
+9. Connect real institutional systems only through reviewed read-only connector implementations.
