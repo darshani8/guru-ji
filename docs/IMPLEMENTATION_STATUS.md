@@ -15,19 +15,23 @@
 - FastAPI routes for liveness/readiness, chat, daily briefings, sources, audit, and voice session lifecycle.
 - Source metadata and audit routes require explicit capabilities.
 - Request-ID propagation, safe logging helpers, a browser client under apps/web, and local Docker/Make commands.
+- SQLite control-plane persistence for audit events, source-health snapshots, and briefing records, with idempotent initialization from migrations/001_control_plane.sql.
+- Database initialization and repeatable live HTTP smoke validation scripts under scripts/.
 
 ## Validation
 
-The framework-independent suite currently passes 39 tests. Three conditional HTTP contract tests are skipped in the Codespace because FastAPI is not installed there; they will run automatically once the declared dependencies are installed. Python compilation and git diff whitespace validation pass.
+The exported branch was checked locally with the declared runtime dependencies installed: 40 tests pass, including the HTTP contract tests; Python compilation passes; and the live Uvicorn smoke test passes with LIVE_SMOKE_OK. The live check covered readiness, source metadata, chat, briefing creation, audit history, and the mounted frontend. The Codespace itself remains unavailable because its GitHub billing/free-usage limit was reached, so this validation was run against the exported branch snapshot instead.
 
 ## Intentionally not claimed
 
-This is a complete local vertical slice, not a production deployment. It does not include a live institutional database, real OIDC/JWT keys, hosted-model credentials, WebRTC signaling, persistent control-plane migrations, secret management, or production observability. Those integrations need the actual institution contracts, security approvals, and deployment secrets rather than invented placeholders.
+This is a complete local vertical slice, not a production deployment. It does not include a PostgreSQL runtime backend yet, a live institutional database, real OIDC/JWT keys, hosted-model credentials, WebRTC signaling, secret management, or production observability. The College A connector remains deterministic demo data. Those integrations need the actual institution contracts, security approvals, and deployment secrets rather than invented placeholders. PostgreSQL conversion remains deliberately deferred until the SQLite-backed build has been accepted.
 
 ## Local flow
 
 1. Install the project dependencies in a Python 3.12 environment.
-2. Run make test and make compile.
-3. Run make run.
-4. Send a development request with Authorization: Bearer dev-token, X-Demo-Principal, and X-Demo-Role.
-5. Serve apps/web from the same origin or use the API routes directly.
+2. Run `make db-init` to create the local SQLite control database.
+3. Run `make test` and `make compile`.
+4. Run `make run`.
+5. Run `make smoke` against the running API.
+6. Send a development request with Authorization: Bearer dev-token, X-Demo-Principal, and X-Demo-Role.
+7. Serve apps/web from the same origin or use the API routes directly.
