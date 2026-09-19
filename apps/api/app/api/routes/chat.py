@@ -1,10 +1,12 @@
-"""Text chat route."""
+"""Text chat routes, including a channel-compatible SSE response."""
 
 from __future__ import annotations
 
+import json
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..dependencies import principal_from_request, runtime_from_request
@@ -30,26 +32,75 @@ class ChatBody(BaseModel):
 router = APIRouter(prefix="/v1/chat", tags=["chat"])
 
 
-@router.post("")
-async def chat(body: ChatBody, request: Request) -> dict[str, object]:
-    runtime = runtime_from_request(request)
-    principal = principal_from_request(request)
-    if not principal.authenticated:
-        raise HTTPException(status_code=401, detail="authentication is required")
+def _build_request(body: ChatBody, request: Request, principal) -> ChatRequest:
     try:
         channel = InteractionChannel(body.channel)
         request_id = body.request_id or request.headers.get("x-request-id") or f"req-{uuid4().hex}"
-        domain_request = ChatRequest(
-            request_id=request_id, principal_id=principal.principal_id, prompt=body.prompt,
+        return ChatRequest(
+            request_id=request_id,
+            principal_id=principal.principal_id,
+            prompt=body.prompt,
             institution_scope=InstitutionScope(
                 college_id=body.institution_scope.college_id,
-                department_id=body.institution_scope.department_id, batch_id=body.institution_scope.batch_id,
-            ), source_ids=tuple(body.source_ids), conversation_id=body.conversation_id, channel=channel,
+                department_id=body.institution_scope.department_id,
+                batch_id=body.institution_scope.batch_id,
+            ),
+            source_ids=tuple(body.source_ids),
+            conversation_id=body.conversation_id,
+            channel=channel,
         )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _require_principal(request: Request):
+    principal = principal_from_request(request)
+    if not principal.authenticated:
+        raise HTTPException(status_code=401, detail="authentication is required")
+    return principal
+
+
+async def _stream_answer(body: ChatBody, request: Request, principal) -> StreamingResponse:
+    runtime = runtime_from_request(request)
+    domain_request = _build_request(body, request, principal)
     answer = await runtime.assistant.ask(domain_request, principal)
+    payload = json.dumps(answer.as_dict(), separators=(",", ":"), ensure_ascii=False)
+
+    async def events():
+        # Keep the deterministic local envelope in one chunk. A provider-backed
+        # implementation may yield additional answer chunks before the final
+        # done event without changing the wire format.
+        yield f"event: answer\ndata: {payload}\n\nevent: done\ndata: {{}}\n\n"
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@router.post("", response_model=None)
+async def chat(body: ChatBody, request: Request, stream: bool = False) -> dict[str, object] | StreamingResponse:
+    principal = _require_principal(request)
+    accepts_stream = "text/event-stream" in request.headers.get("accept", "").lower()
+    if stream or accepts_stream:
+        return await _stream_answer(body, request, principal)
+    runtime = runtime_from_request(request)
+    answer = await runtime.assistant.ask(_build_request(body, request, principal), principal)
     return answer.as_dict()
+
+
+@router.post("/stream")
+async def chat_stream(body: ChatBody, request: Request) -> StreamingResponse:
+    """Return the same policy-bound answer through a stable SSE envelope.
+
+    The current local executor is bounded and deterministic, so it emits one
+    complete answer event followed by ``done``. A future model provider can
+    yield additional answer events without changing the route contract or
+    bypassing authorization and audit execution.
+    """
+
+    return await _stream_answer(body, request, _require_principal(request))
 
 
 __all__ = ["router"]
