@@ -91,6 +91,8 @@ paths:
       description: |
         The same request supports a normal JSON response or an SSE stream.
         Set `stream=true` or send `Accept: text/event-stream` for streaming.
+        The explicit `/v1/chat/stream` route is also available for clients that
+        prefer a dedicated streaming endpoint.
 
         The application may use approved institutional semantic tools and/or
         public web search according to authorization and data-policy rules.
