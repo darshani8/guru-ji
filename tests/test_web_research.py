@@ -11,6 +11,7 @@ from app.web_research.extractor import AllowlistedHttpExtractor, WebExtractionUn
 from app.web_research.research_service import PublicWebResearchService
 from app.web_research.search import TavilyHttpSearchProvider, WebSearchResult
 from app.web_research.untrusted_content import wrap_untrusted
+from app.orchestration.plan_validator import is_public_web_prompt
 
 
 class _FakeProvider:
@@ -136,8 +137,25 @@ class WebResearchRouteTests(unittest.TestCase):
             json={"query": "education policy"},
         )
         self.assertEqual(response.status_code, 503)
-        self.assertEqual(response.json()["detail"], "public-web research is not configured")
+        self.assertEqual(response.json()["error"]["message"], "public-web research is not configured")
         self.assertTrue(any(event.event_type == "web.research" for event in app.state.runtime.store.recent_audit(10)))
+
+    def test_explicit_web_chat_intent_never_falls_back_to_institution_tools(self):
+        self.assertTrue(is_public_web_prompt("Please search the web for official education guidance"))
+        self.assertFalse(is_public_web_prompt("What is the current attendance summary?"))
+        response = TestClient(app).post(
+            "/v1/chat",
+            headers=self.headers,
+            json={
+                "prompt": "Please search the web for official education guidance",
+                "institution_scope": {"college_id": "college_a"},
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["status"], "refused")
+        self.assertEqual(payload["refusal_reason"], "Public-web research is not configured.")
+        self.assertEqual(payload["tool_names"], ["web.search", "web.extract"])
 
 
 if __name__ == "__main__":
