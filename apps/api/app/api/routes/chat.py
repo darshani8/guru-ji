@@ -67,9 +67,10 @@ async def _stream_answer(body: ChatBody, request: Request, principal) -> Streami
     payload = json.dumps(answer.as_dict(), separators=(",", ":"), ensure_ascii=False)
 
     async def events():
-        # Keep the deterministic local envelope in one chunk. A provider-backed
-        # implementation may yield additional answer chunks before the final
-        # done event without changing the wire format.
+        # Keep the bounded answer envelope in one chunk. A future transport
+        # optimization may yield additional answer chunks before the final
+        # done event without changing the wire format; authorization, audit,
+        # and provenance remain completed before streaming begins.
         yield f"event: answer\ndata: {payload}\n\nevent: done\ndata: {{}}\n\n"
 
     return StreamingResponse(
@@ -94,10 +95,10 @@ async def chat(body: ChatBody, request: Request, stream: bool = False) -> dict[s
 async def chat_stream(body: ChatBody, request: Request) -> StreamingResponse:
     """Return the same policy-bound answer through a stable SSE envelope.
 
-    The current local executor is bounded and deterministic, so it emits one
-    complete answer event followed by ``done``. A future model provider can
-    yield additional answer events without changing the route contract or
-    bypassing authorization and audit execution.
+    The current answer envelope is bounded, so it emits one complete answer
+    event followed by ``done``. The optional model provider is resolved before
+    streaming; future transport chunking must not bypass authorization, audit,
+    provenance, or the final response contract.
     """
 
     return await _stream_answer(body, request, _require_principal(request))
