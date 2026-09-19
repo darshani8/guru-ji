@@ -247,6 +247,18 @@ class RemoteHttpConnector:
             "tool_name": tool_name,
             "arguments": arguments,
             "request_id": context.request_id,
+            "principal": {
+                "id": context.principal_id,
+                "type": context.principal_type.value if context.principal_type else None,
+            },
+            "institution_scope": (
+                {
+                    "college_id": context.institution_scope.college_id,
+                    "department_id": context.institution_scope.department_id,
+                    "batch_id": context.institution_scope.batch_id,
+                }
+                if context.institution_scope else None
+            ),
             "limits": {
                 "max_duration_ms": context.limits.max_duration_ms,
                 "max_rows": context.limits.max_rows,
