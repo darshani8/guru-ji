@@ -40,6 +40,36 @@ class RouteContractTests(unittest.TestCase):
         response = self.client.get("/v1/sources", headers=self.headers)
         self.assertEqual(response.status_code, 403)
 
+    def test_chat_stream_returns_answer_and_done_events(self):
+        with self.client.stream(
+            "POST",
+            "/v1/chat/stream",
+            headers=self.headers,
+            json={"prompt": "What is the current attendance summary?", "institution_scope": {"college_id": "college_a"}},
+        ) as response:
+            self.assertEqual(response.status_code, 200)
+            body = response.read().decode("utf-8")
+        self.assertIn("event: answer", body)
+        self.assertIn('"status":"complete"', body)
+        self.assertIn("event: done", body)
+
+        query_response = self.client.post(
+            "/v1/chat?stream=true",
+            headers=self.headers,
+            json={"prompt": "Give me the institutional overview", "institution_scope": {"college_id": "college_a"}},
+        )
+        self.assertEqual(query_response.status_code, 200)
+        self.assertIn("text/event-stream", query_response.headers["content-type"])
+        self.assertIn("event: done", query_response.text)
+
+        accept_response = self.client.post(
+            "/v1/chat",
+            headers={**self.headers, "Accept": "text/event-stream"},
+            json={"prompt": "Are the approved sources healthy?", "institution_scope": {"college_id": "college_a"}},
+        )
+        self.assertEqual(accept_response.status_code, 200)
+        self.assertIn("event: answer", accept_response.text)
+
 
 if __name__ == "__main__":
     unittest.main()
