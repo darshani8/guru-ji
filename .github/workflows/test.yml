@@ -1,0 +1,41 @@
+name: test
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.6.x"
+          enable-cache: true
+      - name: Install dependencies
+        run: uv sync --extra dev
+      - name: Run unit and route tests
+        env:
+          PYTHONPATH: apps/api
+          CONTROL_DATABASE_URL: :memory:
+        run: uv run python -m unittest discover -s tests -p 'test_*.py' -q
+      - name: Compile Python sources
+        run: uv run python -m compileall -q apps/api tests scripts
+      - name: Validate OpenAPI contract
+        env:
+          PYTHONPATH: apps/api
+        run: uv run python scripts/validate_openapi.py
+      - name: Check repository hygiene
+        run: uv run python scripts/repository_hygiene.py

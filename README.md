@@ -1,110 +1,42 @@
 # Guru Ji
 
-Guru Ji is a private BGS institutional AI assistant. It gives authorized users one ChatGPT-style interface for asking questions across approved Finance, College, and MATS sources while keeping those source databases separate and read-only.
+Guru Ji is a federated, read-only institutional AI assistant reference implementation. It separates identity, policy, approved source connectors, semantic tools, bounded orchestration, citations, warnings, and audit metadata.
 
-The interface will support:
+## Current state
 
-- Text chat with streamed responses.
-- A focused, responsive conversation UI inspired by modern AI assistants, with an original Guru Ji visual identity.
-- Browser voice conversations with interruption and playback support.
-- Local voice mode as an optional privacy- and cost-conscious path.
-- Current public-web research with citations.
-- Institutional briefings such as “what is going on today?”.
-- Explicit source status, freshness, partial-result warnings, and audit records.
+This repository contains a complete local vertical slice rather than only architecture documents. Development uses deterministic College A demo data, while deployment can register a reviewed institution-local semantic connector over HTTPS. The application-owned control plane uses SQLite locally or PostgreSQL in deployment environments to persist audit metadata, source-health snapshots, and briefing envelopes. The SQLite migration in `migrations/001_control_plane.sql` and the PostgreSQL adapter use the same control-plane schema contract and initialize idempotently. An opt-in local Ollama provider can rewrite already-approved answers; the application preserves provenance and falls back to deterministic wording when the provider is unavailable or changes numeric facts.
 
-## Product boundary
+Included: explicit principals and College/Department/Batch scope, deny-by-default authorization, source and tool registries, data classification and redaction, query limits, a read-only connector boundary, bounded text orchestration, citations and partial/refused outcomes, explicit DENIED audit outcomes, development identity headers, durable local control-plane storage, a PostgreSQL deployment adapter, request-size/timeout/rate-limit guards, security headers, stable HTTP error envelopes, voice-session lifecycle, an opt-in public-web research route and chat path, a small browser client, CI/security workflows, tests, and local Docker/Make files.
 
-Guru Ji is a controlled read-only assistant, not an unrestricted autonomous agent. The model may propose a registered tool call, but application code decides whether the authenticated user is allowed to run it.
+Public-web research is an explicit `POST /v1/research/web` operation or an explicit chat phrase such as `search the web`. It is disabled by default and requires `ask:read_only`. When enabled with `GURU_WEB_SEARCH_PROVIDER=tavily`, the adapter sends only the bounded query, result limit, and configured official-domain allowlist to the provider. Page retrieval is separate, follows no redirects, enforces response/time limits, strips non-visible HTML, returns citations and retrieval timestamps, and marks all fetched text as untrusted data. Provider credentials and raw prompts are not persisted in audit records. Ordinary institutional chat never silently expands into web search.
 
-Institutional data access uses source-specific read-only connectors. The first implementation uses semantic tools such as `get_attendance_summary`, `get_daily_fee_collection`, and `get_source_health` instead of allowing a model to execute arbitrary SQL.
+The current demo tools expose College-level aggregates only. Department- and Batch-scoped requests are deliberately refused until a connector declares narrower-scope support. Explicit source IDs are validated against the requested College before execution.
 
-The application-owned control database stores users, scopes, source metadata, policy versions, conversations, usage, health, and audit events. It is not a replacement for the institutional databases.
+The implementation status document in `docs/IMPLEMENTATION_STATUS.md` records what is intentionally not enabled. The repository includes a JWKS-backed OIDC/JWT verification boundary, an institution-local semantic connector contract (`GET /v1/health` and `POST /v1/execute`), and an opt-in local Ollama wording adapter. It still needs the institution's real connector service, issuer configuration, model deployment, and deployment secrets. Live college databases, hosted-model credentials, WebRTC signaling, secrets management, and production observability require real contracts and approvals; this repository does not invent them. Production configuration rejects the development identity, deterministic demo data, and SQLite control-plane defaults.
 
-## Technology direction
+## Validate locally
 
-- Python and FastAPI for the versioned API.
-- Pydantic for typed request, response, and tool contracts.
-- SQLAlchemy and vendor drivers for heterogeneous read-only database connectors.
-- PostgreSQL for control-plane data.
-- A provider adapter for hosted and local language models.
-- Ollama as an optional local model gateway.
-- A search-provider adapter for public web research.
-- Server-Sent Events for streamed text responses.
-- WebRTC or a local WebSocket gateway for voice.
-- OpenTelemetry and Sentry-compatible error monitoring.
+Use Python 3.12 or newer within the supported range.
 
-## Interaction model
+    make ci
+    make test
+    make compile
+    make validate-openapi
+    make hygiene
 
-Chat and voice use the same internal execution core:
+With dependencies installed, run the API with:
 
-```
-text or audio
-    -> authenticated principal
-    -> deterministic authorization
-    -> typed tool plan
-    -> approved read-only connectors/search
-    -> provenance-aware results
-    -> cited answer and audit event
-```
+    make run
 
-Voice is a channel, not a second business-logic implementation. The voice session must use the same user scope, tools, redaction, limits, and audit rules as text chat.
+The local development identity uses `Authorization: Bearer dev-token` and headers `X-Demo-Principal`, `X-Demo-Role`, and `X-Demo-College`. The mounted browser client is available from the API root. Request boundaries can be tuned with `GURU_MAX_REQUEST_BYTES`, `GURU_REQUEST_TIMEOUT_SECONDS`, `GURU_RATE_LIMIT_REQUESTS`, and `GURU_RATE_LIMIT_WINDOW_SECONDS`.
 
-## Security rules
+## Example request
 
-1. No public database ports.
-2. No write credentials for institutional sources.
-3. No permanent model provider key in the browser.
-4. No arbitrary model-generated SQL in the default path.
-5. Authorization runs outside the model.
-6. Webpages, database text, logs, and uploaded documents are untrusted data.
-7. Secrets and sensitive records are excluded from prompts and logs.
-8. Source failures and incomplete totals are visible to the user.
-9. Future external write actions require explicit human confirmation.
+    curl -X POST http://localhost:8000/v1/chat \
+      -H 'Authorization: Bearer dev-token' \
+      -H 'X-Demo-Principal: student-1' \
+      -H 'X-Demo-Role: student' \
+      -H 'Content-Type: application/json' \
+      -d '{"prompt":"What is the current attendance summary?","institution_scope":{"college_id":"college_a"}}'
 
-## Guided build protocol
-
-This repository is built incrementally. Each implementation step follows this sequence:
-
-1. Select exactly one file.
-2. Write or modify only that file.
-3. Validate the file and explain its complete purpose, code, and related concepts.
-4. Commit and push that file to `main`.
-5. Stop and wait for the next instruction.
-
-No second implementation file is started until the previous step is explained and accepted.
-
-## Delivery phases
-
-### Phase 1 — foundation
-
-Create the API skeleton, settings, typed domain models, authentication boundary, policy boundary, control-database boundary, and health endpoint.
-
-### Phase 2 — read-only tools
-
-Add the source registry, connector interface, one institution connector, semantic tools, query limits, provenance, and audit events.
-
-### Phase 3 — ChatGPT-style chat UI
-
-Add the web client with conversation history, streamed text, source citations, warning states, responsive layout, keyboard navigation, and accessible loading/error states.
-
-### Phase 4 — voice
-
-Add voice-session creation, microphone permissions, WebRTC or local gateway transport, speech events, interruption handling, playback state, transcript display, and voice-specific telemetry.
-
-### Phase 5 — web research and briefings
-
-Add public search, extraction, citations, daily briefing workflows, source health, freshness, and partial-result reporting.
-
-### Phase 6 — production hardening
-
-Add institution-local connectors, mTLS, rate limits, quotas, secret management, backups, load tests, security tests, and operational runbooks.
-
-## Repository documents
-
-- `ARCHITECTURE.md` — system design and safety invariants.
-- `FOLDER_STRUCTURE.md` — proposed implementation layout.
-- `openapi.yaml` — versioned HTTP contract.
-
-## Current status
-
-The repository currently contains the architecture documents. The next code step is to create the minimal project scaffold without connecting to any institutional database or external model provider.
+No production deployment or external institutional mutation is performed by this build workflow.

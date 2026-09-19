@@ -1,25 +1,23 @@
-"""Health routes for the Guru Ji API."""
+from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 
-SERVICE_NAME = "guru-ji-api"
-SERVICE_VERSION = "0.1.0"
 
 router = APIRouter(prefix="/v1/health", tags=["health"])
 
 
-@router.get(
-    "/live",
-    summary="Check whether the API process is running",
-)
-async def liveness() -> dict[str, str]:
-    """Return process-level liveness without checking external dependencies."""
+@router.get("/live", summary="Check whether the API process is running")
+async def liveness(request: Request) -> dict[str, str]:
+    settings = request.app.state.runtime.settings
+    return {"service": settings.app_name, "status": "ok", "version": settings.version}
 
-    return {
-        "service": SERVICE_NAME,
-        "status": "ok",
-        "version": SERVICE_VERSION,
-    }
+
+@router.get("/ready", summary="Check whether the local runtime is ready")
+async def readiness(request: Request) -> dict[str, object]:
+    runtime = request.app.state.runtime
+    database_ok = runtime.store.ping()
+    status = "ready" if database_ok else "not_ready"
+    return {"service": runtime.settings.app_name, "status": status, "version": runtime.settings.version, "sources": len(runtime.sources.all()), "tools": len(runtime.tools.all()), "database": runtime.store.backend_name, "database_ok": database_ok}
 
 
 __all__ = ["router"]
