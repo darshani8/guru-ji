@@ -123,6 +123,7 @@ class SqliteControlStore:
                 tool_names_json TEXT NOT NULL,
                 outcome TEXT NOT NULL,
                 redactions_json TEXT NOT NULL,
+                decision_metadata_json TEXT NOT NULL DEFAULT '{}',
                 duration_ms INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_audit_events_occurred_at
@@ -161,6 +162,13 @@ class SqliteControlStore:
             except sqlite3.OperationalError as exc:
                 if "duplicate column name" not in str(exc):
                     raise
+        try:
+            self._connection.execute(
+                "ALTER TABLE audit_events ADD COLUMN decision_metadata_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        except sqlite3.OperationalError as exc:
+            if "duplicate column name" not in str(exc):
+                raise
 
         self._connection.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
@@ -183,11 +191,11 @@ class SqliteControlStore:
         with self._lock:
             self._connection.execute(
                 """
-                INSERT OR REPLACE INTO audit_events(
+                INSERT INTO audit_events(
                     event_id, event_type, request_id, occurred_at, principal_id,
                     endpoint, conversation_id, source_ids_json, tool_names_json,
-                    outcome, redactions_json, duration_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    outcome, redactions_json, decision_metadata_json, duration_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     event.event_id,
@@ -201,6 +209,7 @@ class SqliteControlStore:
                     self._json(event.tool_names),
                     event.outcome.value,
                     self._json(event.redactions_applied),
+                    self._json(dict(event.decision_metadata)),
                     event.duration_ms,
                 ),
             )
@@ -226,6 +235,7 @@ class SqliteControlStore:
                 tool_names=tuple(json.loads(row["tool_names_json"])),
                 outcome=AuditOutcome(row["outcome"]),
                 redactions_applied=tuple(json.loads(row["redactions_json"])),
+                decision_metadata=tuple(json.loads(row["decision_metadata_json"]).items()),
                 duration_ms=row["duration_ms"],
             )
             for row in rows
@@ -379,10 +389,12 @@ class PostgresControlStore:
                 tool_names_json TEXT NOT NULL,
                 outcome TEXT NOT NULL,
                 redactions_json TEXT NOT NULL,
+                decision_metadata_json TEXT NOT NULL DEFAULT '{}',
                 duration_ms INTEGER
             )
             """,
             "CREATE INDEX IF NOT EXISTS idx_audit_events_occurred_at ON audit_events(occurred_at DESC)",
+            "ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS decision_metadata_json TEXT NOT NULL DEFAULT '{}'",
             """
             CREATE TABLE IF NOT EXISTS source_health (
                 source_id TEXT PRIMARY KEY,
@@ -445,20 +457,8 @@ class PostgresControlStore:
                     INSERT INTO audit_events(
                         event_id, event_type, request_id, occurred_at, principal_id,
                         endpoint, conversation_id, source_ids_json, tool_names_json,
-                        outcome, redactions_json, duration_ms
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (event_id) DO UPDATE SET
-                        event_type = EXCLUDED.event_type,
-                        request_id = EXCLUDED.request_id,
-                        occurred_at = EXCLUDED.occurred_at,
-                        principal_id = EXCLUDED.principal_id,
-                        endpoint = EXCLUDED.endpoint,
-                        conversation_id = EXCLUDED.conversation_id,
-                        source_ids_json = EXCLUDED.source_ids_json,
-                        tool_names_json = EXCLUDED.tool_names_json,
-                        outcome = EXCLUDED.outcome,
-                        redactions_json = EXCLUDED.redactions_json,
-                        duration_ms = EXCLUDED.duration_ms
+                        outcome, redactions_json, decision_metadata_json, duration_ms
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         event.event_id,
@@ -472,6 +472,7 @@ class PostgresControlStore:
                         self._json(event.tool_names),
                         event.outcome.value,
                         self._json(event.redactions_applied),
+                        self._json(dict(event.decision_metadata)),
                         event.duration_ms,
                     ),
                 )
@@ -497,6 +498,7 @@ class PostgresControlStore:
                 tool_names=tuple(json.loads(row["tool_names_json"])),
                 outcome=AuditOutcome(row["outcome"]),
                 redactions_applied=tuple(json.loads(row["redactions_json"])),
+                decision_metadata=tuple(json.loads(row["decision_metadata_json"]).items()),
                 duration_ms=row["duration_ms"],
             )
             for row in rows
