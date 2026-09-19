@@ -37,6 +37,9 @@ search = [
 voice = [
     "aiortc>=1.10,<2.0",
 ]
+llm = [
+    "litellm>=1.60,<2.0",
+]
 
 [tool.uv]
 # The repository is an application monorepo, not an installable library yet.
@@ -58,7 +61,7 @@ indent-style = "space"
 [tool.pytest.ini_options]
 addopts = "-ra"
 asyncio_mode = "auto"
-pythonpath = ["apps/api"]
+pythonpath = ["apps/api", "apps"]
 testpaths = ["tests"]
 
 [tool.mypy]
