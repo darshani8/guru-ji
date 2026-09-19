@@ -20,6 +20,7 @@ from .api.routes.voice import router as voice_router
 from .config.settings import AppSettings
 from .domain.errors import GuruJiError
 from .middleware.request_id import RequestIdMiddleware
+from .middleware.request_size import RequestSizeLimitMiddleware
 
 settings = AppSettings.from_env()
 
@@ -33,6 +34,7 @@ app.state.runtime = build_runtime(settings)
 atexit.register(app.state.runtime.store.close)
 app.add_exception_handler(GuruJiError, guruji_error_handler)
 app.add_middleware(RequestIdMiddleware)
+app.add_middleware(RequestSizeLimitMiddleware, max_bytes=settings.max_request_bytes)
 if settings.allowed_origins:
     app.add_middleware(CORSMiddleware, allow_origins=list(settings.allowed_origins), allow_credentials=True, allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["*"])
 app.include_router(health_router)
