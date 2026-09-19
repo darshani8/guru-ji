@@ -18,6 +18,11 @@ class AppSettings:
     oidc_audience: str | None = None
     oidc_jwks_url: str | None = None
     oidc_algorithms: tuple[str, ...] = ("RS256",)
+    model_provider: str = "deterministic"
+    ollama_base_url: str | None = None
+    ollama_model_id: str = "llama3.1:8b"
+    model_timeout_seconds: float = 8.0
+    model_max_tokens: int = 800
     max_request_bytes: int = 1_000_000
 
     @classmethod
@@ -37,12 +42,25 @@ class AppSettings:
             oidc_audience=os.getenv("GURU_OIDC_AUDIENCE") or None,
             oidc_jwks_url=os.getenv("GURU_OIDC_JWKS_URL") or None,
             oidc_algorithms=tuple(item.strip() for item in os.getenv("GURU_OIDC_ALGORITHMS", "RS256").split(",") if item.strip()),
+            model_provider=os.getenv("GURU_MODEL_PROVIDER", "deterministic").strip().lower(),
+            ollama_base_url=os.getenv("GURU_OLLAMA_BASE_URL") or None,
+            ollama_model_id=os.getenv("GURU_OLLAMA_MODEL_ID", "llama3.1:8b").strip(),
+            model_timeout_seconds=float(os.getenv("GURU_MODEL_TIMEOUT_SECONDS", "8")),
+            model_max_tokens=int(os.getenv("GURU_MODEL_MAX_TOKENS", "800")),
             max_request_bytes=int(os.getenv("GURU_MAX_REQUEST_BYTES", "1000000")),
         )
 
     def ensure_safe_for_production(self) -> None:
         if self.max_request_bytes <= 0:
             raise ValueError("GURU_MAX_REQUEST_BYTES must be positive")
+        if self.model_provider not in {"deterministic", "ollama"}:
+            raise ValueError("GURU_MODEL_PROVIDER must be deterministic or ollama")
+        if self.model_timeout_seconds <= 0:
+            raise ValueError("GURU_MODEL_TIMEOUT_SECONDS must be positive")
+        if self.model_max_tokens <= 0:
+            raise ValueError("GURU_MODEL_MAX_TOKENS must be positive")
+        if self.model_provider == "ollama" and not self.ollama_base_url:
+            raise ValueError("GURU_OLLAMA_BASE_URL is required when GURU_MODEL_PROVIDER=ollama")
         if self.environment != "production":
             return
         if self.dev_bearer_token == "dev-token":
