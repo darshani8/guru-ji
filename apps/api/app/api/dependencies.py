@@ -10,7 +10,7 @@ from ..config.source_registry import SourceDefinition, SourceRegistry
 from ..connectors.college_a.connector import CollegeADemoConnector
 from ..connectors.registry import ConnectorRegistry
 from ..orchestration.assistant_service import AssistantService
-from ..persistence.database import InMemoryControlStore, SqliteControlStore
+from ..persistence.database import InMemoryControlStore, PostgresControlStore, SqliteControlStore
 from ..policy.query_limits import QueryLimits
 from ..tools.college_tools import COLLEGE_TOOLS
 from ..tools.health_tools import HEALTH_TOOLS
@@ -18,7 +18,7 @@ from ..tools.registry import ToolRegistry
 from ..voice.session_manager import VoiceSessionManager
 
 
-ControlStore = InMemoryControlStore | SqliteControlStore
+ControlStore = InMemoryControlStore | PostgresControlStore | SqliteControlStore
 
 
 @dataclass(slots=True)
@@ -54,7 +54,9 @@ def _build_store(settings: AppSettings) -> ControlStore:
         return InMemoryControlStore()
     if database_url.startswith("sqlite://") or database_url == ":memory:":
         return SqliteControlStore(database_url)
-    raise ValueError("CONTROL_DATABASE_URL must use sqlite:// for the local runtime")
+    if database_url.startswith(("postgresql://", "postgres://")):
+        return PostgresControlStore(database_url)
+    raise ValueError("CONTROL_DATABASE_URL must use sqlite://, postgresql://, or postgres://")
 
 
 def build_runtime(settings: AppSettings | None = None) -> Runtime:
