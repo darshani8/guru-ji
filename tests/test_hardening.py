@@ -30,6 +30,16 @@ class HardeningTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "GURU_ALLOWED_ORIGINS"):
             settings.ensure_safe_for_production()
 
+    def test_production_rejects_missing_oidc_configuration(self):
+        settings = AppSettings(
+            environment="production",
+            dev_bearer_token="not-the-default-token",
+            allowed_origins=("https://guru.example.test",),
+            control_database_url="postgresql://user:pass@localhost/guru",
+        )
+        with self.assertRaisesRegex(ValueError, "OIDC issuer"):
+            settings.ensure_safe_for_production()
+
     def test_backend_selection_keeps_memory_and_sqlite_explicit(self):
         self.assertEqual(_build_store(AppSettings(control_database_url=None)).backend_name, "memory")
         sqlite = _build_store(AppSettings(control_database_url=":memory:"))
