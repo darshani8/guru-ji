@@ -18,7 +18,6 @@ import httpx
 from ..domain.provenance import Provenance, SourceKind, Warning
 from ..domain.results import ResultStatus, ToolResult
 from ..domain.source_health import Freshness, SourceHealth, SourceHealthStatus
-from ..policy.query_limits import QueryLimits
 from .base import ConnectorContext, unavailable_result
 
 
