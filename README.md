@@ -10,7 +10,7 @@ Included: explicit principals and College/Department/Batch scope, deny-by-defaul
 
 The current demo tools expose College-level aggregates only. Department- and Batch-scoped requests are deliberately refused until a connector declares narrower-scope support. Explicit source IDs are validated against the requested College before execution.
 
-The implementation status document in docs/IMPLEMENTATION_STATUS.md records what is intentionally not enabled. Production OIDC/JWT validation, live college databases, hosted-model keys, WebRTC signaling, secrets management, and production observability still require real contracts and approvals; this repository does not invent them. Production configuration rejects the development identity and SQLite control-plane defaults.
+The implementation status document in docs/IMPLEMENTATION_STATUS.md records what is intentionally not enabled. The repository now includes a JWKS-backed OIDC/JWT verification boundary with issuer, audience, expiry, and algorithm checks, but it still needs the institution's real issuer configuration and deployment secrets. Live college databases, hosted-model keys, WebRTC signaling, secrets management, and production observability require real contracts and approvals; this repository does not invent them. Production configuration rejects the development identity and SQLite control-plane defaults.
 
 ## Validate locally
 
