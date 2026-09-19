@@ -1,0 +1,473 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0f2d45">
+  <meta name="description" content="Guru Ji institutional intelligence — standalone interface prototype">
+  <title>Guru Ji — Standalone UI Prototype</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --navy: #0f2d45;
+      --navy-2: #163d5c;
+      --ink: #15324a;
+      --ink-soft: #2d4a62;
+      --muted: #71879b;
+      --line: #dce6ee;
+      --line-soft: #edf2f6;
+      --canvas: #f4f8fb;
+      --surface: #ffffff;
+      --teal: #168296;
+      --teal-dark: #0d6877;
+      --teal-pale: #e8f5f6;
+      --orange: #d77a37;
+      --orange-pale: #fff2e5;
+      --green: #18834e;
+      --green-pale: #e5f6ed;
+      --amber: #a96610;
+      --amber-pale: #fff4df;
+      --red: #ba3d36;
+      --red-pale: #fcede9;
+      --purple: #6958b8;
+      --purple-pale: #f0edfc;
+      --shadow: 0 18px 50px rgba(16, 49, 75, .08);
+      --shadow-soft: 0 8px 24px rgba(16, 49, 75, .06);
+      --radius: 18px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      min-width: 320px;
+      color: var(--ink);
+      background: var(--canvas);
+      font: 14px/1.5 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    button, input, select, textarea { font: inherit; }
+    button, a { -webkit-tap-highlight-color: transparent; }
+    button { cursor: pointer; }
+    a { color: inherit; }
+    .sr-only {
+      position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
+    }
+
+    .app-shell { display: flex; min-height: 100vh; }
+    .sidebar {
+      position: fixed; inset: 0 auto 0 0; z-index: 5; width: 252px;
+      display: flex; flex-direction: column; padding: 28px 18px;
+      color: #dce8f1; background: linear-gradient(180deg, var(--navy), #0b263c);
+    }
+    .brand { display: flex; align-items: center; gap: 12px; padding: 0 10px 34px; }
+    .brand-mark {
+      display: grid; place-items: center; width: 42px; height: 42px; flex: none;
+      color: #fff; background: linear-gradient(135deg, #f1ae6d, var(--orange));
+      border-radius: 14px; font-size: 13px; font-weight: 900; letter-spacing: -.06em;
+      box-shadow: 0 8px 20px rgba(215, 122, 55, .2);
+    }
+    .brand strong { display: block; color: #fff; font-size: 17px; letter-spacing: -.03em; }
+    .brand span { display: block; margin-top: 1px; color: #9db4c8; font-size: 10px; }
+    .nav { display: grid; gap: 7px; }
+    .nav-item {
+      display: flex; align-items: center; gap: 11px; padding: 11px 12px;
+      color: #9db4c8; border: 1px solid transparent; border-radius: 11px;
+      background: transparent; text-decoration: none; font-weight: 700; font-size: 12px;
+      transition: background .18s, color .18s, transform .18s;
+    }
+    .nav-item:hover, .nav-item.active { color: #fff; background: rgba(255,255,255,.1); border-color: rgba(255,255,255,.08); }
+    .nav-item:hover { transform: translateX(2px); }
+    .nav-icon { width: 18px; color: #8bd0d7; text-align: center; font-size: 16px; }
+    .sidebar-note {
+      display: flex; gap: 10px; margin: 30px 8px 0; padding: 13px 10px;
+      background: rgba(255,255,255,.07); border: 1px solid rgba(255,255,255,.09); border-radius: 13px;
+      font-size: 11px;
+    }
+    .sidebar-note strong { display: block; color: #fff; font-size: 11px; }
+    .sidebar-note p { margin: 3px 0 0; color: #9db4c8; line-height: 1.45; }
+    .pulse { width: 8px; height: 8px; flex: none; margin-top: 5px; border-radius: 99px; background: #70e0a0; box-shadow: 0 0 0 5px rgba(112,224,160,.1); }
+    .sidebar-footer { margin-top: auto; padding: 0 10px; color: #9db4c8; font-size: 11px; line-height: 1.65; }
+    .sidebar-footer span { color: #627f97; }
+
+    .main-content { width: calc(100% - 252px); max-width: 1540px; margin-left: 252px; padding: 28px 44px 38px; }
+    .topbar { display: flex; justify-content: space-between; align-items: flex-start; gap: 18px; margin-bottom: 28px; }
+    .eyebrow { margin: 0 0 5px; color: var(--muted); font-size: 10px; font-weight: 850; letter-spacing: .14em; text-transform: uppercase; }
+    .eyebrow.accent { color: var(--teal); }
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { margin-bottom: 0; color: var(--ink); font-size: 26px; letter-spacing: -.045em; }
+    h2 { margin-bottom: 0; color: var(--ink); font-size: 20px; letter-spacing: -.04em; }
+    h3 { margin-bottom: 4px; font-size: 14px; letter-spacing: -.02em; }
+    .top-actions { display: flex; align-items: center; gap: 10px; }
+    .prototype-badge, .scope-chip, .status-badge {
+      display: inline-flex; align-items: center; gap: 5px; padding: 6px 10px;
+      border-radius: 99px; font-size: 10px; font-weight: 850; white-space: nowrap;
+    }
+    .prototype-badge { color: var(--amber); background: var(--amber-pale); border: 1px solid #f3ddbd; }
+    .scope-chip { color: var(--teal-dark); background: var(--teal-pale); }
+    .status-badge { color: var(--muted); background: #edf2f6; }
+    .status-badge.ok { color: var(--green); background: var(--green-pale); }
+    .status-badge.neutral { color: var(--amber); background: var(--amber-pale); }
+    .icon-button {
+      display: grid; place-items: center; width: 35px; height: 35px; color: var(--ink-soft);
+      background: #fff; border: 1px solid var(--line); border-radius: 10px; font-size: 18px;
+      transition: border-color .18s, transform .18s;
+    }
+    .icon-button:hover { border-color: #9bcbd0; transform: rotate(15deg); }
+
+    .panel { background: var(--surface); border: 1px solid rgba(220,230,238,.9); border-radius: var(--radius); box-shadow: var(--shadow-soft); }
+    .hero {
+      position: relative; display: flex; justify-content: space-between; min-height: 286px;
+      margin-bottom: 18px; padding: 38px 44px; overflow: hidden;
+      background: linear-gradient(120deg, #fff 0%, #fff 54%, #edf9f9 100%);
+    }
+    .hero::after { content: ""; position: absolute; right: 26%; bottom: -110px; width: 300px; height: 220px; border-radius: 50%; background: rgba(215,122,55,.05); filter: blur(2px); }
+    .hero-copy { position: relative; z-index: 1; max-width: 600px; }
+    .hero h2 { max-width: 530px; margin-bottom: 15px; font-size: 33px; line-height: 1.1; }
+    .hero-copy > p:not(.eyebrow) { max-width: 550px; margin-bottom: 23px; color: var(--muted); }
+    .hero-actions { display: flex; flex-wrap: wrap; gap: 10px; }
+    .button {
+      border: 0; border-radius: 10px; padding: 10px 15px; color: var(--ink);
+      font-size: 12px; font-weight: 800; transition: transform .16s, box-shadow .16s, background .16s;
+    }
+    .button:hover { transform: translateY(-1px); box-shadow: 0 8px 17px rgba(16,49,75,.12); }
+    .button.primary { color: #fff; background: var(--teal); }
+    .button.primary:hover { background: var(--teal-dark); }
+    .button.secondary { color: var(--teal-dark); background: var(--teal-pale); }
+    .button.ghost { color: var(--ink-soft); background: #f3f6f8; }
+    .hero-orbit { position: relative; z-index: 1; width: 270px; height: 215px; margin: 0 26px 0 12px; }
+    .orbit-ring { position: absolute; top: 50%; left: 50%; border: 1px solid rgba(22,130,150,.2); border-radius: 50%; transform: translate(-50%, -50%) rotate(-25deg); }
+    .ring-one { width: 238px; height: 118px; }
+    .ring-two { width: 180px; height: 196px; transform: translate(-50%, -50%) rotate(25deg); }
+    .orbit-core { position: absolute; top: 50%; left: 50%; display: grid; place-items: center; width: 85px; height: 85px; color: var(--teal); text-align: center; background: #fff; border: 7px solid #cbe9e9; border-radius: 50%; box-shadow: 0 0 0 12px rgba(22,130,150,.06); transform: translate(-50%, -50%); }
+    .orbit-core b { font-size: 17px; letter-spacing: -.08em; }
+    .orbit-core small { position: absolute; top: 90px; color: var(--muted); font-size: 9px; line-height: 1.25; }
+    .orbit-dot { position: absolute; width: 12px; height: 12px; border-radius: 50%; background: var(--orange); box-shadow: 0 0 0 5px rgba(215,122,55,.1); }
+    .dot-one { top: 33px; right: 26px; }
+    .dot-two { bottom: 28px; left: 11px; background: #72b9bf; box-shadow: 0 0 0 5px rgba(114,185,191,.12); }
+    .dot-three { top: 92px; right: -3px; background: #8c7fd5; box-shadow: 0 0 0 5px rgba(140,127,213,.12); }
+
+    .metric-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 18px; }
+    .metric-card { display: flex; align-items: flex-start; gap: 12px; padding: 16px; background: #fff; border: 1px solid var(--line); border-radius: 14px; }
+    .metric-icon { display: grid; place-items: center; width: 32px; height: 32px; flex: none; border-radius: 9px; font-size: 16px; font-weight: 850; }
+    .metric-icon.blue { color: #2d68a2; background: #e8f2fa; }
+    .metric-icon.green { color: var(--green); background: var(--green-pale); }
+    .metric-icon.amber { color: var(--amber); background: var(--amber-pale); }
+    .metric-icon.purple { color: var(--purple); background: var(--purple-pale); }
+    .metric-card p { margin: 0 0 2px; color: var(--muted); font-size: 11px; }
+    .metric-card strong { display: block; font-size: 21px; letter-spacing: -.045em; }
+    .metric-card span { display: block; margin-top: 1px; color: var(--muted); font-size: 10px; }
+
+    .content-grid { display: grid; grid-template-columns: minmax(0, 1.6fr) minmax(290px, .82fr); gap: 18px; margin-bottom: 18px; }
+    .chat-panel, .settings-panel, .lower-grid > .panel, .research-panel { padding: 24px; }
+    .section-heading { display: flex; justify-content: space-between; align-items: flex-start; gap: 15px; margin-bottom: 17px; }
+    .conversation { min-height: 192px; max-height: 385px; padding: 19px 2px; overflow: auto; border-top: 1px solid var(--line-soft); border-bottom: 1px solid var(--line-soft); }
+    .welcome-message, .message { display: flex; align-items: flex-start; gap: 11px; }
+    .assistant-avatar { display: grid; place-items: center; width: 30px; height: 30px; flex: none; color: #fff; background: linear-gradient(135deg, #f1ae6d, var(--orange)); border-radius: 9px; font-size: 10px; font-weight: 900; }
+    .welcome-message strong { font-size: 13px; }
+    .welcome-message p { margin: 4px 0 13px; color: var(--muted); font-size: 12px; }
+    .suggestions { display: flex; flex-wrap: wrap; gap: 7px; }
+    .suggestion { padding: 7px 9px; color: var(--ink-soft); background: #fff; border: 1px solid var(--line); border-radius: 8px; font-size: 10px; font-weight: 700; }
+    .suggestion:hover { border-color: #9bcbd0; background: #f2fbfb; }
+    .message { margin: 14px 0; }
+    .message.user { justify-content: flex-end; }
+    .bubble { max-width: 84%; padding: 10px 12px; color: var(--ink-soft); background: #f6f9fb; border-radius: 3px 12px 12px 12px; font-size: 12px; white-space: pre-wrap; }
+    .message.user .bubble { background: var(--teal-pale); border-radius: 12px 12px 3px 12px; }
+    .answer-status { display: inline-block; margin-bottom: 6px; padding: 3px 6px; color: var(--green); background: var(--green-pale); border-radius: 99px; font-size: 9px; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; }
+    .answer-status.refused { color: var(--red); background: var(--red-pale); }
+    .evidence-block { margin-top: 9px; padding-top: 8px; color: var(--muted); border-top: 1px solid var(--line); font-size: 10px; }
+    .evidence-block b { color: var(--ink-soft); }
+    .composer { padding-top: 15px; }
+    .composer textarea { width: 100%; min-height: 59px; padding: 11px; color: var(--ink); background: #fff; border: 1px solid var(--line); border-radius: 10px; outline: none; resize: vertical; font-size: 12px; }
+    .composer textarea:focus, .field input:focus, .field select:focus, .research-form input:focus { border-color: #73b9bf; box-shadow: 0 0 0 3px rgba(22,130,150,.1); outline: none; }
+    .composer-footer { display: flex; justify-content: space-between; align-items: center; gap: 12px; margin-top: 9px; color: var(--muted); font-size: 10px; }
+    .keyboard-key { padding: 2px 5px; background: #f5f7f9; border: 1px solid var(--line); border-radius: 4px; }
+    .send-button { padding: 8px 13px; }
+
+    .lock { color: var(--teal); font-size: 21px; }
+    .muted { color: var(--muted); }
+    .small { font-size: 11px; }
+    .field { margin-top: 15px; }
+    .field label, .field-label { display: block; margin-bottom: 5px; color: var(--ink-soft); font-size: 10px; font-weight: 850; }
+    .field input, .field select { width: 100%; height: 36px; padding: 0 10px; color: var(--ink); background: #fff; border: 1px solid var(--line); border-radius: 8px; outline: none; font-size: 12px; }
+    .field-hint { display: block; margin-top: 5px; color: var(--muted); font-size: 10px; line-height: 1.35; }
+    .capability-list { display: grid; gap: 8px; margin-top: 18px; padding-top: 15px; border-top: 1px solid var(--line-soft); }
+    .capability-list label { color: var(--ink-soft); font-size: 11px; }
+    .capability-list input { margin-right: 6px; accent-color: var(--teal); }
+    .identity-summary { display: flex; align-items: center; gap: 9px; margin-top: 20px; padding: 10px; background: #f7fafc; border-radius: 10px; }
+    .identity-dot { width: 8px; height: 8px; flex: none; border-radius: 50%; background: #55b888; box-shadow: 0 0 0 5px rgba(85,184,136,.12); }
+    .identity-summary strong, .identity-summary span { display: block; }
+    .identity-summary strong { font-size: 11px; }
+    .identity-summary span { margin-top: 2px; color: var(--muted); font-size: 10px; }
+    .voice-control { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 16px; padding-top: 15px; border-top: 1px solid var(--line-soft); }
+    .voice-control p { margin: 0; color: var(--muted); font-size: 10px; }
+    .voice-control strong { display: block; color: var(--ink-soft); font-size: 11px; }
+    .mini-button { padding: 7px 9px; color: var(--teal-dark); background: var(--teal-pale); border: 0; border-radius: 8px; font-size: 10px; font-weight: 800; }
+
+    .research-panel { margin-bottom: 18px; }
+    .research-form { display: flex; gap: 9px; margin-top: 15px; }
+    .research-form input { flex: 1; min-width: 0; height: 40px; padding: 0 11px; color: var(--ink); background: #fff; border: 1px solid var(--line); border-radius: 9px; outline: none; font-size: 12px; }
+    .research-results { display: grid; gap: 8px; margin-top: 16px; }
+    .research-notice { margin: 0; color: var(--muted); font-size: 10px; }
+    .research-result { padding: 11px 0; border-top: 1px solid var(--line-soft); }
+    .research-title { color: var(--teal-dark); font-size: 12px; font-weight: 850; text-decoration: none; }
+    .research-title:hover { text-decoration: underline; }
+    .research-result p { margin: 4px 0; color: var(--ink-soft); font-size: 11px; }
+    .research-meta { color: var(--muted); font-size: 10px; }
+    .research-warning { padding: 9px; color: var(--amber); background: var(--amber-pale); border-radius: 9px; font-size: 10px; line-height: 1.45; }
+
+    .lower-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+    .text-button { padding: 0; color: var(--teal-dark); background: none; border: 0; font-size: 11px; font-weight: 800; }
+    .source-list, .audit-list { display: grid; gap: 8px; }
+    .source-row, .audit-row { display: flex; justify-content: space-between; gap: 12px; padding: 11px 0; border-top: 1px solid var(--line-soft); font-size: 11px; }
+    .source-row:first-child, .audit-row:first-child { border-top: 0; }
+    .source-name strong, .audit-row strong { display: block; font-size: 11px; }
+    .source-name span, .audit-row span { display: block; margin-top: 2px; color: var(--muted); font-size: 10px; }
+    .source-health { text-align: right; }
+    .health-pill { display: inline-block; padding: 3px 6px; color: var(--green); background: var(--green-pale); border-radius: 99px; font-size: 9px; font-weight: 850; text-transform: uppercase; }
+    .health-pill.unknown { color: var(--muted); background: #eef2f6; }
+    .audit-result { color: var(--green); font-size: 9px; font-weight: 850; text-transform: uppercase; }
+    .audit-result.denied { color: var(--red); }
+    .loading-row, .empty-row { padding: 12px 0; color: var(--muted); font-size: 11px; }
+    .error-text { color: var(--red); font-size: 11px; }
+    .footer { display: flex; justify-content: space-between; gap: 15px; padding: 20px 3px 0; color: #8299ad; font-size: 10px; }
+    .toast { position: fixed; right: 26px; bottom: 24px; z-index: 20; padding: 11px 14px; color: #fff; background: var(--navy); border-radius: 10px; box-shadow: var(--shadow); opacity: 0; pointer-events: none; transform: translateY(8px); transition: .2s; font-size: 11px; }
+    .toast.show { opacity: 1; transform: translateY(0); }
+    .demo-ribbon { position: fixed; right: -43px; top: 105px; z-index: 4; padding: 7px 52px; color: #fff; background: var(--orange); box-shadow: 0 4px 12px rgba(215,122,55,.22); transform: rotate(45deg); font-size: 9px; font-weight: 850; letter-spacing: .1em; text-transform: uppercase; }
+
+    @media (max-width: 1080px) {
+      .sidebar { width: 216px; }
+      .main-content { width: calc(100% - 216px); margin-left: 216px; padding: 24px; }
+      .hero-orbit { margin-right: 0; }
+      .content-grid { grid-template-columns: 1fr; }
+      .settings-panel { display: grid; grid-template-columns: repeat(2, 1fr); gap: 0 16px; }
+      .settings-panel > .section-heading, .settings-panel > .muted, .identity-summary, .voice-control { grid-column: 1 / -1; }
+    }
+    @media (max-width: 760px) {
+      .sidebar { position: static; width: 100%; min-height: auto; padding: 16px; display: block; }
+      .brand { padding-bottom: 16px; }
+      .nav { display: flex; overflow-x: auto; }
+      .nav-item { flex: none; white-space: nowrap; }
+      .sidebar-note, .sidebar-footer { display: none; }
+      .app-shell { display: block; }
+      .main-content { width: 100%; margin: 0; padding: 18px; }
+      .topbar { align-items: center; }
+      .topbar h1 { font-size: 21px; }
+      .prototype-badge { display: none; }
+      .hero { min-height: 0; padding: 25px; }
+      .hero h2 { font-size: 26px; }
+      .hero-orbit { display: none; }
+      .metric-grid, .lower-grid { grid-template-columns: 1fr 1fr; }
+      .metric-card { padding: 12px; }
+      .metric-card strong { font-size: 18px; }
+      .settings-panel { display: block; }
+      .research-form { display: grid; }
+      .research-form .button { width: 100%; }
+      .footer { display: block; }
+      .footer span { display: block; margin-bottom: 4px; }
+      .demo-ribbon { display: none; }
+    }
+    @media (max-width: 470px) {
+      .metric-grid, .lower-grid { grid-template-columns: 1fr; }
+      .hero-actions, .hero-actions .button { width: 100%; }
+      .composer-footer { align-items: flex-end; flex-direction: column; }
+      .composer-footer .send-button { width: 100%; }
+      .top-actions { gap: 6px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="demo-ribbon">Prototype</div>
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-mark">GJ</div>
+        <div><strong>Guru Ji</strong><span>Institutional intelligence</span></div>
+      </div>
+      <nav class="nav" aria-label="Prototype navigation">
+        <a class="nav-item active" href="#overview"><span class="nav-icon">◈</span>Overview</a>
+        <a class="nav-item" href="#chat"><span class="nav-icon">✦</span>Ask Guru Ji</a>
+        <a class="nav-item" href="#research"><span class="nav-icon">⌕</span>Official research</a>
+        <a class="nav-item" href="#sources"><span class="nav-icon">⌁</span>Approved sources</a>
+        <a class="nav-item" href="#audit"><span class="nav-icon">▤</span>Audit trail</a>
+      </nav>
+      <div class="sidebar-note"><span class="pulse"></span><div><strong>Standalone demo mode</strong><p>Mock data only. No API or college system is contacted.</p></div></div>
+      <div class="sidebar-footer">Read-only by design<br><span>Policy-bound · cited · auditable</span></div>
+    </aside>
+
+    <main class="main-content">
+      <header class="topbar">
+        <div><p class="eyebrow">Standalone interface prototype</p><h1>Good afternoon, <span id="principal-label">demo-user</span></h1></div>
+        <div class="top-actions"><span class="prototype-badge">● Offline preview</span><span class="status-badge ok">Prototype ready</span><button id="refresh-button" class="icon-button" title="Refresh prototype" aria-label="Refresh prototype">↻</button></div>
+      </header>
+
+      <section id="overview" class="hero panel">
+        <div class="hero-copy"><p class="eyebrow accent">Evidence before answers</p><h2>One safe place to understand your institution.</h2><p>Explore the Guru Ji experience in a browser-only prototype. Ask questions, inspect source health, preview research citations, and see how scope controls shape the interface.</p><div class="hero-actions"><button id="daily-button" class="button primary">Prepare daily briefing</button><button id="health-button" class="button secondary">Check source health</button></div></div>
+        <div class="hero-orbit" aria-hidden="true"><div class="orbit-ring ring-one"></div><div class="orbit-ring ring-two"></div><div class="orbit-core"><b>GJ</b><small>trusted<br>context</small></div><span class="orbit-dot dot-one"></span><span class="orbit-dot dot-two"></span><span class="orbit-dot dot-three"></span></div>
+      </section>
+
+      <section class="metric-grid" aria-label="Prototype status">
+        <article class="metric-card"><div class="metric-icon blue">⌁</div><div><p>Approved sources</p><strong id="source-count">3</strong><span>Mock registry entries</span></div></article>
+        <article class="metric-card"><div class="metric-icon green">✓</div><div><p>Control database</p><strong>Demo</strong><span>Local prototype state</span></div></article>
+        <article class="metric-card"><div class="metric-icon amber">◷</div><div><p>Recent decisions</p><strong id="audit-count">3</strong><span>Prototype audit events</span></div></article>
+        <article class="metric-card"><div class="metric-icon purple">◎</div><div><p>Voice sessions</p><strong id="voice-count">0 / 10</strong><span>Preview capacity</span></div></article>
+      </section>
+
+      <div class="content-grid">
+        <section id="chat" class="panel chat-panel">
+          <div class="section-heading"><div><p class="eyebrow accent">Ask Guru Ji</p><h2>What do you need to know?</h2></div><span class="scope-chip" id="scope-chip">College A</span></div>
+          <div id="conversation" class="conversation">
+            <div class="welcome-message"><div class="assistant-avatar">GJ</div><div><strong>Namaste. I’m ready.</strong><p>This is an offline interaction preview. Try a suggestion or ask about attendance, institutional overview, or source health.</p><div class="suggestions"><button class="suggestion">Give me the institutional overview</button><button class="suggestion">What is the attendance summary?</button><button class="suggestion">Are the approved sources healthy?</button></div></div></div>
+          </div>
+          <form id="chat-form" class="composer"><label for="prompt" class="sr-only">Ask Guru Ji</label><textarea id="prompt" rows="2" maxlength="10000" placeholder="Ask a read-only institutional question…"></textarea><div class="composer-footer"><span><span class="keyboard-key">Enter</span> to send · mock scope is enforced</span><button class="button primary send-button" type="submit">Send <span>↗</span></button></div></form>
+        </section>
+
+        <aside class="panel settings-panel">
+          <div class="section-heading"><div><p class="eyebrow">Session controls</p><h2>Identity &amp; scope</h2></div><span class="lock">⌾</span></div>
+          <p class="muted small">Prototype controls show how identity and capabilities affect the experience.</p>
+          <div class="field"><label for="principal">Principal ID</label><input id="principal" value="demo-user" autocomplete="off"></div>
+          <div class="field"><label for="role">Role</label><select id="role"><option value="student">Student</option><option value="faculty">Faculty</option><option value="main_admin" selected>Main Admin</option></select></div>
+          <div class="field"><label for="college">College scope</label><input id="college" value="college_a" autocomplete="off"><span class="field-hint">Department and Batch scopes remain inside the selected college.</span></div>
+          <div class="capability-list"><span class="field-label">Demo capabilities</span><label><input type="checkbox" value="ask:read_only" checked> Ask read-only</label><label><input type="checkbox" value="source:view_metadata" checked> View source metadata</label><label><input type="checkbox" value="voice:start" checked> Start voice session</label></div>
+          <div class="identity-summary"><div class="identity-dot"></div><div><strong id="identity-summary">Main Admin · College A</strong><span>Capabilities are shown explicitly</span></div></div>
+          <div class="voice-control"><div><strong>Voice session preview</strong><p>Lifecycle only — no microphone is accessed.</p></div><button id="voice-button" class="mini-button" type="button">Start preview</button></div>
+        </aside>
+      </div>
+
+      <section id="research" class="panel research-panel">
+        <div class="section-heading"><div><p class="eyebrow accent">Explicit web research</p><h2>Search configured official sources</h2></div><span class="scope-chip">Mock results</span></div>
+        <p class="muted small">This standalone prototype shows the research interaction and citation treatment. Results below are fictional preview data and do not contact the public web.</p>
+        <form id="research-form" class="research-form"><label for="research-query" class="sr-only">Prototype research query</label><input id="research-query" maxlength="500" placeholder="e.g. official higher-education attendance guidance"><button class="button primary" type="submit">Search official sources ↗</button></form>
+        <div id="research-results" class="research-results"><div class="empty-row">No prototype research run yet.</div></div>
+      </section>
+
+      <div class="lower-grid">
+        <section id="sources" class="panel"><div class="section-heading"><div><p class="eyebrow">Control plane</p><h2>Approved sources</h2></div><button id="sources-button" class="text-button" type="button">Refresh ↻</button></div><div id="sources-list" class="source-list"></div></section>
+        <section id="audit" class="panel"><div class="section-heading"><div><p class="eyebrow">Accountability</p><h2>Recent audit trail</h2></div><button id="audit-button" class="text-button" type="button">Refresh ↻</button></div><div id="audit-list" class="audit-list"></div></section>
+      </div>
+      <footer class="footer"><span>Guru Ji standalone UI prototype</span><span>Mock data · no network calls · source-cited interaction design</span></footer>
+    </main>
+  </div>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+  <script>
+    (() => {
+      const state = {
+        voiceSessions: 0,
+        audit: [
+          { type: "assistant.ask", detail: "Institutional overview", time: "14:02", outcome: "success" },
+          { type: "source.health", detail: "Approved registry checked", time: "13:58", outcome: "success" },
+          { type: "scope.check", detail: "College A boundary applied", time: "13:54", outcome: "success" }
+        ],
+        sources: [
+          { name: "College A SIS", detail: "college_a · institutional connector", health: "healthy", freshness: "2 min ago" },
+          { name: "Attendance service", detail: "college_a · approved read-only", health: "healthy", freshness: "5 min ago" },
+          { name: "UGC reference registry", detail: "public reference · allowlisted", health: "healthy", freshness: "18 min ago" }
+        ]
+      };
+      const $ = (id) => document.getElementById(id);
+      const roleNames = { student: "Student", faculty: "Faculty", main_admin: "Main Admin" };
+
+      function controls() {
+        return {
+          principal: $("principal").value.trim() || "demo-user",
+          role: $("role").value,
+          college: $("college").value.trim() || "college_a"
+        };
+      }
+      function toast(message) {
+        const node = $("toast"); node.textContent = message; node.classList.add("show");
+        clearTimeout(state.toastTimer); state.toastTimer = setTimeout(() => node.classList.remove("show"), 3000);
+      }
+      function updateIdentity() {
+        const c = controls();
+        const label = c.college.replaceAll("_", " ").replace(/\b\w/g, (x) => x.toUpperCase());
+        $("principal-label").textContent = c.principal;
+        $("scope-chip").textContent = label;
+        $("identity-summary").textContent = `${roleNames[c.role] || c.role} · ${label}`;
+      }
+      function addAudit(type, detail, outcome = "success") {
+        const now = new Date();
+        state.audit.unshift({ type, detail, outcome, time: now.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) });
+        renderAudit();
+      }
+      function renderSources() {
+        $("source-count").textContent = state.sources.length;
+        $("sources-list").replaceChildren(...state.sources.map((item) => {
+          const row = document.createElement("div"); row.className = "source-row";
+          const name = document.createElement("div"); name.className = "source-name";
+          name.innerHTML = `<strong>${item.name}</strong><span>${item.detail}</span>`;
+          const health = document.createElement("div"); health.className = "source-health";
+          health.innerHTML = `<span class="health-pill">${item.health}</span><span class="source-name">${item.freshness}</span>`;
+          row.append(name, health); return row;
+        }));
+      }
+      function renderAudit() {
+        $("audit-count").textContent = state.audit.length;
+        $("audit-list").replaceChildren(...state.audit.slice(0, 7).map((item) => {
+          const row = document.createElement("div"); row.className = "audit-row";
+          const left = document.createElement("div");
+          left.innerHTML = `<strong>${item.type}</strong><span>${item.detail} · ${item.time}</span>`;
+          const result = document.createElement("span"); result.className = `audit-result ${item.outcome}`; result.textContent = item.outcome;
+          row.append(left, result); return row;
+        }));
+      }
+      function addMessage(kind, text, citations = 0, status = "complete") {
+        const message = document.createElement("div"); message.className = `message ${kind}`;
+        if (kind === "assistant") { const avatar = document.createElement("div"); avatar.className = "assistant-avatar"; avatar.textContent = "GJ"; message.append(avatar); }
+        const bubble = document.createElement("div"); bubble.className = "bubble";
+        if (kind === "assistant") {
+          const badge = document.createElement("span"); badge.className = `answer-status ${status === "refused" ? "refused" : ""}`; badge.textContent = status; bubble.append(badge);
+        }
+        const body = document.createElement("div"); body.textContent = text; bubble.append(body);
+        if (kind === "assistant" && citations) { const evidence = document.createElement("div"); evidence.className = "evidence-block"; evidence.innerHTML = `<b>${citations} citation(s)</b> · prototype evidence panel`; bubble.append(evidence); }
+        message.append(bubble); $("conversation").append(message); $("conversation").scrollTop = $("conversation").scrollHeight;
+      }
+      function answerFor(prompt) {
+        const p = prompt.toLowerCase();
+        if (p.includes("attendance")) return ["Prototype answer: College A attendance is 87% overall for the current review period. The detailed record is read-only and remains inside the selected college scope.", 2, "complete"];
+        if (p.includes("source") || p.includes("health")) return ["All three approved prototype sources are healthy. Freshness and connector metadata are visible in the source panel below.", 3, "complete"];
+        if (p.includes("delete") || p.includes("change") || p.includes("password") || p.includes("outside")) return ["Prototype refusal: this request is outside the read-only demo capability or selected institution scope. No action was taken.", 0, "refused"];
+        return ["Prototype answer: College A has 1,248 active students across 6 departments, with 3 approved sources available for read-only institutional questions.", 2, "complete"];
+      }
+      function ask(prompt) {
+        const text = prompt.trim(); if (!text) return;
+        addMessage("user", text); $("prompt").value = "";
+        const [answer, citations, status] = answerFor(text);
+        setTimeout(() => { addMessage("assistant", answer, citations, status); addAudit("assistant.ask", text.slice(0, 34) + (text.length > 34 ? "…" : ""), status === "refused" ? "denied" : "success"); }, 260);
+      }
+      function renderResearch(query) {
+        const node = $("research-results"); node.replaceChildren();
+        const notice = document.createElement("p"); notice.className = "research-notice"; notice.textContent = `prototype partial · 2 mock result(s) · query: ${query}`; node.append(notice);
+        [
+          { title: "Official guidance reference", url: "https://example.gov/education/guidance", excerpt: "A fictional official-source excerpt demonstrating how safe snippets and source labels appear in the interface." },
+          { title: "Institutional policy reference", url: "https://example.edu/policy/attendance", excerpt: "A fictional allowlisted institutional page used only to preview citation cards and retrieval metadata." }
+        ].forEach((item) => {
+          const card = document.createElement("article"); card.className = "research-result";
+          const title = document.createElement("a"); title.className = "research-title"; title.href = item.url; title.target = "_blank"; title.rel = "noopener noreferrer"; title.textContent = item.title;
+          const excerpt = document.createElement("p"); excerpt.textContent = item.excerpt;
+          const meta = document.createElement("span"); meta.className = "research-meta"; meta.textContent = "Mock retrieval · citation available · untrusted content";
+          card.append(title, excerpt, meta); node.append(card);
+        });
+        const warning = document.createElement("div"); warning.className = "research-warning"; warning.textContent = "Prototype notice: these are fictional results. The standalone file made no network request."; node.append(warning);
+      }
+      function refreshSources() { state.sources = state.sources.map((item) => ({ ...item, freshness: "just now" })); renderSources(); addAudit("source.health", "Approved registry refreshed"); toast("Prototype source health refreshed."); }
+
+      $("chat-form").addEventListener("submit", (event) => { event.preventDefault(); ask($("prompt").value); });
+      $("prompt").addEventListener("keydown", (event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); ask(event.target.value); } });
+      document.querySelectorAll(".suggestion").forEach((button) => button.addEventListener("click", () => ask(button.textContent)));
+      $("research-form").addEventListener("submit", (event) => { event.preventDefault(); const query = $("research-query").value.trim(); if (!query) { toast("Enter a prototype research query first."); return; } renderResearch(query); addAudit("research.preview", query.slice(0, 34)); toast("Mock research preview rendered."); });
+      $("daily-button").addEventListener("click", () => { addMessage("assistant", "Prototype briefing: source health is stable, attendance is 87%, and no unresolved College A alerts require attention.", 3); addAudit("briefing.preview", "Daily briefing preview"); toast("Mock daily briefing added to the conversation."); });
+      $("health-button").addEventListener("click", refreshSources);
+      $("sources-button").addEventListener("click", refreshSources);
+      $("audit-button").addEventListener("click", () => { renderAudit(); toast("Prototype audit trail refreshed."); });
+      $("refresh-button").addEventListener("click", () => { updateIdentity(); renderSources(); renderAudit(); toast("Standalone prototype refreshed."); });
+      $("voice-button").addEventListener("click", () => { if (state.voiceSessions >= 10) { toast("Prototype capacity reached."); return; } state.voiceSessions += 1; $("voice-count").textContent = `${state.voiceSessions} / 10`; $("voice-button").textContent = "Session active"; addAudit("voice.preview", "Lifecycle session started"); toast("Voice lifecycle preview started. No microphone accessed."); });
+      ["principal", "role", "college"].forEach((id) => $(id).addEventListener("input", updateIdentity));
+      document.querySelectorAll(".nav-item").forEach((item) => item.addEventListener("click", () => { document.querySelectorAll(".nav-item").forEach((nav) => nav.classList.remove("active")); item.classList.add("active"); }));
+
+      renderSources(); renderAudit(); updateIdentity();
+    })();
+  </script>
+</body>
+</html>
