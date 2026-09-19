@@ -14,6 +14,10 @@ class AppSettings:
     allowed_origins: tuple[str, ...] = ("http://localhost:5173",)
     dev_bearer_token: str = field(default="dev-token", repr=False)
     control_database_url: str | None = field(default="sqlite:///./data/guru_ji.db", repr=False)
+    oidc_issuer_url: str | None = None
+    oidc_audience: str | None = None
+    oidc_jwks_url: str | None = None
+    oidc_algorithms: tuple[str, ...] = ("RS256",)
     max_request_bytes: int = 1_000_000
 
     @classmethod
@@ -29,6 +33,10 @@ class AppSettings:
             allowed_origins=origins,
             dev_bearer_token=os.getenv("GURU_DEV_BEARER_TOKEN", "dev-token"),
             control_database_url=os.getenv("CONTROL_DATABASE_URL", "sqlite:///./data/guru_ji.db"),
+            oidc_issuer_url=os.getenv("GURU_OIDC_ISSUER_URL") or None,
+            oidc_audience=os.getenv("GURU_OIDC_AUDIENCE") or None,
+            oidc_jwks_url=os.getenv("GURU_OIDC_JWKS_URL") or None,
+            oidc_algorithms=tuple(item.strip() for item in os.getenv("GURU_OIDC_ALGORITHMS", "RS256").split(",") if item.strip()),
             max_request_bytes=int(os.getenv("GURU_MAX_REQUEST_BYTES", "1000000")),
         )
 
@@ -43,6 +51,11 @@ class AppSettings:
             raise ValueError("GURU_ALLOWED_ORIGINS must be set in production")
         if not self.control_database_url or not self.control_database_url.startswith(("postgresql://", "postgres://")):
             raise ValueError("production requires CONTROL_DATABASE_URL to use PostgreSQL")
+        if not self.oidc_issuer_url or not self.oidc_audience or not self.oidc_jwks_url:
+            raise ValueError("production requires OIDC issuer, audience, and JWKS URL settings")
+        allowed_algorithms = {"RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512"}
+        if not self.oidc_algorithms or any(item not in allowed_algorithms for item in self.oidc_algorithms):
+            raise ValueError("production requires an explicit safe OIDC signing algorithm")
 
 
 __all__ = ["AppSettings"]
