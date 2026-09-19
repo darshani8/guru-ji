@@ -5,12 +5,13 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
 from .api.dependencies import build_runtime
-from .api.error_handlers import guruji_error_handler
+from .api.error_handlers import guruji_error_handler, http_exception_handler, validation_exception_handler
 from .api.routes.audit import router as audit_router
 from .api.routes.briefings import router as briefings_router
 from .api.routes.chat import router as chat_router
@@ -20,8 +21,11 @@ from .api.routes.sources import router as sources_router
 from .api.routes.voice import router as voice_router
 from .config.settings import AppSettings
 from .domain.errors import GuruJiError
+from .middleware.rate_limit import RateLimitMiddleware
 from .middleware.request_id import RequestIdMiddleware
 from .middleware.request_size import RequestSizeLimitMiddleware
+from .middleware.security_headers import SecurityHeadersMiddleware
+from .middleware.timeout import RequestTimeoutMiddleware
 
 settings = AppSettings.from_env()
 
@@ -34,10 +38,15 @@ app = FastAPI(title=settings.app_name, description="Policy-bound, read-only inst
 app.state.runtime = build_runtime(settings)
 atexit.register(app.state.runtime.store.close)
 app.add_exception_handler(GuruJiError, guruji_error_handler)
+app.add_exception_handler(HTTPException, http_exception_handler)
+app.add_exception_handler(RequestValidationError, validation_exception_handler)
 app.add_middleware(RequestIdMiddleware)
+app.add_middleware(SecurityHeadersMiddleware, production=settings.environment == "production")
+app.add_middleware(RequestTimeoutMiddleware, timeout_seconds=settings.request_timeout_seconds)
+app.add_middleware(RateLimitMiddleware, max_requests=settings.rate_limit_requests, window_seconds=settings.rate_limit_window_seconds)
 app.add_middleware(RequestSizeLimitMiddleware, max_bytes=settings.max_request_bytes)
 if settings.allowed_origins:
-    app.add_middleware(CORSMiddleware, allow_origins=list(settings.allowed_origins), allow_credentials=True, allow_methods=["GET", "POST", "OPTIONS"], allow_headers=["*"])
+    app.add_middleware(CORSMiddleware, allow_origins=list(settings.allowed_origins), allow_credentials=True, allow_methods=["GET", "POST", "DELETE", "OPTIONS"], allow_headers=["*"])
 app.include_router(health_router)
 app.include_router(chat_router)
 app.include_router(briefings_router)
