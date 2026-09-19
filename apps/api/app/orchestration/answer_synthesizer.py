@@ -7,7 +7,7 @@ import re
 from collections import Counter
 
 from ..domain.errors import GuruJiError
-from ..domain.provenance import Provenance, Warning
+from ..domain.provenance import Provenance
 from ..providers.model_base import TextModel
 from ..domain.results import ResultStatus, ToolResult
 
