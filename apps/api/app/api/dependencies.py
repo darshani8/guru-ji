@@ -10,12 +10,13 @@ from ..config.settings import AppSettings
 from ..config.source_registry import SourceDefinition, SourceRegistry
 from ..connectors.college_a.connector import CollegeADemoConnector
 from ..connectors.registry import ConnectorRegistry
+from ..connectors.remote_http import RemoteHttpConnector
 from ..orchestration.assistant_service import AssistantService
 from ..persistence.database import InMemoryControlStore, PostgresControlStore, SqliteControlStore
 from ..policy.query_limits import QueryLimits
 from ..providers.ollama import OllamaProvider
-from ..tools.college_tools import COLLEGE_TOOLS
-from ..tools.health_tools import HEALTH_TOOLS
+from ..tools.college_tools import build_college_tools
+from ..tools.health_tools import build_health_tools
 from ..tools.registry import ToolRegistry
 from ..voice.session_manager import VoiceSessionManager
 
@@ -35,9 +36,10 @@ class Runtime:
     auth_verifier: JwtVerifier | None = None
 
 
-def _build_sources() -> SourceRegistry:
-    return SourceRegistry((
-        SourceDefinition(
+def _build_sources(settings: AppSettings) -> SourceRegistry:
+    definitions: list[SourceDefinition] = []
+    if settings.demo_data_enabled:
+        definitions.append(SourceDefinition(
             source_id="college_a_demo",
             institution_id="college_a",
             display_name="College A demo source",
@@ -47,8 +49,22 @@ def _build_sources() -> SourceRegistry:
                 "institution.attendance_summary",
                 "institution.source_health",
             ),
-        ),
-    ))
+        ))
+    if settings.institution_connector_base_url:
+        if any(item.source_id == settings.institution_connector_source_id for item in definitions):
+            raise ValueError("institution connector source ID conflicts with an existing source")
+        definitions.append(SourceDefinition(
+            source_id=settings.institution_connector_source_id,
+            institution_id=settings.institution_connector_institution_id,
+            display_name=settings.institution_connector_display_name,
+            connector_type="remote_http",
+            allowed_tools=(
+                "institution.overview",
+                "institution.attendance_summary",
+                "institution.source_health",
+            ),
+        ))
+    return SourceRegistry(tuple(definitions))
 
 
 def _build_store(settings: AppSettings) -> ControlStore:
@@ -72,12 +88,38 @@ def _build_model(settings: AppSettings):
     return None
 
 
+def _build_connectors(settings: AppSettings) -> ConnectorRegistry:
+    connectors = []
+    source_ids: list[str] = []
+    if settings.demo_data_enabled:
+        connectors.append(CollegeADemoConnector())
+        source_ids.append("college_a_demo")
+    if settings.institution_connector_base_url:
+        if settings.institution_connector_source_id in source_ids:
+            raise ValueError("institution connector source ID conflicts with an existing connector")
+        connectors.append(RemoteHttpConnector(
+            source_id=settings.institution_connector_source_id,
+            institution_id=settings.institution_connector_institution_id,
+            display_name=settings.institution_connector_display_name,
+            base_url=settings.institution_connector_base_url,
+            allowed_tools=frozenset({
+                "institution.overview",
+                "institution.attendance_summary",
+                "institution.source_health",
+            }),
+            timeout_seconds=5.0,
+            auth_token=settings.institution_connector_auth_token,
+        ))
+    return ConnectorRegistry(tuple(connectors))
+
+
 def build_runtime(settings: AppSettings | None = None) -> Runtime:
     settings = settings or AppSettings.from_env()
     settings.ensure_safe_for_production()
-    sources = _build_sources()
-    tools = ToolRegistry((*COLLEGE_TOOLS, *HEALTH_TOOLS))
-    connectors = ConnectorRegistry((CollegeADemoConnector(),))
+    sources = _build_sources(settings)
+    source_ids = tuple(item.source_id for item in sources.all())
+    tools = ToolRegistry((*build_college_tools(source_ids), *build_health_tools(source_ids)))
+    connectors = _build_connectors(settings)
     store = _build_store(settings)
     auth_verifier = None if settings.environment in {"development", "test"} else JwtVerifier(settings)
     model = _build_model(settings)
