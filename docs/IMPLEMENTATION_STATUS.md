@@ -12,7 +12,7 @@
 - Development-only identity adapter using Authorization: Bearer dev-token plus demo headers. Production must replace this with OIDC/JWT validation.
 - Voice session lifecycle with a ten-session cap and ephemeral audio-retention semantics; realtime provider credentials are deliberately disabled.
 - Optional public-web boundary with domain allowlisting and prompt-injection warnings. Web content remains untrusted data.
-- FastAPI routes for liveness/readiness, chat, daily briefings, sources, audit, and voice session lifecycle.
+- FastAPI routes for liveness/readiness, JSON chat, SSE chat (`stream=true` or `/v1/chat/stream`), daily briefings, sources, audit, and voice session lifecycle.
 - Source metadata and audit routes require explicit capabilities.
 - Request-ID propagation, safe logging helpers, a bounded HTTP request-size middleware, a browser client under apps/web, and local Docker/Make commands.
 - SQLite control-plane persistence for audit events, source-health snapshots, and briefing records, with idempotent initialization from migrations/001_control_plane.sql.
@@ -22,7 +22,7 @@
 
 ## Validation
 
-The exported branch snapshot was checked with Python 3.12 and the declared runtime dependencies installed. Forty-six automated tests pass, including HTTP contract, persistence, configuration-hardening, and request-size tests. Python compilation passes. The live Uvicorn smoke test passes with `LIVE_SMOKE_OK` and covers readiness, source metadata, chat, briefing creation, audit history, and the mounted frontend. PostgreSQL adapter construction and configuration paths are covered, but no live PostgreSQL server was available in this validation run.
+The exported branch snapshot was checked with Python 3.12 and the declared runtime dependencies installed. Forty-seven automated tests pass, including HTTP contract, JSON/SSE chat, persistence, configuration-hardening, and request-size tests. Python compilation passes. The live Uvicorn smoke test passes with `LIVE_SMOKE_OK` and covers readiness, source metadata, chat, briefing creation, audit history, and the mounted frontend. PostgreSQL adapter construction and configuration paths are covered, but no live PostgreSQL server was available in this validation run.
 
 ## Intentionally not claimed
 
