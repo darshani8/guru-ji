@@ -6,6 +6,7 @@
 - Request and response contracts, deny-by-default authorization, bounded plans, and explicit audit outcomes.
 - Explicit source registry, semantic tool registry, data classification, redaction, query limits, and read-only SQL safety helpers.
 - Deterministic in-memory College A connector with aggregate overview, attendance, and source-health tools. It never contacts a real institution.
+- Institution-local `RemoteHttpConnector` contract with bounded HTTPS/HTTP transport, explicit tool allowlisting, request IDs, read-only semantic execution, health mapping, response-size limits, provenance validation, and safe unavailable/timeout outcomes. It is registered only when explicitly configured.
 - Request source IDs are honored and must belong to the requested College. Unknown, inactive, cross-College, or unregistered sources are refused before connector execution.
 - Department and Batch scope is preserved through the executor. The current demo tools explicitly refuse narrower scopes because they only return College-level aggregates.
 - Policy-aware orchestration with plan classification, sequential connector execution, citations, warnings, complete/partial/refused statuses, and DENIED audit outcomes for unauthorized requests.
@@ -19,16 +20,16 @@
 - Request-ID propagation, safe logging helpers, a bounded HTTP request-size middleware, a browser client under apps/web, and local Docker/Make commands.
 - SQLite control-plane persistence for audit events, source-health snapshots, and briefing records, with idempotent initialization from migrations/001_control_plane.sql.
 - PostgreSQL control-plane persistence with the same store interface and schema contract, idempotent initialization, conflict-safe writes, and explicit `postgresql://` / `postgres://` runtime selection.
-- Production configuration guards that reject the development bearer token, missing CORS origins, SQLite production storage, and invalid request-size limits.
+- Production configuration guards that reject the development bearer token, missing CORS origins, SQLite production storage, deterministic demo data, missing connector configuration, invalid request-size limits, and unsafe model settings.
 - Database initialization and repeatable live HTTP smoke validation scripts under scripts/.
 
 ## Validation
 
-The exported branch snapshot was checked with Python 3.12 and the declared runtime dependencies installed. Sixty automated tests pass, including HTTP contract, JSON/SSE chat, persistence, OIDC/JWT verification, model-provider fallback, configuration-hardening, and request-size tests. Python compilation passes. The live Uvicorn smoke test passes with `LIVE_SMOKE_OK` and covers readiness, source metadata, chat, briefing creation, audit history, and the mounted frontend. PostgreSQL adapter construction and configuration paths are covered, but no live PostgreSQL server was available in this validation run.
+The exported branch snapshot was checked with Python 3.12 and the declared runtime dependencies installed. Sixty-nine automated tests pass, including HTTP contract, JSON/SSE chat, persistence, OIDC/JWT verification, model-provider fallback, remote connector contracts, configuration-hardening, and request-size tests. Python compilation passes. The live Uvicorn smoke test passes with `LIVE_SMOKE_OK` and covers readiness, source metadata, chat, briefing creation, audit history, and the mounted frontend. PostgreSQL adapter construction and configuration paths are covered, but no live PostgreSQL server was available in this validation run.
 
 ## Intentionally not claimed
 
-This is a hardened local vertical slice, not a production deployment. It does not include a live institutional database, the institution's real OIDC issuer/JWKS configuration, a production Ollama/model deployment, hosted-model credentials, WebRTC signaling, secret management, or production observability. The College A connector remains deterministic demo data. Those integrations need the actual institution contracts, security approvals, and deployment secrets rather than invented placeholders. PostgreSQL, OIDC/JWT verification, and the optional local model boundary now exist, but they still need private services, credentials, connection-pool tuning, identity-claim mapping approval, model evaluation, and deployment testing before production use.
+This is a hardened local vertical slice, not a production deployment. It does not include a live institutional database, the institution's real connector service, the institution's real OIDC issuer/JWKS configuration, a production Ollama/model deployment, hosted-model credentials, WebRTC signaling, secret management, or production observability. The College A connector remains deterministic demo data unless a remote connector is explicitly configured. Those integrations need the actual institution contracts, security approvals, and deployment secrets rather than invented placeholders. PostgreSQL, OIDC/JWT verification, the remote connector contract, and the optional local model boundary now exist, but they still need private services, credentials, connection-pool tuning, identity-claim mapping approval, model evaluation, and deployment testing before production use.
 
 ## Local flow
 
