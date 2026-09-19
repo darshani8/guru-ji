@@ -16,6 +16,24 @@ class PlannedTool:
     arguments: dict[str, object]
 
 
+PUBLIC_WEB_INTENT_MARKERS = (
+    "search the web",
+    "web search",
+    "search online",
+    "look online",
+    "internet search",
+    "public web",
+    "online sources",
+    "official websites",
+    "official website",
+)
+
+
+def is_public_web_prompt(prompt: str) -> bool:
+    normalized = " ".join(prompt.lower().split())
+    return any(marker in normalized for marker in PUBLIC_WEB_INTENT_MARKERS)
+
+
 def classify_prompt(prompt: str) -> tuple[str, ...]:
     normalized = prompt.lower()
     if any(word in normalized for word in ("health", "availability", "source")):
@@ -60,4 +78,4 @@ def build_tool_plan(request: ChatRequest, tools: ToolRegistry, sources: SourceRe
     return tuple(planned)
 
 
-__all__ = ["PlannedTool", "build_tool_plan", "classify_prompt"]
+__all__ = ["PlannedTool", "build_tool_plan", "classify_prompt", "is_public_web_prompt"]
