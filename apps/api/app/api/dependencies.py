@@ -165,6 +165,7 @@ def build_runtime(settings: AppSettings | None = None) -> Runtime:
             limits=QueryLimits(),
             model=model,
             model_max_tokens=settings.model_max_tokens,
+            web_research=web_research,
         ),
         voice=VoiceSessionManager(ttl_seconds=300, max_active=10),
         web_research=web_research,
