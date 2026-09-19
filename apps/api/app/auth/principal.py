@@ -23,7 +23,13 @@ def _capabilities_for(role: PrincipalType) -> frozenset[Capability]:
     if role is PrincipalType.MAIN_ADMIN:
         return frozenset(Capability)
     if role is PrincipalType.FACULTY:
-        return frozenset({Capability.ASK_READ_ONLY, Capability.VIEW_SOURCE_METADATA, Capability.START_VOICE_SESSION})
+        return frozenset({
+            Capability.ASK_READ_ONLY,
+            Capability.VIEW_SOURCE_METADATA,
+            Capability.RUN_BRIEFING,
+            Capability.VIEW_BRIEFING_HISTORY,
+            Capability.START_VOICE_SESSION,
+        })
     if role is PrincipalType.STUDENT:
         return frozenset({Capability.ASK_READ_ONLY, Capability.START_VOICE_SESSION})
     return frozenset()
@@ -32,10 +38,12 @@ def _capabilities_for(role: PrincipalType) -> frozenset[Capability]:
 def _principal_from_demo_headers(headers: Mapping[str, str], settings: AppSettings) -> Principal:
     authorization = headers.get("authorization", "")
     demo_id = headers.get("x-demo-principal", "")
-    if not authorization and not demo_id:
+    # Demo headers are identity fixtures, not an authentication mechanism. The
+    # explicit development bearer token is required even in local/test mode.
+    if authorization != f"Bearer {settings.dev_bearer_token}":
         return _anonymous()
-    if authorization and authorization != f"Bearer {settings.dev_bearer_token}":
-        return _anonymous()
+    if not demo_id:
+        demo_id = "demo-user"
 
     role_value = headers.get("x-demo-role", "student").lower()
     try:
