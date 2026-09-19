@@ -6,6 +6,8 @@ import os
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
+from ..web_research.domain_allowlist import DEFAULT_ALLOWED_DOMAINS
+
 
 @dataclass(frozen=True, slots=True)
 class AppSettings:
@@ -30,6 +32,14 @@ class AppSettings:
     institution_connector_display_name: str = "Configured institution connector"
     institution_connector_auth_token: str | None = field(default=None, repr=False)
     demo_data_enabled: bool = True
+    web_search_provider: str = "disabled"
+    web_search_endpoint: str = "https://api.tavily.com/search"
+    web_search_api_key: str | None = field(default=None, repr=False)
+    web_search_timeout_seconds: float = 8.0
+    web_search_max_results: int = 5
+    web_extract_timeout_seconds: float = 8.0
+    web_extract_max_bytes: int = 1_000_000
+    web_allowed_domains: tuple[str, ...] = tuple(sorted(DEFAULT_ALLOWED_DOMAINS))
     max_request_bytes: int = 1_000_000
 
     @classmethod
@@ -60,6 +70,14 @@ class AppSettings:
             institution_connector_display_name=os.getenv("GURU_INSTITUTION_CONNECTOR_DISPLAY_NAME", "Configured institution connector").strip(),
             institution_connector_auth_token=os.getenv("GURU_INSTITUTION_CONNECTOR_AUTH_TOKEN") or None,
             demo_data_enabled=os.getenv("GURU_ENABLE_DEMO_DATA", "false" if environment == "production" else "true").strip().lower() in {"1", "true", "yes", "on"},
+            web_search_provider=os.getenv("GURU_WEB_SEARCH_PROVIDER", "disabled").strip().lower(),
+            web_search_endpoint=os.getenv("GURU_WEB_SEARCH_ENDPOINT", "https://api.tavily.com/search").strip(),
+            web_search_api_key=os.getenv("GURU_WEB_SEARCH_API_KEY") or None,
+            web_search_timeout_seconds=float(os.getenv("GURU_WEB_SEARCH_TIMEOUT_SECONDS", "8")),
+            web_search_max_results=int(os.getenv("GURU_WEB_SEARCH_MAX_RESULTS", "5")),
+            web_extract_timeout_seconds=float(os.getenv("GURU_WEB_EXTRACT_TIMEOUT_SECONDS", "8")),
+            web_extract_max_bytes=int(os.getenv("GURU_WEB_EXTRACT_MAX_BYTES", "1000000")),
+            web_allowed_domains=tuple(item.strip().lower().rstrip(".") for item in os.getenv("GURU_WEB_ALLOWED_DOMAINS", ",".join(sorted(DEFAULT_ALLOWED_DOMAINS))).split(",") if item.strip()),
             max_request_bytes=int(os.getenv("GURU_MAX_REQUEST_BYTES", "1000000")),
         )
 
@@ -74,6 +92,32 @@ class AppSettings:
             raise ValueError("GURU_MODEL_MAX_TOKENS must be positive")
         if self.model_provider == "ollama" and not self.ollama_base_url:
             raise ValueError("GURU_OLLAMA_BASE_URL is required when GURU_MODEL_PROVIDER=ollama")
+        if self.web_search_provider not in {"disabled", "tavily"}:
+            raise ValueError("GURU_WEB_SEARCH_PROVIDER must be disabled or tavily")
+        if self.web_search_timeout_seconds <= 0:
+            raise ValueError("GURU_WEB_SEARCH_TIMEOUT_SECONDS must be positive")
+        if self.web_extract_timeout_seconds <= 0:
+            raise ValueError("GURU_WEB_EXTRACT_TIMEOUT_SECONDS must be positive")
+        if not 1 <= self.web_search_max_results <= 10:
+            raise ValueError("GURU_WEB_SEARCH_MAX_RESULTS must be between 1 and 10")
+        if self.web_extract_max_bytes <= 0:
+            raise ValueError("GURU_WEB_EXTRACT_MAX_BYTES must be positive")
+        if not self.web_allowed_domains:
+            raise ValueError("GURU_WEB_ALLOWED_DOMAINS must contain at least one hostname")
+        for domain in self.web_allowed_domains:
+            normalized_domain = domain.strip().lower().rstrip(".")
+            if not normalized_domain or any(character in normalized_domain for character in "/?#:"):
+                raise ValueError("GURU_WEB_ALLOWED_DOMAINS must contain hostnames, not URLs")
+            if urlparse(f"https://{normalized_domain}").hostname != normalized_domain:
+                raise ValueError("GURU_WEB_ALLOWED_DOMAINS contains an invalid hostname")
+        if self.web_search_provider == "tavily":
+            if not self.web_search_api_key:
+                raise ValueError("GURU_WEB_SEARCH_API_KEY is required when GURU_WEB_SEARCH_PROVIDER=tavily")
+            parsed_search_url = urlparse(self.web_search_endpoint)
+            if parsed_search_url.scheme not in {"http", "https"} or not parsed_search_url.netloc:
+                raise ValueError("GURU_WEB_SEARCH_ENDPOINT must be an absolute HTTP(S) URL")
+            if parsed_search_url.username or parsed_search_url.password or parsed_search_url.query or parsed_search_url.fragment:
+                raise ValueError("GURU_WEB_SEARCH_ENDPOINT must not contain credentials, query, or fragment data")
         for field_name in ("institution_connector_source_id", "institution_connector_institution_id", "institution_connector_display_name"):
             if not getattr(self, field_name).strip():
                 raise ValueError(f"{field_name} must not be blank")
@@ -83,6 +127,8 @@ class AppSettings:
                 raise ValueError("GURU_INSTITUTION_CONNECTOR_BASE_URL must be an absolute HTTP(S) URL")
         if self.environment != "production":
             return
+        if self.web_search_provider == "tavily" and urlparse(self.web_search_endpoint).scheme != "https":
+            raise ValueError("production requires the public-web search provider to use HTTPS")
         if self.dev_bearer_token == "dev-token":
             raise ValueError("the development bearer token must be replaced in production")
         if not self.allowed_origins:
