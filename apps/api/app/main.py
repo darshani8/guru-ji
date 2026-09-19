@@ -15,6 +15,7 @@ from .api.routes.audit import router as audit_router
 from .api.routes.briefings import router as briefings_router
 from .api.routes.chat import router as chat_router
 from .api.routes.health import router as health_router
+from .api.routes.research import router as research_router
 from .api.routes.sources import router as sources_router
 from .api.routes.voice import router as voice_router
 from .config.settings import AppSettings
@@ -42,6 +43,7 @@ app.include_router(chat_router)
 app.include_router(briefings_router)
 app.include_router(voice_router)
 app.include_router(sources_router)
+app.include_router(research_router)
 app.include_router(audit_router)
 web_root = Path(__file__).resolve().parents[2] / "web"
 if web_root.exists():
