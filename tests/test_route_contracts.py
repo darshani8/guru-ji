@@ -35,6 +35,7 @@ class RouteContractTests(unittest.TestCase):
         self.assertEqual(response.json()["status"], "complete")
         self.assertTrue(response.json()["citations"])
         self.assertTrue(response.json()["warnings"])
+        self.assertEqual(response.json()["generation_mode"], "deterministic")
 
     def test_student_cannot_view_source_metadata(self):
         response = self.client.get("/v1/sources", headers=self.headers)
