@@ -45,6 +45,30 @@ class HardeningTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "GURU_OLLAMA_BASE_URL"):
             settings.ensure_safe_for_production()
 
+    def test_web_search_requires_a_provider_key_when_enabled(self):
+        settings = AppSettings(environment="development", web_search_provider="tavily")
+        with self.assertRaisesRegex(ValueError, "GURU_WEB_SEARCH_API_KEY"):
+            settings.ensure_safe_for_production()
+
+    def test_production_rejects_insecure_web_search_endpoint(self):
+        settings = AppSettings(
+            environment="production",
+            dev_bearer_token="not-the-default-token",
+            allowed_origins=("https://guru.example.test",),
+            control_database_url="postgresql://user:pass@localhost/guru",
+            oidc_issuer_url="https://issuer.example.test/",
+            oidc_audience="guru-api",
+            oidc_jwks_url="https://issuer.example.test/.well-known/jwks.json",
+            demo_data_enabled=False,
+            institution_connector_base_url="https://connector.example.test",
+            institution_connector_auth_token="secret",
+            web_search_provider="tavily",
+            web_search_endpoint="http://search.example.test/search",
+            web_search_api_key="search-secret",
+        )
+        with self.assertRaisesRegex(ValueError, "public-web search provider to use HTTPS"):
+            settings.ensure_safe_for_production()
+
     def test_production_rejects_demo_data(self):
         settings = AppSettings(
             environment="production",
