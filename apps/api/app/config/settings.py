@@ -18,11 +18,14 @@ class AppSettings:
 
     @classmethod
     def from_env(cls) -> "AppSettings":
-        origins = tuple(item.strip() for item in os.getenv("GURU_ALLOWED_ORIGINS", "http://localhost:5173").split(",") if item.strip())
+        environment = os.getenv("GURU_ENVIRONMENT", "development").strip().lower()
+        configured_origins = os.getenv("GURU_ALLOWED_ORIGINS")
+        default_origins = "" if environment == "production" else "http://localhost:5173"
+        origins = tuple(item.strip() for item in (configured_origins or default_origins).split(",") if item.strip())
         return cls(
             app_name=os.getenv("GURU_APP_NAME", "guru-ji-api"),
             version=os.getenv("GURU_VERSION", "0.1.0"),
-            environment=os.getenv("GURU_ENVIRONMENT", "development"),
+            environment=environment,
             allowed_origins=origins,
             dev_bearer_token=os.getenv("GURU_DEV_BEARER_TOKEN", "dev-token"),
             control_database_url=os.getenv("CONTROL_DATABASE_URL", "sqlite:///./data/guru_ji.db"),
@@ -30,8 +33,16 @@ class AppSettings:
         )
 
     def ensure_safe_for_production(self) -> None:
-        if self.environment == "production" and self.dev_bearer_token == "dev-token":
+        if self.max_request_bytes <= 0:
+            raise ValueError("GURU_MAX_REQUEST_BYTES must be positive")
+        if self.environment != "production":
+            return
+        if self.dev_bearer_token == "dev-token":
             raise ValueError("the development bearer token must be replaced in production")
+        if not self.allowed_origins:
+            raise ValueError("GURU_ALLOWED_ORIGINS must be set in production")
+        if not self.control_database_url or not self.control_database_url.startswith(("postgresql://", "postgres://")):
+            raise ValueError("production requires CONTROL_DATABASE_URL to use PostgreSQL")
 
 
 __all__ = ["AppSettings"]
