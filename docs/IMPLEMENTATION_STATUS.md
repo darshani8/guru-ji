@@ -9,7 +9,8 @@
 - Request source IDs are honored and must belong to the requested College. Unknown, inactive, cross-College, or unregistered sources are refused before connector execution.
 - Department and Batch scope is preserved through the executor. The current demo tools explicitly refuse narrower scopes because they only return College-level aggregates.
 - Policy-aware orchestration with plan classification, sequential connector execution, citations, warnings, complete/partial/refused statuses, and DENIED audit outcomes for unauthorized requests.
-- Development-only identity adapter using Authorization: Bearer dev-token plus demo headers. Production must replace this with OIDC/JWT validation.
+- Development-only identity adapter using Authorization: Bearer dev-token plus demo headers.
+- JWKS-backed OIDC/JWT verification boundary for production, with issuer, audience, expiry, required-claim, and safe-algorithm checks; verified claims map only to explicit roles, capabilities, and institution scopes.
 - Voice session lifecycle with a ten-session cap and ephemeral audio-retention semantics; realtime provider credentials are deliberately disabled.
 - Optional public-web boundary with domain allowlisting and prompt-injection warnings. Web content remains untrusted data.
 - FastAPI routes for liveness/readiness, JSON chat, SSE chat (`stream=true` or `/v1/chat/stream`), daily briefings, sources, audit, and voice session lifecycle.
@@ -22,11 +23,11 @@
 
 ## Validation
 
-The exported branch snapshot was checked with Python 3.12 and the declared runtime dependencies installed. Forty-seven automated tests pass, including HTTP contract, JSON/SSE chat, persistence, configuration-hardening, and request-size tests. Python compilation passes. The live Uvicorn smoke test passes with `LIVE_SMOKE_OK` and covers readiness, source metadata, chat, briefing creation, audit history, and the mounted frontend. PostgreSQL adapter construction and configuration paths are covered, but no live PostgreSQL server was available in this validation run.
+The exported branch snapshot was checked with Python 3.12 and the declared runtime dependencies installed. Fifty-two automated tests pass, including HTTP contract, JSON/SSE chat, persistence, OIDC/JWT verification, configuration-hardening, and request-size tests. Python compilation passes. The live Uvicorn smoke test passes with `LIVE_SMOKE_OK` and covers readiness, source metadata, chat, briefing creation, audit history, and the mounted frontend. PostgreSQL adapter construction and configuration paths are covered, but no live PostgreSQL server was available in this validation run.
 
 ## Intentionally not claimed
 
-This is a hardened local vertical slice, not a production deployment. It does not include a live institutional database, real OIDC/JWT keys, hosted-model credentials, WebRTC signaling, secret management, or production observability. The College A connector remains deterministic demo data. Those integrations need the actual institution contracts, security approvals, and deployment secrets rather than invented placeholders. A PostgreSQL adapter now exists, but it still needs a private PostgreSQL service, migrations/backup policy, credentials, connection-pool tuning, and deployment testing before production use.
+This is a hardened local vertical slice, not a production deployment. It does not include a live institutional database, the institution's real OIDC issuer/JWKS configuration, hosted-model credentials, WebRTC signaling, secret management, or production observability. The College A connector remains deterministic demo data. Those integrations need the actual institution contracts, security approvals, and deployment secrets rather than invented placeholders. A PostgreSQL adapter and OIDC/JWT verification boundary now exist, but they still need private services, credentials, connection-pool tuning, identity-claim mapping approval, and deployment testing before production use.
 
 ## Local flow
 
