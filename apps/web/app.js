@@ -1,21 +1,239 @@
-const state={sources:[],audit:[],research:[]};
-const $=id=>document.getElementById(id);
-const roleNames={student:'Student',faculty:'Faculty',main_admin:'Main Admin'};
-function controls(){return{principal:$('principal').value.trim()||'demo-user',role:$('role').value,college:$('college').value.trim()||'college_a',capabilities:[...document.querySelectorAll('.capability-list input:checked')].map(x=>x.value)}}
-function headers(json=false){const c=controls();const h={'Authorization':'Bearer dev-token','X-Demo-Principal':c.principal,'X-Demo-Role':c.role,'X-Demo-College':c.college,'X-Demo-Capabilities':c.capabilities.join(',')};if(json)h['Content-Type']='application/json';return h}
-async function api(path,options={}){const response=await fetch(path,{...options,headers:{...headers(Boolean(options.body)),...(options.headers||{})}});let data={};try{data=await response.json()}catch{}if(!response.ok)throw new Error(data.detail||data.error?.message||'Request failed');return data}
-function toast(message){const node=$('toast');node.textContent=message;node.classList.add('show');clearTimeout(state.toast);state.toast=setTimeout(()=>node.classList.remove('show'),3300)}
-function setBadge(id,text,kind){const node=$(id);node.textContent=text;node.className='status-badge '+kind}
-function updateIdentity(){const c=controls();$('principal-label').textContent=c.principal;$('scope-chip').textContent=c.college.replaceAll('_',' ').replace(/\b\w/g,x=>x.toUpperCase());$('identity-summary').textContent=(roleNames[c.role]||c.role)+' · '+$('scope-chip').textContent}
-async function loadReadiness(){try{const [live,ready]=await Promise.all([api('/v1/health/live'),api('/v1/health/ready')]);setBadge('api-badge','API '+live.version,'ok');$('database-status').textContent=ready.database==='sqlite'?'SQLite':'Memory';$('database-summary').textContent=ready.database_ok?'Ready · persistent control plane':'Not ready';$('database-status').style.color=ready.database_ok?'var(--success)':'var(--danger)';$('source-count').textContent=ready.sources;$('source-summary').textContent=ready.tools+' approved tools'}catch(error){setBadge('api-badge','API unavailable','error');$('database-status').textContent='Offline';$('database-summary').textContent=error.message}}
-function renderSources(){const node=$('sources-list');if(!state.sources.length){node.innerHTML='<div class="empty-row">No source metadata returned for this identity.</div>';return}node.replaceChildren(...state.sources.map(item=>{const row=document.createElement('div');row.className='source-row';const name=document.createElement('div');name.className='source-name';name.innerHTML='<strong>'+(item.display_name||item.source_id)+'</strong><span>'+item.institution_id+' · '+item.connector_type+'</span>';const health=document.createElement('div');health.className='source-health';const pill=document.createElement('span');pill.className='health-pill '+((item.health?.status||item.status)==='unknown'?'unknown':'');pill.textContent=item.health?.status||item.status||'unknown';const freshness=document.createElement('span');freshness.className='source-name';freshness.textContent=item.health?.freshness||'not checked';health.append(pill,freshness);row.append(name,health);return row}))}
-async function loadSources(){const node=$('sources-list');node.innerHTML='<div class="loading-row">Checking approved source metadata…</div>';try{const data=await api('/v1/sources');state.sources=data.sources||[];renderSources()}catch(error){node.innerHTML='<div class="error-text">'+error.message+'. Grant source:view_metadata in the local session controls.</div>'}}
-function renderAudit(){const node=$('audit-list');$('audit-count').textContent=state.audit.length;if(!state.audit.length){node.innerHTML='<div class="empty-row">No audit events yet. Ask a question to create one.</div>';return}node.replaceChildren(...state.audit.slice(0,8).map(item=>{const row=document.createElement('div');row.className='audit-row';const left=document.createElement('div');const time=item.occurred_at?new Date(item.occurred_at).toLocaleTimeString([], {hour:'2-digit',minute:'2-digit'}):'—';left.innerHTML='<strong>'+(item.event_type||'assistant.ask')+'</strong><span>'+time+' · '+(item.request_id||'—')+'</span>';const right=document.createElement('div');const result=document.createElement('span');result.className='audit-result '+String(item.outcome||'').toLowerCase();result.textContent=item.outcome||'unknown';right.append(result);row.append(left,right);return row}))}
-async function loadAudit(){const node=$('audit-list');try{const data=await api('/v1/audit/recent?limit=20');state.audit=data.events||data.audit||[];renderAudit()}catch(error){node.innerHTML='<div class="error-text">'+error.message+'</div>'}}
-function addMessage(kind,text,answer){const conversation=$('conversation');const message=document.createElement('div');message.className='message '+kind;const bubble=document.createElement('div');bubble.className='bubble';if(kind==='assistant'&&answer){const status=document.createElement('span');status.className='answer-status '+(answer.status==='refused'?'refused':answer.status==='partial'?'partial':'');status.textContent=answer.status||'complete';bubble.append(status)}const body=document.createElement('div');body.textContent=text;bubble.append(body);if(answer){const evidence=document.createElement('div');evidence.className='evidence-block';const citations=answer.citations||[];const warnings=answer.warnings||[];const mode=answer.generation_mode||'deterministic';evidence.innerHTML='<strong>'+citations.length+' citation(s)</strong>'+(warnings.length?' · '+warnings.length+' warning(s)':'')+' · '+mode;bubble.append(evidence)}message.append(bubble);conversation.append(message);conversation.scrollTop=conversation.scrollHeight}
-async function ask(prompt){const text=prompt.trim();if(!text)return;addMessage('user',text);$('prompt').value='';const conversation=$('conversation');const loading=document.createElement('div');loading.className='message assistant';loading.innerHTML='<div class="assistant-avatar">GJ</div><div class="bubble">Thinking within approved scope…</div>';conversation.append(loading);conversation.scrollTop=conversation.scrollHeight;try{const data=await api('/v1/chat',{method:'POST',body:JSON.stringify({prompt:text,institution_scope:{college_id:controls().college},channel:'text'})});loading.remove();const answer=data.answer||data;addMessage('assistant',answer.answer||answer.refusal_reason||'No answer returned.',answer);await loadAudit()}catch(error){loading.remove();addMessage('assistant',error.message);toast(error.message)}}
-async function dailyBriefing(){try{toast('Preparing the daily briefing…');const data=await api('/v1/briefings/daily',{method:'POST',body:JSON.stringify({college_id:controls().college})});addMessage('assistant',data.answer?.answer||'Daily briefing prepared.',data.answer);await loadAudit();toast('Daily briefing stored in the control database.')}catch(error){toast(error.message)}}
-function renderResearch(data){const node=$('research-results');node.replaceChildren();const notice=document.createElement('p');notice.className='research-notice';notice.textContent=`${data.status||'partial'} · ${data.results?.length||0} result(s) · retrieved ${data.searched_at?new Date(data.searched_at).toLocaleString():'just now'}`;node.append(notice);if(data.results?.length){data.results.forEach(item=>{const card=document.createElement('article');card.className='research-result';const title=document.createElement('a');title.className='research-title';title.href=item.url;title.target='_blank';title.rel='noopener noreferrer';title.textContent=item.title||item.url;const excerpt=document.createElement('p');excerpt.textContent=item.excerpt||'No safe excerpt returned.';const meta=document.createElement('span');meta.className='research-meta';meta.textContent=(item.extracted?'Page retrieved':'Search snippet only')+(item.warnings?.length?` · ${item.warnings.length} warning(s)`:'' );card.append(title,excerpt,meta);node.append(card)})}else{const empty=document.createElement('div');empty.className='empty-row';empty.textContent='No allowlisted result was returned.';node.append(empty)}if(data.warnings?.length){const warning=document.createElement('div');warning.className='research-warning';warning.textContent=data.warnings.map(item=>item.message).join(' ');node.append(warning)}}
-async function researchWeb(){const query=$('research-query').value.trim();if(!query)return;const node=$('research-results');const loading=document.createElement('div');loading.className='loading-row';loading.textContent='Searching configured official sources…';node.replaceChildren(loading);try{const data=await api('/v1/research/web',{method:'POST',body:JSON.stringify({query,max_results:5})});renderResearch(data);await loadAudit();toast('Official-source research completed.')}catch(error){const failure=document.createElement('div');failure.className='error-text';failure.textContent=error.message;node.replaceChildren(failure);toast(error.message)}}
-async function refreshAll(){updateIdentity();await loadReadiness();await Promise.all([loadSources(),loadAudit()])}
-document.querySelector('#chat-form').addEventListener('submit',event=>{event.preventDefault();ask($('prompt').value)});document.querySelector('#research-form').addEventListener('submit',event=>{event.preventDefault();researchWeb()});document.querySelectorAll('.suggestion').forEach(button=>button.addEventListener('click',()=>ask(button.textContent)));$('prompt').addEventListener('keydown',event=>{if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();ask(event.target.value)}});$('daily-button').addEventListener('click',dailyBriefing);$('health-button').addEventListener('click',async()=>{await loadSources();toast('Source health refreshed.')});$('refresh-button').addEventListener('click',refreshAll);$('sources-button').addEventListener('click',loadSources);$('audit-button').addEventListener('click',loadAudit);['principal','role','college'].forEach(id=>$(id).addEventListener('input',updateIdentity));document.querySelectorAll('.capability-list input').forEach(input=>input.addEventListener('change',()=>{updateIdentity();loadSources()}));refreshAll();
+const state = {
+  voiceSessionId: null,
+  voiceTransport: null,
+  requestInFlight: false,
+};
+
+const session = {
+  principal: 'demo-user',
+  role: 'student',
+  college: 'college_a',
+  capabilities: ['ask:read_only', 'voice:start'],
+};
+
+const $ = (id) => document.getElementById(id);
+
+function headers(json = false) {
+  const result = {
+    Authorization: 'Bearer dev-token',
+    'X-Demo-Principal': session.principal,
+    'X-Demo-Role': session.role,
+    'X-Demo-College': session.college,
+    'X-Demo-Capabilities': session.capabilities.join(','),
+  };
+  if (json) result['Content-Type'] = 'application/json';
+  return result;
+}
+
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    ...options,
+    headers: { ...headers(Boolean(options.body)), ...(options.headers || {}) },
+  });
+  let data = {};
+  try {
+    data = await response.json();
+  } catch {
+    // Some health or proxy failures do not return JSON.
+  }
+  if (!response.ok) {
+    throw new Error(data.detail || data.error?.message || `Request failed (${response.status})`);
+  }
+  return data;
+}
+
+function setApiStatus(label, kind = 'neutral') {
+  const node = $('api-status');
+  node.className = `status ${kind}`;
+  $('api-status-label').textContent = label;
+}
+
+function showToast(message) {
+  const node = $('toast');
+  node.textContent = message;
+  node.classList.add('show');
+  clearTimeout(state.toastTimer);
+  state.toastTimer = setTimeout(() => node.classList.remove('show'), 3600);
+}
+
+function scrollHistory() {
+  const history = $('chat-history');
+  history.scrollTop = history.scrollHeight;
+}
+
+function addMessage(kind, text, options = {}) {
+  const article = document.createElement('article');
+  article.className = `message ${kind}-message${options.voice ? ' voice-reply' : ''}`;
+
+  const avatar = document.createElement('div');
+  avatar.className = 'avatar';
+  avatar.textContent = kind === 'user' ? 'You' : 'GJ';
+
+  const body = document.createElement('div');
+  body.className = 'message-body';
+
+  const label = document.createElement('span');
+  label.className = 'message-label';
+  label.textContent = kind === 'user' ? 'You' : 'Guru Ji';
+
+  const bubble = document.createElement('div');
+  bubble.className = 'bubble';
+
+  if (options.answer) {
+    const status = document.createElement('span');
+    status.className = `answer-status ${options.answer.status === 'refused' ? 'refused' : options.answer.status === 'partial' ? 'partial' : ''}`;
+    status.textContent = options.answer.status || 'complete';
+    bubble.append(status);
+  }
+
+  if (options.voice && kind === 'assistant') {
+    const tag = document.createElement('span');
+    tag.className = 'voice-tag';
+    tag.textContent = '◉ Voice response';
+    bubble.append(tag);
+  }
+
+  const copy = document.createElement('div');
+  copy.textContent = text;
+  bubble.append(copy);
+
+  if (options.answer) {
+    const citations = options.answer.citations || [];
+    const warnings = options.answer.warnings || [];
+    const evidence = document.createElement('div');
+    evidence.className = 'evidence-block';
+    evidence.textContent = `${citations.length} citation(s)${warnings.length ? ` · ${warnings.length} warning(s)` : ''} · ${options.answer.generation_mode || 'deterministic'}`;
+    bubble.append(evidence);
+  }
+
+  body.append(label, bubble);
+  article.append(avatar, body);
+  $('chat-history').append(article);
+  scrollHistory();
+  return article;
+}
+
+function setComposerBusy(busy) {
+  state.requestInFlight = busy;
+  $('text-input').disabled = busy;
+  $('send-button').disabled = busy;
+  $('send-button').textContent = busy ? 'Sending…' : 'Send ↗';
+}
+
+async function ask(prompt) {
+  const text = prompt.trim();
+  if (!text || state.requestInFlight) return;
+
+  addMessage('user', text);
+  $('text-input').value = '';
+  setComposerBusy(true);
+  const loading = addMessage('assistant', 'Thinking within approved scope…');
+  loading.classList.add('loading-message');
+
+  try {
+    const data = await api('/v1/chat', {
+      method: 'POST',
+      body: JSON.stringify({
+        prompt: text,
+        institution_scope: { college_id: session.college },
+        channel: 'text',
+      }),
+    });
+    loading.remove();
+    const answer = data.answer || data;
+    addMessage('assistant', answer.answer || answer.refusal_reason || 'No answer returned.', { answer });
+  } catch (error) {
+    loading.remove();
+    addMessage('assistant', error.message);
+    showToast(error.message);
+  } finally {
+    setComposerBusy(false);
+    $('text-input').focus();
+  }
+}
+
+function renderVoiceState(message = '') {
+  const active = Boolean(state.voiceSessionId);
+  const button = $('voice-button');
+  button.classList.toggle('active', active);
+  button.setAttribute('aria-pressed', String(active));
+  $('voice-button-label').textContent = active ? 'End voice session' : 'Voice Assistant';
+  $('voice-status-line').textContent = message;
+}
+
+async function startVoiceSession() {
+  if (state.voiceSessionId) return;
+  $('voice-button').disabled = true;
+  renderVoiceState('Starting a bounded voice session…');
+  try {
+    const data = await api('/v1/voice/sessions', { method: 'POST' });
+    state.voiceSessionId = data.session_id;
+    state.voiceTransport = data.transport || 'unknown';
+    if (state.voiceTransport === 'not_configured') {
+      renderVoiceState('Voice session ready. Live audio transport is not configured yet.');
+    } else {
+      renderVoiceState(`Voice session ready via ${state.voiceTransport}.`);
+    }
+  } catch (error) {
+    renderVoiceState('');
+    showToast(error.message);
+  } finally {
+    $('voice-button').disabled = false;
+  }
+}
+
+async function closeVoiceSession() {
+  if (!state.voiceSessionId) return;
+  const sessionId = state.voiceSessionId;
+  state.voiceSessionId = null;
+  state.voiceTransport = null;
+  $('voice-button').disabled = true;
+  renderVoiceState('Closing voice session…');
+  try {
+    await api(`/v1/voice/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
+    renderVoiceState('Voice session closed.');
+  } catch (error) {
+    renderVoiceState('Voice session ended locally; server cleanup may retry on expiry.');
+    showToast(error.message);
+  } finally {
+    $('voice-button').disabled = false;
+  }
+}
+
+async function toggleVoiceSession() {
+  if (state.voiceSessionId) await closeVoiceSession();
+  else await startVoiceSession();
+}
+
+async function loadApiStatus() {
+  try {
+    const data = await api('/v1/health/live');
+    setApiStatus(`API ${data.version || 'ready'}`, 'ok');
+  } catch (error) {
+    setApiStatus('API unavailable', 'error');
+  }
+}
+
+$('text-form').addEventListener('submit', (event) => {
+  event.preventDefault();
+  ask($('text-input').value);
+});
+
+$('text-input').addEventListener('keydown', (event) => {
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    ask(event.target.value);
+  }
+});
+
+$('voice-button').addEventListener('click', toggleVoiceSession);
+window.addEventListener('beforeunload', () => {
+  if (!state.voiceSessionId) return;
+  fetch(`/v1/voice/sessions/${encodeURIComponent(state.voiceSessionId)}`, {
+    method: 'DELETE',
+    headers: headers(),
+    keepalive: true,
+  }).catch(() => {});
+});
+
+loadApiStatus();
