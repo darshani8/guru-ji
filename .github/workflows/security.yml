@@ -2,32 +2,31 @@ name: security
 
 on:
   push:
-      branches: ["**"]
-        pull_request:
-          schedule:
-              - cron: "17 3 * * 1"
+    branches: ["**"]
+  pull_request:
+  schedule:
+    - cron: "17 3 * * 1"
 
-              permissions:
-                contents: read
+permissions:
+  contents: read
 
-                jobs:
-                  dependency-audit:
-                      runs-on: ubuntu-latest
-                          timeout-minutes: 15
-                              steps:
-                                    - name: Check out source
-                                            uses: actions/checkout@v4
-                                                  - name: Set up Python
-                                                          uses: actions/setup-python@v5
-                                                                  with:
-                                                                            python-version: "3.12"
-                                                                                  - name: Set up uv
-                                                                                          uses: astral-sh/setup-uv@v5
-                                                                                                  with:
-                                                                                                            version: "0.6.x"
-                                                                                                                      enable-cache: true
-                                                                                                                            - name: Install development tools
-                                                                                                                                    run: uv sync --extra dev
-                                                                                                                                          - name: Audit resolved Python dependencies
-                                                                                                                                                  run: uv run pip-audit --strict --progress-spinner off
-                                                                                                                                                  
+jobs:
+  dependency-audit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          version: "0.6.x"
+          enable-cache: true
+      - name: Install development tools
+        run: uv sync --extra dev
+      - name: Audit resolved Python dependencies
+        run: uv run pip-audit --strict --progress-spinner off
