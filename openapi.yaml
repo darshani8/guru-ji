@@ -35,6 +35,8 @@ tags:
     description: Authorized source health information
   - name: Briefings
     description: Approved institutional daily briefings
+  - name: Research
+    description: Explicit, bounded public-web research over configured official domains
   - name: Audit
     description: Restricted audit-event access
 paths:
@@ -176,6 +178,45 @@ paths:
           $ref: '#/components/responses/RateLimited'
         '500':
           $ref: '#/components/responses/InternalError'
+        '503':
+          $ref: '#/components/responses/ServiceUnavailable'
+
+  /v1/research/web:
+    post:
+      operationId: runPublicWebResearch
+      tags: [Research]
+      summary: Search configured official public-web domains
+      description: |
+        Runs an explicit public-web research request for an authenticated
+        principal with `ask:read_only`. Search results are filtered against the
+        configured allowlist, page retrieval follows no redirects, and all
+        returned page text is untrusted data rather than executable instructions.
+        Provider credentials and raw prompts are not returned or persisted in the
+        audit metadata.
+      parameters:
+        - $ref: '#/components/parameters/RequestIdHeader'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PublicWebResearchRequest'
+      responses:
+        '200':
+          description: Bounded search results with citations and warnings
+          headers:
+            X-Request-ID:
+              $ref: '#/components/headers/RequestId'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PublicWebResearchResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/BadRequest'
         '503':
           $ref: '#/components/responses/ServiceUnavailable'
 
@@ -676,6 +717,105 @@ components:
             $ref: '#/components/schemas/ToolSummary'
         usage:
           $ref: '#/components/schemas/UsageSummary'
+
+    PublicWebResearchRequest:
+      type: object
+      additionalProperties: false
+      required: [query]
+      properties:
+        query:
+          type: string
+          minLength: 1
+          maxLength: 500
+          description: Search question; the raw query is not persisted in audit metadata.
+        allowed_domains:
+          type: array
+          maxItems: 20
+          items:
+            type: string
+            pattern: '^[a-z0-9][a-z0-9.-]*[a-z0-9]$'
+          description: Optional subset of the server-configured official-domain allowlist.
+        max_results:
+          type: integer
+          minimum: 1
+          maximum: 10
+          default: 5
+
+    PublicWebResearchResponse:
+      type: object
+      additionalProperties: false
+      required: [request_id, status, query, provider, allowed_domains, searched_at, untrusted_content, results, warnings]
+      properties:
+        request_id:
+          type: string
+        status:
+          type: string
+          enum: [complete, partial]
+        query:
+          type: string
+          maxLength: 500
+        provider:
+          type: string
+        allowed_domains:
+          type: array
+          items:
+            type: string
+        searched_at:
+          type: string
+          format: date-time
+        untrusted_content:
+          type: boolean
+          const: true
+        results:
+          type: array
+          maxItems: 10
+          items:
+            $ref: '#/components/schemas/PublicWebResearchResult'
+        warnings:
+          type: array
+          items:
+            $ref: '#/components/schemas/WebResearchWarning'
+
+    PublicWebResearchResult:
+      type: object
+      additionalProperties: false
+      required: [url, title, excerpt, retrieved_at, extracted, untrusted, warnings]
+      properties:
+        url:
+          type: string
+          format: uri
+        title:
+          type: string
+          maxLength: 300
+        excerpt:
+          type: string
+          maxLength: 2000
+        retrieved_at:
+          type: string
+          format: date-time
+        extracted:
+          type: boolean
+        untrusted:
+          type: boolean
+          const: true
+        warnings:
+          type: array
+          items:
+            type: string
+
+    WebResearchWarning:
+      type: object
+      additionalProperties: false
+      required: [code, message]
+      properties:
+        code:
+          type: string
+        message:
+          type: string
+          maxLength: 500
+        source_id:
+          type: string
+          format: uri
 
     Citation:
       type: object
