@@ -40,6 +40,11 @@ class HardeningTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "OIDC issuer"):
             settings.ensure_safe_for_production()
 
+    def test_ollama_requires_an_explicit_base_url(self):
+        settings = AppSettings(environment="development", model_provider="ollama")
+        with self.assertRaisesRegex(ValueError, "GURU_OLLAMA_BASE_URL"):
+            settings.ensure_safe_for_production()
+
     def test_backend_selection_keeps_memory_and_sqlite_explicit(self):
         self.assertEqual(_build_store(AppSettings(control_database_url=None)).backend_name, "memory")
         sqlite = _build_store(AppSettings(control_database_url=":memory:"))
