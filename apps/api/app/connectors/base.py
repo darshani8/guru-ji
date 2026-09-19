@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
-from ..domain.provenance import Provenance
 from ..domain.results import ResultStatus, ToolResult
 from ..domain.source_health import SourceHealth
 from ..policy.query_limits import QueryLimits
