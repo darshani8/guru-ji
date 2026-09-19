@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Protocol
 
+from ..domain.principals import InstitutionScope, PrincipalType
 from ..domain.results import ResultStatus, ToolResult
 from ..domain.source_health import SourceHealth
 from ..policy.query_limits import QueryLimits
@@ -15,6 +16,13 @@ class ConnectorContext:
     request_id: str
     source_id: str
     limits: QueryLimits
+    principal_id: str | None = None
+    principal_type: PrincipalType | None = None
+    institution_scope: InstitutionScope | None = None
+
+    def __post_init__(self) -> None:
+        if not self.request_id.strip() or not self.source_id.strip():
+            raise ValueError("connector context identifiers must not be blank")
 
 
 class ReadOnlyConnector(Protocol):

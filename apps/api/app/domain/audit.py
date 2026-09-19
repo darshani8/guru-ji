@@ -27,6 +27,7 @@ class AuditEvent:
     tool_names: tuple[str, ...] = ()
     outcome: AuditOutcome = AuditOutcome.SUCCESS
     redactions_applied: tuple[str, ...] = ()
+    decision_metadata: tuple[tuple[str, str | int | bool | None], ...] = ()
     duration_ms: int | None = None
 
     def __post_init__(self) -> None:
@@ -40,6 +41,14 @@ class AuditEvent:
         object.__setattr__(self, "source_ids", tuple(self.source_ids))
         object.__setattr__(self, "tool_names", tuple(self.tool_names))
         object.__setattr__(self, "redactions_applied", tuple(self.redactions_applied))
+        metadata: list[tuple[str, str | int | bool | None]] = []
+        for key, value in self.decision_metadata:
+            if not str(key).strip():
+                raise ValueError("decision metadata keys must not be blank")
+            if not isinstance(value, (str, int, bool)) and value is not None:
+                raise ValueError("decision metadata values must be scalar")
+            metadata.append((str(key).strip(), value))
+        object.__setattr__(self, "decision_metadata", tuple(metadata))
         if self.occurred_at.tzinfo is None or self.occurred_at.utcoffset() is None:
             raise ValueError("occurred_at must be timezone-aware")
         if self.duration_ms is not None and self.duration_ms < 0:

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from time import monotonic
 
 from ..config.source_registry import SourceRegistry
@@ -11,10 +11,12 @@ from ..domain.audit import AuditEvent, AuditOutcome
 from ..domain.principals import Capability
 from ..domain.requests import ChatRequest
 from ..domain.results import ResultStatus
-from ..persistence.database import InMemoryControlStore
+from ..persistence.database import InMemoryControlStore, PostgresControlStore, SqliteControlStore
+from ..policy.pdp import LocalPolicyDecisionPoint, PolicyDecisionPoint
 from ..policy.query_limits import QueryLimits
 from ..tools.registry import ToolRegistry
 from ..providers.model_base import TextModel
+from ..observability.tracing import TraceRecorder
 from .answer_synthesizer import AssistantAnswer, apply_model_wording, synthesize
 from ..web_research.research_service import PublicWebResearchService, PublicWebResearchReport
 from ..web_research.search import WebSearchUnavailable
@@ -75,11 +77,13 @@ class AssistantService:
     sources: SourceRegistry
     tools: ToolRegistry
     connectors: ConnectorRegistry
-    store: InMemoryControlStore
+    store: InMemoryControlStore | PostgresControlStore | SqliteControlStore
     limits: QueryLimits = QueryLimits()
     model: TextModel | None = None
     model_max_tokens: int = 800
     web_research: PublicWebResearchService | None = None
+    pdp: PolicyDecisionPoint = field(default_factory=LocalPolicyDecisionPoint)
+    tracer: TraceRecorder = field(default_factory=TraceRecorder)
 
     async def _ask_public_web(self, request: ChatRequest, principal) -> AssistantAnswer:
         started = monotonic()
@@ -162,11 +166,25 @@ class AssistantService:
         if is_public_web_prompt(request.prompt):
             return await self._ask_public_web(request, principal)
         started = monotonic()
+        self.tracer.record(
+            "assistant.request",
+            trace_id=request.request_id,
+            attributes={
+                "request_id": request.request_id,
+                "conversation_id": request.conversation_id,
+                "principal_id": principal.principal_id if principal.authenticated else None,
+                "principal_type": principal.principal_type.value,
+                "scope_college_id": request.institution_scope.college_id,
+                "scope_department_id": request.institution_scope.department_id,
+                "scope_batch_id": request.institution_scope.batch_id,
+            },
+        )
         try:
             plan = build_tool_plan(request, self.tools, self.sources)
+            decisions = []
             results = await execute_plan(
                 plan, principal, self.tools, self.connectors, request.institution_scope,
-                request.request_id, self.limits,
+                request.request_id, self.limits, pdp=self.pdp, decision_log=decisions,
             )
             aggregate(results)
             answer = synthesize(request.request_id, results)
@@ -175,12 +193,35 @@ class AssistantService:
                 self.model,
                 max_tokens=self.model_max_tokens,
             )
+            duration_ms = int((monotonic() - started) * 1000)
+            outcome = _audit_outcome(answer, results)
+            self.tracer.record(
+                "assistant.completed",
+                trace_id=request.request_id,
+                attributes={
+                    "request_id": request.request_id,
+                    "conversation_id": request.conversation_id,
+                    "principal_id": principal.principal_id if principal.authenticated else None,
+                    "status": answer.status,
+                    "outcome": outcome.value,
+                    "latency_ms": duration_ms,
+                    "policy_version": self.pdp.policy_version,
+                    "provider_id": getattr(self.model, "provider_id", "deterministic"),
+                    "model_id": getattr(self.model, "model_id", "deterministic"),
+                },
+            )
             self.store.append_audit(AuditEvent(
                 event_id=f"audit-{request.request_id}", event_type="assistant.ask", request_id=request.request_id,
                 principal_id=principal.principal_id if principal.authenticated else None,
                 conversation_id=request.conversation_id, source_ids=tuple(step.source_id for step in plan),
-                tool_names=tuple(step.name for step in plan), outcome=_audit_outcome(answer, results),
-                duration_ms=int((monotonic() - started) * 1000),
+                tool_names=tuple(step.name for step in plan), outcome=outcome,
+                decision_metadata=(
+                    ("policy_version", self.pdp.policy_version),
+                    ("pdp_decision_ids", ",".join(item.decision_id for item in decisions)),
+                    ("provider_id", getattr(self.model, "provider_id", "deterministic")),
+                    ("model_id", getattr(self.model, "model_id", "deterministic")),
+                ),
+                duration_ms=duration_ms,
             ))
             return answer
         except (KeyError, ValueError) as exc:

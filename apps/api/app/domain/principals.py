@@ -22,6 +22,8 @@ class Capability(StrEnum):
     ASK_READ_ONLY = "ask:read_only"
     START_VOICE_SESSION = "voice:start"
     VIEW_SOURCE_METADATA = "source:view_metadata"
+    RUN_BRIEFING = "briefing:run"
+    VIEW_BRIEFING_HISTORY = "briefing:view_history"
     MANAGE_ACCESS = "access:manage"
 
 
