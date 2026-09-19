@@ -45,6 +45,36 @@ class HardeningTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "GURU_OLLAMA_BASE_URL"):
             settings.ensure_safe_for_production()
 
+    def test_production_rejects_demo_data(self):
+        settings = AppSettings(
+            environment="production",
+            dev_bearer_token="not-the-default-token",
+            allowed_origins=("https://guru.example.test",),
+            control_database_url="postgresql://user:pass@localhost/guru",
+            oidc_issuer_url="https://issuer.example.test/",
+            oidc_audience="guru-api",
+            oidc_jwks_url="https://issuer.example.test/.well-known/jwks.json",
+            demo_data_enabled=True,
+            institution_connector_base_url="https://connector.example.test",
+            institution_connector_auth_token="secret",
+        )
+        with self.assertRaisesRegex(ValueError, "deterministic demo data"):
+            settings.ensure_safe_for_production()
+
+    def test_production_requires_a_real_connector_after_auth_checks(self):
+        settings = AppSettings(
+            environment="production",
+            dev_bearer_token="not-the-default-token",
+            allowed_origins=("https://guru.example.test",),
+            control_database_url="postgresql://user:pass@localhost/guru",
+            oidc_issuer_url="https://issuer.example.test/",
+            oidc_audience="guru-api",
+            oidc_jwks_url="https://issuer.example.test/.well-known/jwks.json",
+            demo_data_enabled=False,
+        )
+        with self.assertRaisesRegex(ValueError, "GURU_INSTITUTION_CONNECTOR_BASE_URL"):
+            settings.ensure_safe_for_production()
+
     def test_backend_selection_keeps_memory_and_sqlite_explicit(self):
         self.assertEqual(_build_store(AppSettings(control_database_url=None)).backend_name, "memory")
         sqlite = _build_store(AppSettings(control_database_url=":memory:"))
