@@ -19,6 +19,9 @@ from ..tools.college_tools import build_college_tools
 from ..tools.health_tools import build_health_tools
 from ..tools.registry import ToolRegistry
 from ..voice.session_manager import VoiceSessionManager
+from ..web_research.extractor import AllowlistedHttpExtractor
+from ..web_research.research_service import PublicWebResearchService
+from ..web_research.search import TavilyHttpSearchProvider
 
 
 ControlStore = InMemoryControlStore | PostgresControlStore | SqliteControlStore
@@ -33,6 +36,7 @@ class Runtime:
     store: ControlStore
     assistant: AssistantService
     voice: VoiceSessionManager
+    web_research: PublicWebResearchService | None = None
     auth_verifier: JwtVerifier | None = None
 
 
@@ -88,6 +92,29 @@ def _build_model(settings: AppSettings):
     return None
 
 
+def _build_web_research(settings: AppSettings) -> PublicWebResearchService | None:
+    if settings.web_search_provider == "disabled":
+        return None
+    if settings.web_search_provider != "tavily":
+        raise ValueError("unsupported web search provider")
+    provider = TavilyHttpSearchProvider(
+        api_key=settings.web_search_api_key or "",
+        endpoint=settings.web_search_endpoint,
+        timeout_seconds=settings.web_search_timeout_seconds,
+    )
+    extractor = AllowlistedHttpExtractor(
+        allowed_domains=frozenset(settings.web_allowed_domains),
+        timeout_seconds=settings.web_extract_timeout_seconds,
+        max_response_bytes=settings.web_extract_max_bytes,
+    )
+    return PublicWebResearchService(
+        provider=provider,
+        extractor=extractor,
+        configured_domains=frozenset(settings.web_allowed_domains),
+        max_results=settings.web_search_max_results,
+    )
+
+
 def _build_connectors(settings: AppSettings) -> ConnectorRegistry:
     connectors = []
     source_ids: list[str] = []
@@ -123,6 +150,7 @@ def build_runtime(settings: AppSettings | None = None) -> Runtime:
     store = _build_store(settings)
     auth_verifier = None if settings.environment in {"development", "test"} else JwtVerifier(settings)
     model = _build_model(settings)
+    web_research = _build_web_research(settings)
     return Runtime(
         settings=settings,
         sources=sources,
@@ -139,6 +167,7 @@ def build_runtime(settings: AppSettings | None = None) -> Runtime:
             model_max_tokens=settings.model_max_tokens,
         ),
         voice=VoiceSessionManager(ttl_seconds=300, max_active=10),
+        web_research=web_research,
         auth_verifier=auth_verifier,
     )
 
