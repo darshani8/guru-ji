@@ -204,6 +204,41 @@
     .voice-control strong { display: block; color: var(--ink-soft); font-size: 11px; }
     .mini-button { padding: 7px 9px; color: var(--teal-dark); background: var(--teal-pale); border: 0; border-radius: 8px; font-size: 10px; font-weight: 800; }
 
+    .voice-assistant-panel { display: grid; grid-template-columns: minmax(0, 1.2fr) minmax(300px, .8fr); gap: 18px; margin-bottom: 18px; padding: 24px; }
+    .voice-stage { position: relative; display: flex; min-height: 264px; align-items: center; justify-content: center; overflow: hidden; background: radial-gradient(circle at 50% 45%, #f6ffff 0, #eaf7f8 33%, #f7fafc 72%); border: 1px solid #d8edef; border-radius: 15px; }
+    .voice-stage::before, .voice-stage::after { content: ""; position: absolute; width: 310px; height: 160px; border: 1px solid rgba(22,130,150,.12); border-radius: 50%; transform: rotate(-19deg); }
+    .voice-stage::after { width: 240px; height: 330px; transform: rotate(27deg); }
+    .voice-status { position: absolute; top: 16px; left: 17px; z-index: 1; display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 10px; font-weight: 850; letter-spacing: .08em; text-transform: uppercase; }
+    .voice-status-dot { width: 7px; height: 7px; border-radius: 50%; background: #8ca1b2; box-shadow: 0 0 0 4px rgba(140,161,178,.12); }
+    .voice-status.live { color: var(--green); }
+    .voice-status.live .voice-status-dot { background: #55ba86; box-shadow: 0 0 0 4px rgba(85,186,134,.15); animation: voice-pulse 1.3s infinite; }
+    .voice-orb { position: relative; z-index: 1; display: grid; place-items: center; width: 116px; height: 116px; color: #fff; background: linear-gradient(145deg, #f1ae6d, var(--orange)); border: 8px solid rgba(255,255,255,.9); border-radius: 50%; box-shadow: 0 0 0 14px rgba(215,122,55,.1), 0 18px 30px rgba(215,122,55,.2); transition: transform .25s, box-shadow .25s; }
+    .voice-orb.listening { transform: scale(1.07); box-shadow: 0 0 0 14px rgba(215,122,55,.12), 0 0 0 29px rgba(22,130,150,.07), 0 18px 34px rgba(215,122,55,.23); animation: voice-breathe 1.6s infinite; }
+    .voice-orb span { font-size: 32px; font-weight: 900; letter-spacing: -.1em; }
+    .voice-orb small { position: absolute; top: 130px; color: var(--ink-soft); font-size: 10px; font-weight: 800; white-space: nowrap; }
+    .voice-waveform { position: absolute; bottom: 18px; left: 50%; z-index: 1; display: flex; align-items: center; justify-content: center; gap: 4px; width: 120px; height: 28px; transform: translateX(-50%); }
+    .voice-waveform i { display: block; width: 3px; height: 8px; background: #80bec3; border-radius: 99px; opacity: .5; }
+    .voice-waveform.active i { opacity: 1; animation: voice-wave .9s ease-in-out infinite alternate; }
+    .voice-waveform i:nth-child(2), .voice-waveform i:nth-child(8) { animation-delay: .12s; }
+    .voice-waveform i:nth-child(3), .voice-waveform i:nth-child(7) { animation-delay: .23s; }
+    .voice-waveform i:nth-child(4), .voice-waveform i:nth-child(6) { animation-delay: .34s; }
+    .voice-waveform i:nth-child(5) { animation-delay: .45s; }
+    @keyframes voice-pulse { 50% { box-shadow: 0 0 0 7px rgba(85,186,134,.08); } }
+    @keyframes voice-breathe { 50% { transform: scale(1.1); } }
+    @keyframes voice-wave { from { height: 7px; } to { height: 25px; } }
+    .voice-transcript { display: flex; flex-direction: column; min-height: 264px; padding: 18px; background: #fbfcfd; border: 1px solid var(--line-soft); border-radius: 15px; }
+    .voice-transcript-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 10px; padding-bottom: 13px; border-bottom: 1px solid var(--line-soft); }
+    .voice-transcript-header strong { display: block; font-size: 13px; }
+    .voice-transcript-header span { display: block; margin-top: 3px; color: var(--muted); font-size: 10px; }
+    .voice-transcript-list { display: grid; gap: 11px; max-height: 125px; overflow: auto; padding: 14px 0; }
+    .voice-line { display: flex; gap: 9px; align-items: flex-start; }
+    .voice-line .speaker { width: 42px; flex: none; color: var(--teal-dark); font-size: 10px; font-weight: 850; text-transform: uppercase; }
+    .voice-line.user .speaker { color: var(--orange); }
+    .voice-line p { margin: 0; color: var(--ink-soft); font-size: 11px; }
+    .voice-actions { display: flex; gap: 8px; margin-top: auto; padding-top: 12px; border-top: 1px solid var(--line-soft); }
+    .voice-actions .button { flex: 1; }
+    .voice-mic { min-width: 140px; }
+    .voice-mic.active { color: #fff; background: var(--orange); }
     .research-panel { margin-bottom: 18px; }
     .research-form { display: flex; gap: 9px; margin-top: 15px; }
     .research-form input { flex: 1; min-width: 0; height: 40px; padding: 0 11px; color: var(--ink); background: #fff; border: 1px solid var(--line); border-radius: 9px; outline: none; font-size: 12px; }
@@ -261,6 +296,7 @@
       .metric-card { padding: 12px; }
       .metric-card strong { font-size: 18px; }
       .settings-panel { display: block; }
+      .voice-assistant-panel { grid-template-columns: 1fr; }
       .research-form { display: grid; }
       .research-form .button { width: 100%; }
       .footer { display: block; }
@@ -287,6 +323,7 @@
       <nav class="nav" aria-label="Prototype navigation">
         <a class="nav-item active" href="#overview"><span class="nav-icon">◈</span>Overview</a>
         <a class="nav-item" href="#chat"><span class="nav-icon">✦</span>Ask Guru Ji</a>
+        <a class="nav-item" href="#voice-assistant"><span class="nav-icon">◉</span>Voice Assistant</a>
         <a class="nav-item" href="#research"><span class="nav-icon">⌕</span>Official research</a>
         <a class="nav-item" href="#sources"><span class="nav-icon">⌁</span>Approved sources</a>
         <a class="nav-item" href="#audit"><span class="nav-icon">▤</span>Audit trail</a>
@@ -302,7 +339,7 @@
       </header>
 
       <section id="overview" class="hero panel">
-        <div class="hero-copy"><p class="eyebrow accent">Evidence before answers</p><h2>One safe place to understand your institution.</h2><p>Explore the Guru Ji experience in a browser-only prototype. Ask questions, inspect source health, preview research citations, and see how scope controls shape the interface.</p><div class="hero-actions"><button id="daily-button" class="button primary">Prepare daily briefing</button><button id="health-button" class="button secondary">Check source health</button></div></div>
+        <div class="hero-copy"><p class="eyebrow accent">Evidence before answers</p><h2>One safe place to understand your institution.</h2><p>Explore the Guru Ji experience in a browser-only prototype. Ask questions, start the Voice Assistant, inspect source health, preview research citations, and see how scope controls shape the interface.</p><div class="hero-actions"><button id="daily-button" class="button primary">Prepare daily briefing</button><button id="health-button" class="button secondary">Check source health</button></div></div>
         <div class="hero-orbit" aria-hidden="true"><div class="orbit-ring ring-one"></div><div class="orbit-ring ring-two"></div><div class="orbit-core"><b>GJ</b><small>trusted<br>context</small></div><span class="orbit-dot dot-one"></span><span class="orbit-dot dot-two"></span><span class="orbit-dot dot-three"></span></div>
       </section>
 
@@ -330,9 +367,23 @@
           <div class="field"><label for="college">College scope</label><input id="college" value="college_a" autocomplete="off"><span class="field-hint">Department and Batch scopes remain inside the selected college.</span></div>
           <div class="capability-list"><span class="field-label">Demo capabilities</span><label><input type="checkbox" value="ask:read_only" checked> Ask read-only</label><label><input type="checkbox" value="source:view_metadata" checked> View source metadata</label><label><input type="checkbox" value="voice:start" checked> Start voice session</label></div>
           <div class="identity-summary"><div class="identity-dot"></div><div><strong id="identity-summary">Main Admin · College A</strong><span>Capabilities are shown explicitly</span></div></div>
-          <div class="voice-control"><div><strong>Voice session preview</strong><p>Lifecycle only — no microphone is accessed.</p></div><button id="voice-button" class="mini-button" type="button">Start preview</button></div>
+          <div class="voice-control"><div><strong>Voice Assistant</strong><p>Open the full demo assistant below.</p></div><button id="voice-button" class="mini-button" type="button">Open assistant</button></div>
         </aside>
       </div>
+
+      <section id="voice-assistant" class="panel voice-assistant-panel">
+        <div class="voice-stage">
+          <div id="voice-status" class="voice-status"><span class="voice-status-dot"></span><span id="voice-status-label">Ready for voice</span></div>
+          <div id="voice-orb" class="voice-orb"><span>GJ</span><small id="voice-orb-label">Tap start to speak</small></div>
+          <div id="voice-waveform" class="voice-waveform" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+        </div>
+        <div class="voice-transcript">
+          <div class="voice-transcript-header"><div><strong>Voice transcript</strong><span>Demo assistant · College A scope</span></div><span class="scope-chip">Read-only</span></div>
+          <div id="voice-transcript-list" class="voice-transcript-list"><div class="voice-line"><span class="speaker">Guru Ji</span><p>Voice Assistant is ready. Start a demo session to hear how the conversation surface works.</p></div></div>
+          <p class="muted small">This visual prototype does not access your microphone or send audio anywhere.</p>
+          <div class="voice-actions"><button id="voice-start-button" class="button primary voice-mic" type="button">◉ Start voice assistant</button><button id="voice-mute-button" class="button ghost" type="button" disabled>Mute</button><button id="voice-end-button" class="button ghost" type="button" disabled>End</button></div>
+        </div>
+      </section>
 
       <section id="research" class="panel research-panel">
         <div class="section-heading"><div><p class="eyebrow accent">Explicit web research</p><h2>Search configured official sources</h2></div><span class="scope-chip">Mock results</span></div>
@@ -354,6 +405,7 @@
     (() => {
       const state = {
         voiceSessions: 0,
+        voiceAssistant: { active: false, listening: false, muted: false, turns: 0 },
         audit: [
           { type: "assistant.ask", detail: "Institutional overview", time: "14:02", outcome: "success" },
           { type: "source.health", detail: "Approved registry checked", time: "13:58", outcome: "success" },
@@ -451,6 +503,56 @@
         });
         const warning = document.createElement("div"); warning.className = "research-warning"; warning.textContent = "Prototype notice: these are fictional results. The standalone file made no network request."; node.append(warning);
       }
+      function renderVoiceState() {
+        const assistant = state.voiceAssistant;
+        const status = $("voice-status");
+        const statusLabel = $("voice-status-label");
+        const orb = $("voice-orb");
+        const wave = $("voice-waveform");
+        const start = $("voice-start-button");
+        const mute = $("voice-mute-button");
+        const end = $("voice-end-button");
+        status.classList.toggle("live", assistant.active && assistant.listening);
+        orb.classList.toggle("listening", assistant.active && assistant.listening);
+        wave.classList.toggle("active", assistant.active && assistant.listening);
+        statusLabel.textContent = !assistant.active ? "Ready for voice" : assistant.listening ? "Listening · demo mode" : assistant.muted ? "Session muted" : "Assistant speaking";
+        $("voice-orb-label").textContent = !assistant.active ? "Tap start to speak" : assistant.listening ? "Listening…" : assistant.muted ? "Muted" : "Responding…";
+        start.disabled = assistant.active;
+        start.textContent = assistant.active ? "Voice assistant active" : "◉ Start voice assistant";
+        mute.disabled = !assistant.active;
+        end.disabled = !assistant.active;
+        mute.textContent = assistant.muted ? "Unmute" : "Mute";
+        $("voice-count").textContent = `${state.voiceSessions} / 10`;
+      }
+      function addVoiceLine(speaker, text, user = false) {
+        const line = document.createElement("div"); line.className = `voice-line${user ? " user" : ""}`;
+        const who = document.createElement("span"); who.className = "speaker"; who.textContent = speaker;
+        const body = document.createElement("p"); body.textContent = text;
+        line.append(who, body); $("voice-transcript-list").append(line); $("voice-transcript-list").scrollTop = $("voice-transcript-list").scrollHeight;
+      }
+      function startVoiceAssistant() {
+        if (state.voiceAssistant.active) return;
+        if (state.voiceSessions >= 10) { toast("Prototype voice capacity reached."); return; }
+        state.voiceSessions += 1;
+        state.voiceAssistant = { active: true, listening: true, muted: false, turns: state.voiceAssistant.turns + 1 };
+        addVoiceLine("You", "Show me the latest attendance summary.", true);
+        renderVoiceState(); addAudit("voice.preview", "Voice Assistant session started"); toast("Voice Assistant listening in demo mode.");
+        setTimeout(() => {
+          if (!state.voiceAssistant.active) return;
+          state.voiceAssistant.listening = false;
+          addVoiceLine("Guru Ji", "College A attendance is 87% for the current review period. This read-only answer is inside your selected scope.");
+          addAudit("voice.answer", "Attendance summary spoken"); renderVoiceState();
+        }, 1100);
+      }
+      function toggleVoiceMute() {
+        if (!state.voiceAssistant.active) return;
+        state.voiceAssistant.muted = !state.voiceAssistant.muted; renderVoiceState(); toast(state.voiceAssistant.muted ? "Voice Assistant muted." : "Voice Assistant unmuted.");
+      }
+      function endVoiceAssistant() {
+        if (!state.voiceAssistant.active) return;
+        state.voiceAssistant = { active: false, listening: false, muted: false, turns: state.voiceAssistant.turns };
+        addVoiceLine("Guru Ji", "The demo voice session has ended. No audio was recorded or transmitted."); addAudit("voice.preview", "Voice Assistant session ended"); renderVoiceState(); toast("Voice Assistant session ended.");
+      }
       function refreshSources() { state.sources = state.sources.map((item) => ({ ...item, freshness: "just now" })); renderSources(); addAudit("source.health", "Approved registry refreshed"); toast("Prototype source health refreshed."); }
 
       $("chat-form").addEventListener("submit", (event) => { event.preventDefault(); ask($("prompt").value); });
@@ -462,11 +564,14 @@
       $("sources-button").addEventListener("click", refreshSources);
       $("audit-button").addEventListener("click", () => { renderAudit(); toast("Prototype audit trail refreshed."); });
       $("refresh-button").addEventListener("click", () => { updateIdentity(); renderSources(); renderAudit(); toast("Standalone prototype refreshed."); });
-      $("voice-button").addEventListener("click", () => { if (state.voiceSessions >= 10) { toast("Prototype capacity reached."); return; } state.voiceSessions += 1; $("voice-count").textContent = `${state.voiceSessions} / 10`; $("voice-button").textContent = "Session active"; addAudit("voice.preview", "Lifecycle session started"); toast("Voice lifecycle preview started. No microphone accessed."); });
+      $("voice-button").addEventListener("click", () => { $("voice-assistant").scrollIntoView({ behavior: "smooth", block: "center" }); startVoiceAssistant(); });
+      $("voice-start-button").addEventListener("click", startVoiceAssistant);
+      $("voice-mute-button").addEventListener("click", toggleVoiceMute);
+      $("voice-end-button").addEventListener("click", endVoiceAssistant);
       ["principal", "role", "college"].forEach((id) => $(id).addEventListener("input", updateIdentity));
       document.querySelectorAll(".nav-item").forEach((item) => item.addEventListener("click", () => { document.querySelectorAll(".nav-item").forEach((nav) => nav.classList.remove("active")); item.classList.add("active"); }));
 
-      renderSources(); renderAudit(); updateIdentity();
+      renderSources(); renderAudit(); updateIdentity(); renderVoiceState();
     })();
   </script>
 </body>
