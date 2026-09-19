@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
+from urllib.parse import urlparse
 
 
 @dataclass(frozen=True, slots=True)
@@ -23,6 +24,12 @@ class AppSettings:
     ollama_model_id: str = "llama3.1:8b"
     model_timeout_seconds: float = 8.0
     model_max_tokens: int = 800
+    institution_connector_base_url: str | None = None
+    institution_connector_source_id: str = "college_a_remote"
+    institution_connector_institution_id: str = "college_a"
+    institution_connector_display_name: str = "Configured institution connector"
+    institution_connector_auth_token: str | None = field(default=None, repr=False)
+    demo_data_enabled: bool = True
     max_request_bytes: int = 1_000_000
 
     @classmethod
@@ -47,6 +54,12 @@ class AppSettings:
             ollama_model_id=os.getenv("GURU_OLLAMA_MODEL_ID", "llama3.1:8b").strip(),
             model_timeout_seconds=float(os.getenv("GURU_MODEL_TIMEOUT_SECONDS", "8")),
             model_max_tokens=int(os.getenv("GURU_MODEL_MAX_TOKENS", "800")),
+            institution_connector_base_url=os.getenv("GURU_INSTITUTION_CONNECTOR_BASE_URL") or None,
+            institution_connector_source_id=os.getenv("GURU_INSTITUTION_CONNECTOR_SOURCE_ID", "college_a_remote").strip(),
+            institution_connector_institution_id=os.getenv("GURU_INSTITUTION_CONNECTOR_INSTITUTION_ID", "college_a").strip(),
+            institution_connector_display_name=os.getenv("GURU_INSTITUTION_CONNECTOR_DISPLAY_NAME", "Configured institution connector").strip(),
+            institution_connector_auth_token=os.getenv("GURU_INSTITUTION_CONNECTOR_AUTH_TOKEN") or None,
+            demo_data_enabled=os.getenv("GURU_ENABLE_DEMO_DATA", "false" if environment == "production" else "true").strip().lower() in {"1", "true", "yes", "on"},
             max_request_bytes=int(os.getenv("GURU_MAX_REQUEST_BYTES", "1000000")),
         )
 
@@ -61,6 +74,13 @@ class AppSettings:
             raise ValueError("GURU_MODEL_MAX_TOKENS must be positive")
         if self.model_provider == "ollama" and not self.ollama_base_url:
             raise ValueError("GURU_OLLAMA_BASE_URL is required when GURU_MODEL_PROVIDER=ollama")
+        for field_name in ("institution_connector_source_id", "institution_connector_institution_id", "institution_connector_display_name"):
+            if not getattr(self, field_name).strip():
+                raise ValueError(f"{field_name} must not be blank")
+        if self.institution_connector_base_url:
+            parsed_connector_url = urlparse(self.institution_connector_base_url)
+            if parsed_connector_url.scheme not in {"http", "https"} or not parsed_connector_url.netloc:
+                raise ValueError("GURU_INSTITUTION_CONNECTOR_BASE_URL must be an absolute HTTP(S) URL")
         if self.environment != "production":
             return
         if self.dev_bearer_token == "dev-token":
@@ -74,6 +94,14 @@ class AppSettings:
         allowed_algorithms = {"RS256", "RS384", "RS512", "PS256", "PS384", "PS512", "ES256", "ES384", "ES512"}
         if not self.oidc_algorithms or any(item not in allowed_algorithms for item in self.oidc_algorithms):
             raise ValueError("production requires an explicit safe OIDC signing algorithm")
+        if self.demo_data_enabled:
+            raise ValueError("production cannot enable deterministic demo data")
+        if not self.institution_connector_base_url:
+            raise ValueError("production requires GURU_INSTITUTION_CONNECTOR_BASE_URL")
+        if urlparse(self.institution_connector_base_url).scheme != "https":
+            raise ValueError("production requires the institutional connector to use HTTPS")
+        if not self.institution_connector_auth_token:
+            raise ValueError("production requires GURU_INSTITUTION_CONNECTOR_AUTH_TOKEN")
 
 
 __all__ = ["AppSettings"]
