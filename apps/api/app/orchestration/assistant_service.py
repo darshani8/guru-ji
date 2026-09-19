@@ -13,7 +13,8 @@ from ..domain.results import ResultStatus
 from ..persistence.database import InMemoryControlStore
 from ..policy.query_limits import QueryLimits
 from ..tools.registry import ToolRegistry
-from .answer_synthesizer import AssistantAnswer, synthesize
+from ..providers.model_base import TextModel
+from .answer_synthesizer import AssistantAnswer, apply_model_wording, synthesize
 from .plan_validator import build_tool_plan
 from .result_aggregator import aggregate
 from .tool_executor import execute_plan
@@ -36,6 +37,8 @@ class AssistantService:
     connectors: ConnectorRegistry
     store: InMemoryControlStore
     limits: QueryLimits = QueryLimits()
+    model: TextModel | None = None
+    model_max_tokens: int = 800
 
     async def ask(self, request: ChatRequest, principal) -> AssistantAnswer:
         started = monotonic()
@@ -47,6 +50,11 @@ class AssistantService:
             )
             aggregate(results)
             answer = synthesize(request.request_id, results)
+            answer = await apply_model_wording(
+                answer,
+                self.model,
+                max_tokens=self.model_max_tokens,
+            )
             self.store.append_audit(AuditEvent(
                 event_id=f"audit-{request.request_id}", event_type="assistant.ask", request_id=request.request_id,
                 principal_id=principal.principal_id if principal.authenticated else None,
