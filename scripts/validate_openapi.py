@@ -1,33 +1,35 @@
-"""Validate the published API contract before a branch can be merged."""
+"""Validate the checked-in API contract against the live FastAPI route surface."""
 
 from __future__ import annotations
 
 from pathlib import Path
+import sys
 
 import yaml
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "apps" / "api"))
 OPENAPI_PATH = ROOT / "openapi.yaml"
 REQUIRED_PATHS = {
     "/v1/health/live",
     "/v1/health/ready",
     "/v1/chat",
+    "/v1/chat/stream",
     "/v1/voice/sessions",
     "/v1/voice/sessions/{session_id}",
-    "/v1/sources/health",
-    "/v1/briefings/today",
-    "/v1/briefings/run",
+    "/v1/sources",
+    "/v1/briefings/daily",
+    "/v1/briefings/recent",
     "/v1/research/web",
-    "/v1/audit/events",
+    "/v1/audit/recent",
 }
 REQUIRED_SCHEMAS = {
-    "LivenessResponse",
-    "ReadinessResponse",
-    "PublicWebResearchRequest",
-    "PublicWebResearchResponse",
-    "PublicWebResearchResult",
-    "WebResearchWarning",
+    "ScopeBody",
+    "ChatBody",
+    "VoiceSessionBody",
+    "BriefingBody",
+    "WebResearchBody",
 }
 
 
@@ -48,6 +50,16 @@ def main() -> None:
     if non_versioned:
         raise SystemExit(f"unexpected non-versioned API paths: {', '.join(non_versioned)}")
 
+    from app.main import app
+
+    live_paths = set(app.openapi().get("paths", {}))
+    if live_paths != set(paths):
+        missing_from_contract = sorted(live_paths - set(paths))
+        extra_in_contract = sorted(set(paths) - live_paths)
+        raise SystemExit(
+            f"OpenAPI route drift; missing={missing_from_contract}, extra={extra_in_contract}"
+        )
+
     components = document.get("components")
     schemas = components.get("schemas") if isinstance(components, dict) else None
     if not isinstance(schemas, dict):
@@ -57,9 +69,7 @@ def main() -> None:
         raise SystemExit(f"missing required API schemas: {', '.join(missing_schemas)}")
 
     serialized = OPENAPI_PATH.read_text(encoding="utf-8").lower()
-    if any(
-        secret_marker in serialized for secret_marker in ("api_key:", "bearer_token:", "password:")
-    ):
+    if any(secret_marker in serialized for secret_marker in ("api_key:", "bearer_token:", "password:")):
         raise SystemExit("OpenAPI contract appears to contain a secret-bearing example")
     print("OPENAPI_VALIDATION_OK")
 
