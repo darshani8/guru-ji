@@ -1,4 +1,20 @@
 services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: guru_ji
+      POSTGRES_USER: guru_ji
+      POSTGRES_PASSWORD: guru_ji_dev_only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U guru_ji -d guru_ji"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    ports:
+      - "5432:5432"
+    volumes:
+      - guru-ji-postgres:/var/lib/postgresql/data
+
   api:
     build:
       context: ../..
@@ -6,7 +22,15 @@ services:
     environment:
       GURU_ENVIRONMENT: development
       GURU_DEV_BEARER_TOKEN: dev-token
+      CONTROL_DATABASE_URL: postgresql://guru_ji:guru_ji_dev_only@postgres:5432/guru_ji
+      GURU_ALLOWED_ORIGINS: http://localhost:8000,http://localhost:5173
+    depends_on:
+      postgres:
+        condition: service_healthy
     ports:
       - "8000:8000"
     volumes:
       - ../../apps:/app/apps:ro
+
+volumes:
+  guru-ji-postgres:
