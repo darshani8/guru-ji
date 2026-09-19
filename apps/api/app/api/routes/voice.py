@@ -4,17 +4,23 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
-import json
 from time import monotonic
 from urllib.parse import urlparse
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisconnect
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from ..dependencies import principal_from_request, runtime_from_request
 from ...domain.principals import InstitutionScope, Principal
 from ...domain.requests import ChatRequest, InteractionChannel
+from ...voice.protocol import (
+    AuthenticateMessage,
+    CloseMessage,
+    PingMessage,
+    UtteranceMessage,
+    VOICE_MESSAGE_ADAPTER,
+)
 from ...voice.realtime_events import RealtimeEvent
 from ...voice.session_manager import VoiceScopeError
 
@@ -135,14 +141,14 @@ async def voice_stream(session_id: str, websocket: WebSocket) -> None:
             await _close(websocket, 1003, "text_messages_only")
             return
         try:
-            auth_message = json.loads(first["text"])
-        except (TypeError, json.JSONDecodeError):
+            auth_message = VOICE_MESSAGE_ADAPTER.validate_json(first["text"])
+        except ValidationError:
             await _close(websocket, 4401, "invalid_auth_message")
             return
-        if auth_message.get("type") != RealtimeEvent.AUTHENTICATE:
+        if not isinstance(auth_message, AuthenticateMessage):
             await _close(websocket, 4401, "authentication_required")
             return
-        principal = runtime.voice.claim_transport(session_id, str(auth_message.get("ticket", "")))
+        principal = runtime.voice.claim_transport(session_id, auth_message.ticket)
         session = runtime.voice.get(session_id)
         if principal is None or session is None:
             await _close(websocket, 4401, "invalid_or_expired_ticket")
@@ -177,24 +183,20 @@ async def voice_stream(session_id: str, websocket: WebSocket) -> None:
                 await _close(websocket, 1009, "message_too_large")
                 return
             try:
-                event = json.loads(raw_text)
-            except (TypeError, json.JSONDecodeError):
-                await _send_error(websocket, "invalid_json", "Voice events must be valid JSON.")
-                continue
-            if not isinstance(event, dict):
-                await _send_error(websocket, "invalid_event", "Voice events must be JSON objects.")
+                event = VOICE_MESSAGE_ADAPTER.validate_json(raw_text)
+            except ValidationError:
+                await _send_error(websocket, "invalid_event", "Voice events must match the supported JSON schema.")
                 continue
 
-            event_type = event.get("type")
-            if event_type == RealtimeEvent.PING:
+            if isinstance(event, PingMessage):
                 await websocket.send_json({"type": RealtimeEvent.PONG})
                 continue
-            if event_type == RealtimeEvent.CLOSE:
+            if isinstance(event, CloseMessage):
                 await websocket.send_json({"type": RealtimeEvent.SESSION_CLOSED, "session_id": session_id})
                 await _close(websocket, 1000, "client_closed")
                 return
-            if event_type != RealtimeEvent.UTTERANCE:
-                await _send_error(websocket, "unknown_event", "Supported events are utterance, ping, and close.")
+            if not isinstance(event, UtteranceMessage):
+                await _send_error(websocket, "authentication_not_allowed", "Authentication is only valid as the first event.")
                 continue
 
             now = monotonic()
@@ -205,24 +207,9 @@ async def voice_stream(session_id: str, websocket: WebSocket) -> None:
                 continue
             utterance_times.append(now)
 
-            text = event.get("text")
-            if not isinstance(text, str) or not text.strip() or len(text) > 12_000:
-                await _send_error(websocket, "invalid_utterance", "Voice transcript must contain 1–12,000 characters.")
-                continue
-            conversation_id = event.get("conversation_id")
-            if conversation_id is not None and (
-                not isinstance(conversation_id, str) or not conversation_id.strip() or len(conversation_id) > 128
-            ):
-                await _send_error(websocket, "invalid_conversation", "conversation_id is invalid.")
-                continue
-
-            client_message_id = event.get("client_message_id")
-            if client_message_id is not None and (
-                not isinstance(client_message_id, str) or len(client_message_id) > 128
-            ):
-                await _send_error(websocket, "invalid_message_id", "client_message_id is invalid.")
-                continue
-
+            text = event.text.strip()
+            conversation_id = event.conversation_id
+            client_message_id = event.client_message_id
             request_id = f"voice-{uuid4().hex}"
             chat_request = ChatRequest(
                 request_id=request_id,
