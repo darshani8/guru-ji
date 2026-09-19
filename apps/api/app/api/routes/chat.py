@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
@@ -11,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from ..dependencies import principal_from_request, runtime_from_request
 from ...domain.principals import InstitutionScope
+from ...domain.streaming import AnswerEvent, DoneEvent, MessageEndEvent, MessageStartEvent, to_sse
 from ...domain.requests import ChatRequest, InteractionChannel
 
 
@@ -64,14 +64,38 @@ async def _stream_answer(body: ChatBody, request: Request, principal) -> Streami
     runtime = runtime_from_request(request)
     domain_request = _build_request(body, request, principal)
     answer = await runtime.assistant.ask(domain_request, principal)
-    payload = json.dumps(answer.as_dict(), separators=(",", ":"), ensure_ascii=False)
+    answer_payload = answer.as_dict()
+    status = answer.status if answer.status in {"complete", "partial", "refused", "failed", "degraded"} else "failed"
 
     async def events():
         # Keep the bounded answer envelope in one chunk. A future transport
         # optimization may yield additional answer chunks before the final
         # done event without changing the wire format; authorization, audit,
         # and provenance remain completed before streaming begins.
-        yield f"event: answer\ndata: {payload}\n\nevent: done\ndata: {{}}\n\n"
+        yield "".join((
+            to_sse(MessageStartEvent(
+                request_id=answer.request_id,
+                conversation_id=body.conversation_id,
+                sequence=1,
+            )),
+            to_sse(AnswerEvent(
+                request_id=answer.request_id,
+                conversation_id=body.conversation_id,
+                sequence=2,
+                answer=answer_payload,
+            )),
+            to_sse(MessageEndEvent(
+                request_id=answer.request_id,
+                conversation_id=body.conversation_id,
+                sequence=3,
+                status=status,
+            )),
+            to_sse(DoneEvent(
+                request_id=answer.request_id,
+                conversation_id=body.conversation_id,
+                sequence=4,
+            )),
+        ))
 
     return StreamingResponse(
         events(),
