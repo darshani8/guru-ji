@@ -226,20 +226,20 @@ paths:
       tags: [Voice]
       summary: Create a short-lived browser voice session
       description: |
-        Creates an ephemeral client credential for an approved realtime voice
-        provider or a local voice gateway. Permanent provider credentials are
-        never returned. The voice session uses the same policy and semantic
-        tools as chat.
+        Creates a bounded, ephemeral browser voice session. The browser uses
+        its Web Speech implementation for microphone recognition and sends only
+        final text transcripts to the authenticated WebSocket transport. Guru Ji
+        does not receive or persist raw audio in this transport.
       parameters:
         - $ref: '#/components/parameters/RequestIdHeader'
       requestBody:
-        required: true
+        required: false
         content:
           application/json:
             schema:
               $ref: '#/components/schemas/VoiceSessionRequest'
       responses:
-        '201':
+        '200':
           description: Voice session created
           headers:
             X-Request-ID:
@@ -248,16 +248,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/VoiceSessionResponse'
-        '400':
-          $ref: '#/components/responses/BadRequest'
         '401':
           $ref: '#/components/responses/Unauthorized'
         '403':
           $ref: '#/components/responses/Forbidden'
         '429':
           $ref: '#/components/responses/RateLimited'
-        '503':
-          $ref: '#/components/responses/ServiceUnavailable'
 
   /v1/voice/sessions/{session_id}:
     delete:
@@ -268,16 +264,30 @@ paths:
         - $ref: '#/components/parameters/SessionId'
         - $ref: '#/components/parameters/RequestIdHeader'
       responses:
-        '204':
-          description: Voice session closed
+        '200':
+          description: Voice session close result
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [closed]
+                properties:
+                  closed:
+                    type: boolean
         '401':
           $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
+
+  /v1/voice/sessions/{session_id}/stream:
+    description: |
+      WebSocket transport. The client first sends an auth event containing the
+      one-use transport_ticket returned by createVoiceSession. After ready, it
+      may send utterance, ping, and close events. Only final text transcripts
+      are accepted; binary audio frames are rejected.
+    x-websocket:
+      operationId: streamVoiceSession
+      clientEvents: [auth, utterance, ping, close]
+      serverEvents: [ready, answer, pong, error, expired, session.closed]
 
   /v1/sources/health:
     get:
@@ -947,68 +957,62 @@ components:
       type: object
       additionalProperties: false
       properties:
-        transport:
-          type: string
-          enum: [browser_webrtc, local_gateway]
-          default: browser_webrtc
-        conversation_id:
+        college_id:
           type: string
           minLength: 1
           maxLength: 128
-        scope:
-          $ref: '#/components/schemas/Scope'
-        language:
+        department_id:
           type: string
-          maxLength: 32
-          default: en-IN
-        audio_recording:
-          type: boolean
-          default: false
-          description: Recording is disabled unless separately authorized and configured.
+          minLength: 1
+          maxLength: 128
+        batch_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+      description: Optional narrower scope; it must be covered by the authenticated principal.
 
     VoiceSessionResponse:
       type: object
       additionalProperties: false
       required:
         - session_id
-        - transport
+        - created_at
         - expires_at
-        - instructions
+        - status
+        - audio_retention
+        - transport
+        - transport_ticket
+        - websocket_url
+        - server_receives
       properties:
         session_id:
           type: string
-        transport:
+        created_at:
           type: string
-          enum: [browser_webrtc, local_gateway]
+          format: date-time
         expires_at:
           type: string
           format: date-time
-        client_secret:
+        status:
+          type: string
+          enum: [active]
+        audio_retention:
+          type: string
+          enum: [ephemeral]
+          description: Guru Ji receives final transcripts only; raw microphone audio is browser-side.
+        transport:
+          type: string
+          enum: [browser_web_speech_ws]
+        transport_ticket:
           type: string
           writeOnly: true
-          description: Short-lived ephemeral credential only; never a permanent provider API key.
-        client_secret_expires_at:
-          type: string
-          format: date-time
-        realtime_url:
+          description: One-use short-lived WebSocket ticket; never place it in a URL or logs.
+        websocket_url:
           type: string
           format: uri
-        local_gateway_url:
+        server_receives:
           type: string
-          format: uri
-        instructions:
-          type: object
-          additionalProperties: false
-          required: [voice_enabled, audio_recording]
-          properties:
-            voice_enabled:
-              type: boolean
-            audio_recording:
-              type: boolean
-            max_duration_seconds:
-              type: integer
-              minimum: 1
-              maximum: 3600
+          enum: [final_transcripts_only]
 
     SourceHealth:
       type: object

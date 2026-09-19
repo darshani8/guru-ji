@@ -1,7 +1,17 @@
 const state = {
   voiceSessionId: null,
-  voiceTransport: null,
+  voiceSocket: null,
+  transportTicket: null,
+  recognition: null,
+  recognitionSupported: false,
+  shouldListen: false,
+  waitingForAnswer: false,
+  speaking: false,
+  voiceTransportReady: false,
+  intentionalClose: false,
   requestInFlight: false,
+  finalResultKeys: new Set(),
+  pingTimer: null,
 };
 
 const session = {
@@ -12,6 +22,8 @@ const session = {
 };
 
 const $ = (id) => document.getElementById(id);
+const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+state.recognitionSupported = Boolean(SpeechRecognition);
 
 function headers(json = false) {
   const result = {
@@ -86,10 +98,10 @@ function addMessage(kind, text, options = {}) {
     bubble.append(status);
   }
 
-  if (options.voice && kind === 'assistant') {
+  if (options.voice) {
     const tag = document.createElement('span');
     tag.className = 'voice-tag';
-    tag.textContent = '◉ Voice response';
+    tag.textContent = kind === 'user' ? '◉ Voice input' : '◉ Voice response';
     bubble.append(tag);
   }
 
@@ -140,8 +152,11 @@ async function ask(prompt) {
       }),
     });
     loading.remove();
-    const answer = data.answer || data;
-    addMessage('assistant', answer.answer || answer.refusal_reason || 'No answer returned.', { answer });
+    const answer = data.answer && typeof data.answer === 'object' ? data.answer : data;
+    const answerText = typeof data.answer === 'string'
+      ? data.answer
+      : answer.answer || answer.refusal_reason || 'No answer returned.';
+    addMessage('assistant', answerText, { answer });
   } catch (error) {
     loading.remove();
     addMessage('assistant', error.message);
@@ -157,47 +172,298 @@ function renderVoiceState(message = '') {
   const button = $('voice-button');
   button.classList.toggle('active', active);
   button.setAttribute('aria-pressed', String(active));
-  $('voice-button-label').textContent = active ? 'End voice session' : 'Voice Assistant';
+  $('voice-button-label').textContent = active ? 'Stop voice assistant' : 'Voice Assistant';
   $('voice-status-line').textContent = message;
+}
+
+function setVoiceButtonDisabled(disabled) {
+  $('voice-button').disabled = disabled;
+}
+
+function stopRecognition() {
+  if (!state.recognition) return;
+  try {
+    state.recognition.stop();
+  } catch {
+    // Recognition may already be stopped by the browser.
+  }
+}
+
+function startRecognition() {
+  if (!state.recognition || !state.shouldListen || state.waitingForAnswer || state.speaking) return;
+  try {
+    state.recognition.start();
+  } catch (error) {
+    if (error.name !== 'InvalidStateError') showToast('Voice input could not start.');
+  }
+}
+
+function speakAnswer(text) {
+  if (!window.speechSynthesis || !text) {
+    renderVoiceState('Answer received. Speech output is unavailable in this browser.');
+    state.waitingForAnswer = false;
+    startRecognition();
+    return;
+  }
+  state.speaking = true;
+  stopRecognition();
+  window.speechSynthesis.cancel();
+  const utterance = new SpeechSynthesisUtterance(text);
+  utterance.lang = 'en-IN';
+  utterance.onend = () => {
+    state.speaking = false;
+    if (state.voiceSessionId) {
+      state.waitingForAnswer = false;
+      renderVoiceState('Listening…');
+      startRecognition();
+    }
+  };
+  utterance.onerror = () => {
+    state.speaking = false;
+    if (state.voiceSessionId) {
+      state.waitingForAnswer = false;
+      renderVoiceState('Listening…');
+      startRecognition();
+    }
+  };
+  window.speechSynthesis.speak(utterance);
+}
+
+function sendUtterance(text) {
+  const value = text.trim();
+  if (!value || !state.voiceTransportReady || state.waitingForAnswer || !state.voiceSocket || state.voiceSocket.readyState !== WebSocket.OPEN) return;
+  const clientMessageId = `voice-${crypto.randomUUID ? crypto.randomUUID() : Date.now()}`;
+  state.waitingForAnswer = true;
+  stopRecognition();
+  state.voiceSocket.send(JSON.stringify({
+    type: 'utterance',
+    client_message_id: clientMessageId,
+    text: value,
+  }));
+  addMessage('user', value, { voice: true });
+  renderVoiceState('Guru Ji is preparing a cited answer…');
+}
+
+function configureRecognition() {
+  if (!SpeechRecognition) return null;
+  const recognition = new SpeechRecognition();
+  recognition.continuous = true;
+  recognition.interimResults = true;
+  recognition.lang = 'en-IN';
+
+  recognition.onstart = () => {
+    renderVoiceState('Listening…');
+  };
+  recognition.onresult = (event) => {
+    let interim = '';
+    for (let index = event.resultIndex; index < event.results.length; index += 1) {
+      const result = event.results[index];
+      const transcript = result[0]?.transcript?.trim() || '';
+      if (!result.isFinal) {
+        interim += transcript;
+        continue;
+      }
+      const resultKey = `${index}:${transcript}`;
+      if (transcript && !state.finalResultKeys.has(resultKey)) {
+        state.finalResultKeys.add(resultKey);
+        if (state.finalResultKeys.size > 100) state.finalResultKeys.clear();
+        sendUtterance(transcript);
+      }
+    }
+    if (interim && !state.waitingForAnswer) renderVoiceState(`Hearing: “${interim}”`);
+  };
+  recognition.onerror = (event) => {
+    if (!state.voiceSessionId) return;
+    if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+      handleVoiceFailure('Microphone permission was denied.');
+      return;
+    }
+    if (event.error !== 'aborted' && event.error !== 'no-speech') {
+      renderVoiceState(`Voice input error: ${event.error}.`);
+    }
+  };
+  recognition.onend = () => {
+    if (state.shouldListen && state.voiceSessionId && !state.waitingForAnswer && !state.speaking) {
+      window.setTimeout(startRecognition, 120);
+    }
+  };
+  return recognition;
+}
+
+function handleVoiceMessage(event) {
+  let message;
+  try {
+    message = JSON.parse(event.data);
+  } catch {
+    handleVoiceFailure('The voice transport returned invalid data.');
+    return;
+  }
+
+  if (message.type === 'ready') {
+    state.voiceTransportReady = true;
+    renderVoiceState('Listening…');
+    startRecognition();
+    return;
+  }
+  if (message.type === 'answer') {
+    const answer = message.answer || {};
+    const text = answer.answer || answer.refusal_reason || 'No answer returned.';
+    addMessage('assistant', text, { answer, voice: true });
+    state.waitingForAnswer = false;
+    speakAnswer(text);
+    return;
+  }
+  if (message.type === 'pong') return;
+  if (message.type === 'expired') {
+    handleVoiceFailure('The voice session expired. Start Voice Assistant again.');
+    return;
+  }
+  if (message.type === 'error') {
+    state.waitingForAnswer = false;
+    renderVoiceState(message.message || 'Voice transport error.');
+    if (!state.speaking) startRecognition();
+  }
+}
+
+function startTransport(data) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const socket = new WebSocket(data.websocket_url);
+    state.voiceSocket = socket;
+    socket.onopen = () => {
+      socket.send(JSON.stringify({ type: 'auth', ticket: data.transport_ticket }));
+    };
+    socket.onmessage = (event) => {
+      handleVoiceMessage(event);
+      if (!settled) {
+        try {
+          const message = JSON.parse(event.data);
+          if (message.type === 'ready') {
+            settled = true;
+            resolve();
+          } else if (message.type === 'error' || message.type === 'expired') {
+            settled = true;
+            reject(new Error(message.message || 'Voice transport authentication failed.'));
+          }
+        } catch {
+          // The regular message handler reports malformed payloads.
+        }
+      }
+    };
+    socket.onerror = () => {
+      if (!settled) {
+        settled = true;
+        reject(new Error('Live voice transport could not connect.'));
+      }
+      if (state.voiceSessionId && !state.intentionalClose) handleVoiceFailure('Live voice transport disconnected.');
+    };
+    socket.onclose = () => {
+      clearInterval(state.pingTimer);
+      state.pingTimer = null;
+      if (!settled) {
+        settled = true;
+        reject(new Error('Live voice transport closed before it was ready.'));
+      }
+      if (state.voiceSessionId && !state.intentionalClose) handleVoiceFailure('Live voice transport closed.');
+    };
+  });
+}
+
+async function requestMicrophonePermission() {
+  if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
+    throw new Error('Voice input requires HTTPS or localhost and microphone access.');
+  }
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  stream.getTracks().forEach((track) => track.stop());
 }
 
 async function startVoiceSession() {
   if (state.voiceSessionId) return;
-  $('voice-button').disabled = true;
-  renderVoiceState('Starting a bounded voice session…');
+  if (!state.recognitionSupported) {
+    renderVoiceState('Voice input is not supported in this browser.');
+    showToast('Use a browser with SpeechRecognition support or type your question.');
+    return;
+  }
+
+  setVoiceButtonDisabled(true);
+  renderVoiceState('Requesting microphone permission…');
   try {
-    const data = await api('/v1/voice/sessions', { method: 'POST' });
-    state.voiceSessionId = data.session_id;
-    state.voiceTransport = data.transport || 'unknown';
-    if (state.voiceTransport === 'not_configured') {
-      renderVoiceState('Voice session ready. Live audio transport is not configured yet.');
-    } else {
-      renderVoiceState(`Voice session ready via ${state.voiceTransport}.`);
+    await requestMicrophonePermission();
+    const data = await api('/v1/voice/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ college_id: session.college }),
+    });
+    if (data.transport !== 'browser_web_speech_ws' || !data.transport_ticket || !data.websocket_url) {
+      throw new Error('The server did not provide a supported live voice transport.');
     }
+    state.voiceSessionId = data.session_id;
+    state.transportTicket = data.transport_ticket;
+    state.intentionalClose = false;
+    state.shouldListen = true;
+    state.voiceTransportReady = false;
+    state.finalResultKeys.clear();
+    state.recognition = configureRecognition();
+    renderVoiceState('Connecting live voice transport…');
+    await startTransport(data);
+    state.pingTimer = window.setInterval(() => {
+      if (state.voiceSocket?.readyState === WebSocket.OPEN) state.voiceSocket.send(JSON.stringify({ type: 'ping' }));
+    }, 20_000);
   } catch (error) {
+    await cleanupVoiceSession(true);
     renderVoiceState('');
-    showToast(error.message);
+    showToast(error.message || 'Voice Assistant could not start.');
   } finally {
-    $('voice-button').disabled = false;
+    setVoiceButtonDisabled(false);
+  }
+}
+
+async function cleanupVoiceSession(closeServerSession = true) {
+  const sessionId = state.voiceSessionId;
+  state.shouldListen = false;
+  state.waitingForAnswer = false;
+  state.speaking = false;
+  state.intentionalClose = true;
+  clearInterval(state.pingTimer);
+  state.pingTimer = null;
+  stopRecognition();
+  if (window.speechSynthesis) window.speechSynthesis.cancel();
+  if (state.voiceSocket) {
+    try {
+      if (state.voiceSocket.readyState === WebSocket.OPEN) {
+        state.voiceSocket.send(JSON.stringify({ type: 'close' }));
+      }
+      state.voiceSocket.close(1000, 'client_closed');
+    } catch {
+      // The socket may already be closed.
+    }
+  }
+  state.voiceSocket = null;
+  state.transportTicket = null;
+  state.voiceTransportReady = false;
+  state.recognition = null;
+  state.voiceSessionId = null;
+  if (closeServerSession && sessionId) {
+    try {
+      await api(`/v1/voice/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
+    } catch {
+      // The session manager will expire abandoned sessions safely.
+    }
   }
 }
 
 async function closeVoiceSession() {
-  if (!state.voiceSessionId) return;
-  const sessionId = state.voiceSessionId;
-  state.voiceSessionId = null;
-  state.voiceTransport = null;
-  $('voice-button').disabled = true;
+  setVoiceButtonDisabled(true);
   renderVoiceState('Closing voice session…');
-  try {
-    await api(`/v1/voice/sessions/${encodeURIComponent(sessionId)}`, { method: 'DELETE' });
-    renderVoiceState('Voice session closed.');
-  } catch (error) {
-    renderVoiceState('Voice session ended locally; server cleanup may retry on expiry.');
-    showToast(error.message);
-  } finally {
-    $('voice-button').disabled = false;
-  }
+  await cleanupVoiceSession(true);
+  renderVoiceState('Voice session closed.');
+  setVoiceButtonDisabled(false);
+}
+
+async function handleVoiceFailure(message) {
+  if (!state.voiceSessionId) return;
+  await cleanupVoiceSession(true);
+  renderVoiceState(message);
+  showToast(message);
 }
 
 async function toggleVoiceSession() {
@@ -209,7 +475,7 @@ async function loadApiStatus() {
   try {
     const data = await api('/v1/health/live');
     setApiStatus(`API ${data.version || 'ready'}`, 'ok');
-  } catch (error) {
+  } catch {
     setApiStatus('API unavailable', 'error');
   }
 }
@@ -228,12 +494,17 @@ $('text-input').addEventListener('keydown', (event) => {
 
 $('voice-button').addEventListener('click', toggleVoiceSession);
 window.addEventListener('beforeunload', () => {
-  if (!state.voiceSessionId) return;
-  fetch(`/v1/voice/sessions/${encodeURIComponent(state.voiceSessionId)}`, {
-    method: 'DELETE',
-    headers: headers(),
-    keepalive: true,
-  }).catch(() => {});
+  state.shouldListen = false;
+  stopRecognition();
+  if (window.speechSynthesis) window.speechSynthesis.cancel();
+  if (state.voiceSocket) state.voiceSocket.close(1000, 'page_unload');
+  if (state.voiceSessionId) {
+    fetch(`/v1/voice/sessions/${encodeURIComponent(state.voiceSessionId)}`, {
+      method: 'DELETE',
+      headers: headers(),
+      keepalive: true,
+    }).catch(() => {});
+  }
 });
 
 loadApiStatus();
