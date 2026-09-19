@@ -41,6 +41,9 @@ class AppSettings:
     web_extract_max_bytes: int = 1_000_000
     web_allowed_domains: tuple[str, ...] = tuple(sorted(DEFAULT_ALLOWED_DOMAINS))
     max_request_bytes: int = 1_000_000
+    request_timeout_seconds: float = 30.0
+    rate_limit_requests: int = 120
+    rate_limit_window_seconds: float = 60.0
 
     @classmethod
     def from_env(cls) -> "AppSettings":
@@ -79,11 +82,20 @@ class AppSettings:
             web_extract_max_bytes=int(os.getenv("GURU_WEB_EXTRACT_MAX_BYTES", "1000000")),
             web_allowed_domains=tuple(item.strip().lower().rstrip(".") for item in os.getenv("GURU_WEB_ALLOWED_DOMAINS", ",".join(sorted(DEFAULT_ALLOWED_DOMAINS))).split(",") if item.strip()),
             max_request_bytes=int(os.getenv("GURU_MAX_REQUEST_BYTES", "1000000")),
+            request_timeout_seconds=float(os.getenv("GURU_REQUEST_TIMEOUT_SECONDS", "30")),
+            rate_limit_requests=int(os.getenv("GURU_RATE_LIMIT_REQUESTS", "120")),
+            rate_limit_window_seconds=float(os.getenv("GURU_RATE_LIMIT_WINDOW_SECONDS", "60")),
         )
 
     def ensure_safe_for_production(self) -> None:
         if self.max_request_bytes <= 0:
             raise ValueError("GURU_MAX_REQUEST_BYTES must be positive")
+        if self.request_timeout_seconds <= 0:
+            raise ValueError("GURU_REQUEST_TIMEOUT_SECONDS must be positive")
+        if self.rate_limit_requests <= 0:
+            raise ValueError("GURU_RATE_LIMIT_REQUESTS must be positive")
+        if self.rate_limit_window_seconds <= 0:
+            raise ValueError("GURU_RATE_LIMIT_WINDOW_SECONDS must be positive")
         if self.model_provider not in {"deterministic", "ollama"}:
             raise ValueError("GURU_MODEL_PROVIDER must be deterministic or ollama")
         if self.model_timeout_seconds <= 0:
