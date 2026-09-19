@@ -14,7 +14,7 @@ class PersistentStoreTests(unittest.TestCase):
     def test_audit_health_and_briefing_survive_reopen(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "control.db"
-            url = f"sqlite:////{str(path).lstrip('/')}"
+            url = f"sqlite:///{path.as_posix()}"
             first = SqliteControlStore(url)
             occurred = datetime.now(timezone.utc)
             first.append_audit(AuditEvent(event_id="evt-1", event_type="assistant.ask", request_id="req-1", occurred_at=occurred, principal_id="p-1", outcome=AuditOutcome.SUCCESS))
