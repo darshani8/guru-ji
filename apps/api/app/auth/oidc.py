@@ -59,7 +59,13 @@ def _capabilities(claims: Mapping[str, Any], principal_type: PrincipalType) -> f
     if principal_type is PrincipalType.MAIN_ADMIN:
         return frozenset(Capability)
     if principal_type is PrincipalType.FACULTY:
-        return frozenset({Capability.ASK_READ_ONLY, Capability.VIEW_SOURCE_METADATA, Capability.START_VOICE_SESSION})
+        return frozenset({
+            Capability.ASK_READ_ONLY,
+            Capability.VIEW_SOURCE_METADATA,
+            Capability.RUN_BRIEFING,
+            Capability.VIEW_BRIEFING_HISTORY,
+            Capability.START_VOICE_SESSION,
+        })
     if principal_type is PrincipalType.STUDENT:
         return frozenset({Capability.ASK_READ_ONLY, Capability.START_VOICE_SESSION})
     return frozenset()
