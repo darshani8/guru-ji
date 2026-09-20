@@ -11,6 +11,7 @@ from ..providers.model_base import ProviderCapabilities
 class ProviderKind(StrEnum):
     DETERMINISTIC_DEMO = "deterministic_demo"
     HOSTED_TEXT = "hosted_text"
+    LITELLM = "litellm"
     LOCAL_OLLAMA = "local_ollama"
     REALTIME_VOICE = "realtime_voice"
 

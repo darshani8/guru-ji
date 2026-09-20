@@ -36,7 +36,7 @@ VoiceInboundMessage = Annotated[
     Field(discriminator="type"),
 ]
 
-VOICE_MESSAGE_ADAPTER = TypeAdapter(VoiceInboundMessage)
+VOICE_MESSAGE_ADAPTER: TypeAdapter[VoiceInboundMessage] = TypeAdapter(VoiceInboundMessage)
 
 
 __all__ = [

@@ -87,7 +87,7 @@ async def create_session(
 ) -> dict[str, object]:
     runtime = runtime_from_request(request)
     principal = principal_from_request(request)
-    if not principal.authenticated:
+    if not principal.active:
         raise HTTPException(status_code=401, detail="authentication is required")
     scope = _requested_scope(body, principal)
     try:
@@ -115,7 +115,7 @@ async def create_session(
 async def close_session(session_id: str, request: Request) -> dict[str, bool]:
     runtime = runtime_from_request(request)
     principal = principal_from_request(request)
-    if not principal.authenticated:
+    if not principal.active:
         raise HTTPException(status_code=401, detail="authentication is required")
     return {"closed": runtime.voice.close(session_id, principal.principal_id)}
 

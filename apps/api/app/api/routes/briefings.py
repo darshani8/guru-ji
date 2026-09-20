@@ -24,7 +24,7 @@ router = APIRouter(prefix="/v1/briefings", tags=["briefings"])
 async def daily_briefing(body: BriefingBody, request: Request) -> dict[str, object]:
     runtime = runtime_from_request(request)
     principal = principal_from_request(request)
-    if not principal.authenticated:
+    if not principal.active:
         raise HTTPException(status_code=401, detail="authentication is required")
     if not principal.has_capability(Capability.RUN_BRIEFING):
         raise HTTPException(status_code=403, detail="briefing:run capability is required")
@@ -65,7 +65,7 @@ async def daily_briefing(body: BriefingBody, request: Request) -> dict[str, obje
 async def recent_briefings(request: Request, limit: int = 20) -> dict[str, object]:
     runtime = runtime_from_request(request)
     principal = principal_from_request(request)
-    if not principal.authenticated:
+    if not principal.active:
         raise HTTPException(status_code=401, detail="authentication is required")
     if not principal.has_capability(Capability.VIEW_BRIEFING_HISTORY):
         raise HTTPException(status_code=403, detail="briefing:view_history capability is required")

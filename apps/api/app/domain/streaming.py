@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import dataclass
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
@@ -68,7 +69,44 @@ StreamEvent = Annotated[
     Field(discriminator="type"),
 ]
 
-STREAM_EVENT_ADAPTER = TypeAdapter(StreamEvent)
+STREAM_EVENT_ADAPTER: TypeAdapter[StreamEvent] = TypeAdapter(StreamEvent)
+
+
+class StreamSequenceError(ValueError):
+    """Raised when a stream is out of order, duplicated, or emitted after done."""
+
+
+@dataclass(slots=True)
+class StreamSequenceValidator:
+    last_sequence: int = 0
+    started: bool = False
+    ended: bool = False
+    done: bool = False
+
+    def accept(self, event: StreamEvent | dict[str, object]) -> StreamEvent:
+        validated = validate_event(event)
+        if self.done:
+            raise StreamSequenceError("events cannot be emitted after done")
+        if validated.sequence != self.last_sequence + 1:
+            raise StreamSequenceError("stream sequence must be contiguous and monotonic")
+        if not self.started and validated.type != "message_start":
+            raise StreamSequenceError("message_start must be the first stream event")
+        if validated.type == "message_start":
+            if self.started:
+                raise StreamSequenceError("message_start may only be emitted once")
+            self.started = True
+        if validated.type == "message_end":
+            if self.ended:
+                raise StreamSequenceError("message_end may only be emitted once")
+            self.ended = True
+        if validated.type == "done":
+            if not self.ended:
+                raise StreamSequenceError("done requires message_end")
+            self.done = True
+        if self.ended and validated.type in {"citation", "warning", "delta", "answer"}:
+            raise StreamSequenceError("content events cannot follow message_end")
+        self.last_sequence = validated.sequence
+        return validated
 
 
 def validate_event(event: StreamEvent | dict[str, object]) -> StreamEvent:
@@ -94,6 +132,8 @@ __all__ = [
     "MessageEndEvent",
     "MessageStartEvent",
     "StreamEvent",
+    "StreamSequenceError",
+    "StreamSequenceValidator",
     "WarningEvent",
     "to_sse",
     "validate_event",

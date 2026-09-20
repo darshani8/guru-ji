@@ -69,7 +69,9 @@ def main() -> None:
         raise SystemExit(f"missing required API schemas: {', '.join(missing_schemas)}")
 
     serialized = OPENAPI_PATH.read_text(encoding="utf-8").lower()
-    if any(secret_marker in serialized for secret_marker in ("api_key:", "bearer_token:", "password:")):
+    if any(
+        secret_marker in serialized for secret_marker in ("api_key:", "bearer_token:", "password:")
+    ):
         raise SystemExit("OpenAPI contract appears to contain a secret-bearing example")
     print("OPENAPI_VALIDATION_OK")
 

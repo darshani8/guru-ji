@@ -62,7 +62,7 @@ def _status(report: dict[str, object]) -> str:
 
 def _require_research_principal(request: Request, request_id: str):
     principal = principal_from_request(request)
-    if not principal.authenticated:
+    if not principal.active:
         _audit(request, principal_id=None, request_id=request_id, outcome=AuditOutcome.DENIED, duration_ms=0)
         raise HTTPException(status_code=401, detail="authentication is required")
     if not principal.has_capability(Capability.ASK_READ_ONLY):

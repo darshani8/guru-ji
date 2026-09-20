@@ -1,8 +1,9 @@
 """Read-only HTTP connector for institution-local semantic tool services.
 
 The application talks to a connector service, never to an institution's raw
-database. The remote service contract is intentionally semantic: health is
-``GET /v1/health`` and approved tools are ``POST /v1/execute``.
+database. The remote service contract is semantic: health is ``GET /v1/health``
+and approved tools are ``POST /v1/execute``. Production deployments require
+an attested effective scope that is no broader than the requested scope.
 """
 
 from __future__ import annotations
@@ -10,12 +11,13 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Mapping
 from urllib.parse import urlparse
 
 import httpx
 
-from ..domain.provenance import Provenance, SourceKind, Warning
+from ..domain.principals import InstitutionScope
+from ..domain.provenance import DataPeriod, Provenance, SourceKind, Warning
 from ..domain.results import ResultStatus, ToolResult
 from ..domain.source_health import Freshness, SourceHealth, SourceHealthStatus
 from .base import ConnectorContext, unavailable_result
@@ -55,6 +57,32 @@ def _parse_datetime(value: object) -> datetime | None:
     return parsed
 
 
+def _parse_period(value: object) -> DataPeriod | None:
+    if not isinstance(value, dict):
+        return None
+    started = _parse_datetime(value.get("started_at") or value.get("start"))
+    ended = _parse_datetime(value.get("ended_at") or value.get("end"))
+    if started is None or ended is None:
+        return None
+    try:
+        return DataPeriod(started_at=started, ended_at=ended)
+    except ValueError:
+        return None
+
+
+def _scope(value: object) -> InstitutionScope | None:
+    if not isinstance(value, dict) or not isinstance(value.get("college_id"), str):
+        return None
+    try:
+        return InstitutionScope(
+            college_id=value["college_id"],
+            department_id=value.get("department_id") if isinstance(value.get("department_id"), str) else None,
+            batch_id=value.get("batch_id") if isinstance(value.get("batch_id"), str) else None,
+        )
+    except ValueError:
+        return None
+
+
 def _safe_text(value: object, default: str = "") -> str:
     if not isinstance(value, str):
         return default
@@ -73,6 +101,7 @@ class RemoteHttpConnector:
     timeout_seconds: float = 5.0
     max_response_bytes: int = 1_000_000
     auth_token: str | None = field(default=None, repr=False)
+    scope_attestation_required: bool = False
     transport: httpx.AsyncBaseTransport | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -97,7 +126,7 @@ class RemoteHttpConnector:
         return self.base_url.rstrip("/")
 
     def _headers(self, request_id: str | None = None) -> dict[str, str]:
-        headers = {"Accept": "application/json"}
+        headers = {"Accept": "application/json", "X-Guru-Connector-Contract": "2"}
         if request_id:
             headers["X-Request-ID"] = request_id
         if self.auth_token:
@@ -110,7 +139,7 @@ class RemoteHttpConnector:
         path: str,
         *,
         request_id: str | None = None,
-        payload: dict[str, object] | None = None,
+        payload: Mapping[str, object] | None = None,
     ) -> dict[str, Any]:
         async with httpx.AsyncClient(timeout=self.timeout_seconds, transport=self.transport, follow_redirects=False) as client:
             async with client.stream(
@@ -188,7 +217,11 @@ class RemoteHttpConnector:
             return None
         return Warning(code=code, message=message, source_id=_safe_text(value.get("source_id"), source_id) or source_id)
 
-    def _parse_result(self, tool_name: str, data: dict[str, Any]) -> ToolResult:
+    def _parse_result(self, tool_name: str, data: dict[str, Any], context: ConnectorContext) -> ToolResult:
+        if _safe_text(data.get("contract_version")) != "2":
+            return ToolResult(tool_name=tool_name, status=ResultStatus.INVALID_RESULT, warnings=(
+                Warning("invalid_remote_result", "remote result contract version was not supported", self.source_id),
+            ))
         if _safe_text(data.get("tool_name"), tool_name) != tool_name:
             return ToolResult(tool_name=tool_name, status=ResultStatus.INVALID_RESULT, warnings=(
                 Warning("invalid_remote_result", "remote result tool name did not match the request", self.source_id),
@@ -199,6 +232,15 @@ class RemoteHttpConnector:
             return ToolResult(tool_name=tool_name, status=ResultStatus.INVALID_RESULT, warnings=(
                 Warning("invalid_remote_result", "remote result contained an unknown status", self.source_id),
             ))
+
+        requested_scope = context.institution_scope
+        attested_scope = _scope(data.get("effective_scope") or data.get("institution_scope") or data.get("scope"))
+        if self.scope_attestation_required:
+            if requested_scope is None or attested_scope is None or not requested_scope.covers(attested_scope):
+                return ToolResult(tool_name=tool_name, status=ResultStatus.INVALID_RESULT, warnings=(
+                    Warning("invalid_scope_attestation", "remote result did not attest an effective scope within the request", self.source_id),
+                ))
+
         raw_warnings = data.get("warnings", [])
         if not isinstance(raw_warnings, list):
             return ToolResult(tool_name=tool_name, status=ResultStatus.INVALID_RESULT, warnings=(
@@ -215,13 +257,17 @@ class RemoteHttpConnector:
             for item in raw_provenance:
                 if not isinstance(item, dict) or _safe_text(item.get("source_id")) != self.source_id:
                     raise ValueError("provenance source did not match connector source")
+                raw_redactions = item.get("redactions_applied", [])
+                if not isinstance(raw_redactions, list):
+                    raise ValueError("provenance redactions were not a list")
                 provenance.append(Provenance(
                     source_id=self.source_id,
                     source_type=SourceKind(_safe_text(item.get("source_type"))),
                     retrieved_at=_parse_datetime(item.get("retrieved_at")) or datetime.now(timezone.utc),
                     complete=bool(item.get("complete", True)),
                     rows_used=int(item.get("rows_used", 0)),
-                    redactions_applied=tuple(str(value) for value in item.get("redactions_applied", [])),
+                    data_period=_parse_period(item.get("data_period")),
+                    redactions_applied=tuple(str(value) for value in raw_redactions),
                 ))
         except (TypeError, ValueError):
             return ToolResult(tool_name=tool_name, status=ResultStatus.INVALID_RESULT, warnings=(
@@ -243,6 +289,7 @@ class RemoteHttpConnector:
         if tool_name not in self.allowed_tools:
             return unavailable_result(tool_name, self.source_id, "tool is not enabled by the connector contract")
         payload = {
+            "contract_version": "2",
             "source_id": self.source_id,
             "tool_name": tool_name,
             "arguments": arguments,
@@ -250,15 +297,12 @@ class RemoteHttpConnector:
             "principal": {
                 "id": context.principal_id,
                 "type": context.principal_type.value if context.principal_type else None,
+                "capabilities": sorted(item.value for item in context.capabilities),
+                "scopes": [context.institution_scope.as_dict()] if context.institution_scope else [],
+                "consent_verified": context.consent_verified,
+                "revoked": context.revoked,
             },
-            "institution_scope": (
-                {
-                    "college_id": context.institution_scope.college_id,
-                    "department_id": context.institution_scope.department_id,
-                    "batch_id": context.institution_scope.batch_id,
-                }
-                if context.institution_scope else None
-            ),
+            "institution_scope": context.institution_scope.as_dict() if context.institution_scope else None,
             "limits": {
                 "max_duration_ms": context.limits.max_duration_ms,
                 "max_rows": context.limits.max_rows,
@@ -267,7 +311,7 @@ class RemoteHttpConnector:
         }
         try:
             data = await self._request_json("POST", "/v1/execute", request_id=context.request_id, payload=payload)
-            return self._parse_result(tool_name, data)
+            return self._parse_result(tool_name, data, context)
         except httpx.TimeoutException:
             return ToolResult(tool_name=tool_name, status=ResultStatus.TIMEOUT, warnings=(
                 Warning("source_timeout", "remote connector request timed out", self.source_id),

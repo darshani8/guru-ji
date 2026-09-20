@@ -82,6 +82,7 @@ class OllamaProvider:
             is_final=True,
             provider_id=self.provider_id,
             model_id=self.model_id,
+            usage=None,
         )
 
     def stream(self, prompt: str, *, max_tokens: int = 800) -> AsyncIterator[ModelEvent]:

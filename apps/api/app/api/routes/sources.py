@@ -13,7 +13,7 @@ router = APIRouter(prefix="/v1/sources", tags=["sources"])
 async def list_sources(request: Request) -> dict[str, object]:
     runtime = runtime_from_request(request)
     principal = principal_from_request(request)
-    if not principal.authenticated:
+    if not principal.active:
         raise HTTPException(status_code=401, detail="authentication is required")
     if Capability.VIEW_SOURCE_METADATA not in principal.capabilities:
         raise HTTPException(status_code=403, detail="source:view_metadata capability is required")

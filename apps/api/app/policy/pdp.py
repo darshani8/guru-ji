@@ -1,8 +1,8 @@
-"""Guru Ji policy decision point boundary.
+"""Guru Ji policy decision point boundaries.
 
-This is intentionally a small local PDP with Cerbos-shaped inputs and outputs.
-A future Cerbos sidecar can implement the same protocol without changing the
-connector or orchestration contracts.
+The local PDP is useful for tests and explicit development runs. Production can
+replace it with the Cerbos adapter in this module without changing orchestration
+or connector contracts. Every implementation is fail-closed.
 """
 
 from __future__ import annotations
@@ -51,8 +51,30 @@ class PolicyDecisionPoint(Protocol):
     ) -> PolicyDecision: ...
 
 
+def _denied(
+    *,
+    action: str,
+    resource_type: str,
+    resource_id: str,
+    policy_version: str,
+    decision_id: str,
+    reason: DenialReason | str,
+    matched_scope: InstitutionScope | None = None,
+) -> PolicyDecision:
+    return PolicyDecision(
+        allowed=False,
+        action=action,
+        resource_type=resource_type,
+        resource_id=resource_id,
+        policy_version=policy_version,
+        decision_id=decision_id,
+        matched_scope=matched_scope,
+        reason=reason,
+    )
+
+
 class LocalPolicyDecisionPoint:
-    """Small fail-closed PDP used until a reviewed Cerbos sidecar is deployed."""
+    """Small fail-closed PDP used for development and isolated tests."""
 
     policy_version = "guru-local-v1"
     _allowed_actions = frozenset({"list", "search", "retrieve", "mcp.tool.call"})
@@ -69,20 +91,29 @@ class LocalPolicyDecisionPoint:
     ) -> PolicyDecision:
         decision_id = f"pdp-{uuid4().hex}"
         if action not in self._allowed_actions:
-            return PolicyDecision(
-                allowed=False,
+            return _denied(
                 action=action,
                 resource_type=resource_type,
                 resource_id=resource_id,
                 policy_version=self.policy_version,
                 decision_id=decision_id,
-                reason="unknown_action",
+                reason=DenialReason.UNKNOWN_ACTION,
             )
         if not principal.authenticated or principal.principal_type is PrincipalType.ANONYMOUS:
             reason: DenialReason | str = DenialReason.UNAUTHENTICATED
             matched_scope = None
+        elif principal.revoked:
+            reason = DenialReason.REVOKED
+            matched_scope = None
         elif not principal.has_capability(required_capability):
             reason = DenialReason.MISSING_CAPABILITY
+            matched_scope = None
+        elif (
+            principal.principal_type is PrincipalType.STUDENT
+            and requested_scope.batch_id is not None
+            and not principal.consent_verified
+        ):
+            reason = DenialReason.PARENTAL_CONSENT_REQUIRED
             matched_scope = None
         else:
             matched_scope = next(
@@ -101,8 +132,7 @@ class LocalPolicyDecisionPoint:
                     decision_id=decision_id,
                     matched_scope=matched_scope,
                 )
-        return PolicyDecision(
-            allowed=False,
+        return _denied(
             action=action,
             resource_type=resource_type,
             resource_id=resource_id,

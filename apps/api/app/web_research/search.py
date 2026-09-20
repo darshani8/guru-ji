@@ -40,7 +40,8 @@ class WebSearchResult:
 
 
 class WebSearchProvider(Protocol):
-    provider_name: str
+    @property
+    def provider_name(self) -> str: ...
 
     async def search(
         self,

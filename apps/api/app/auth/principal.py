@@ -38,8 +38,6 @@ def _capabilities_for(role: PrincipalType) -> frozenset[Capability]:
 def _principal_from_demo_headers(headers: Mapping[str, str], settings: AppSettings) -> Principal:
     authorization = headers.get("authorization", "")
     demo_id = headers.get("x-demo-principal", "")
-    # Demo headers are identity fixtures, not an authentication mechanism. The
-    # explicit development bearer token is required even in local/test mode.
     if authorization != f"Bearer {settings.dev_bearer_token}":
         return _anonymous()
     if not demo_id:
@@ -60,6 +58,8 @@ def _principal_from_demo_headers(headers: Mapping[str, str], settings: AppSettin
                 capabilities.add(Capability(raw.strip()))
             except ValueError:
                 continue
+    # Consent and revocation are deliberately not accepted from demo headers;
+    # they must come from verified identity/control-plane state.
     return Principal(
         principal_id=demo_id or "demo-user",
         principal_type=role,
@@ -74,13 +74,7 @@ def principal_from_headers(
     settings: AppSettings,
     verifier: JwtVerifier | None = None,
 ) -> Principal:
-    """Build a principal without granting authority to unverified claims.
-
-    Development and test environments use the explicit demo headers. All other
-    environments require a bearer JWT verified against the configured OIDC
-    issuer and JWKS. Invalid or missing credentials become anonymous so routes
-    can return a uniform 401 response without exposing verification details.
-    """
+    """Build a principal without granting authority to unverified claims."""
 
     if settings.environment in {"development", "test"}:
         return _principal_from_demo_headers(headers, settings)
@@ -91,7 +85,8 @@ def principal_from_headers(
         return _anonymous()
     try:
         active_verifier = verifier or JwtVerifier(settings)
-        return active_verifier.verify(token.strip())
+        principal = active_verifier.verify(token.strip())
+        return principal if principal.active else _anonymous()
     except (AuthenticationError, ValueError, RuntimeError):
         return _anonymous()
 

@@ -11,7 +11,7 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from threading import RLock
-from typing import Mapping
+from typing import Mapping, Protocol
 from uuid import uuid4
 
 
@@ -33,14 +33,19 @@ class TraceSpan:
     attributes: tuple[tuple[str, str | int | bool | None], ...]
 
 
+class TraceExporterProtocol(Protocol):
+    def export(self, span: TraceSpan) -> None: ...
+
+
 class TraceRecorder:
     """Bounded in-process trace recorder with an explicit attribute allow-list."""
 
-    def __init__(self, max_spans: int = 2_000) -> None:
+    def __init__(self, max_spans: int = 2_000, exporter: TraceExporterProtocol | None = None) -> None:
         if max_spans <= 0:
             raise ValueError("max_spans must be positive")
         self._spans: deque[TraceSpan] = deque(maxlen=max_spans)
         self._lock = RLock()
+        self._exporter = exporter
 
     @staticmethod
     def _safe_attributes(attributes: Mapping[str, object]) -> tuple[tuple[str, str | int | bool | None], ...]:
@@ -65,6 +70,11 @@ class TraceRecorder:
         )
         with self._lock:
             self._spans.append(span)
+        if self._exporter is not None:
+            try:
+                self._exporter.export(span)
+            except Exception:  # noqa: BLE001 - telemetry is deliberately best effort
+                pass
         return span
 
     def recent(self, limit: int = 100) -> tuple[TraceSpan, ...]:
@@ -74,4 +84,4 @@ class TraceRecorder:
             return tuple(list(self._spans)[-limit:][::-1])
 
 
-__all__ = ["TraceRecorder", "TraceSpan"]
+__all__ = ["TraceExporterProtocol", "TraceRecorder", "TraceSpan"]
