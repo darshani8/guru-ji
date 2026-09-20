@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from time import monotonic
+from typing import TypedDict
 
 from ..policy.pdp import LocalPolicyDecisionPoint, PolicyDecision, PolicyDecisionPoint
 
@@ -12,7 +13,7 @@ from ..connectors.registry import ConnectorRegistry
 from ..domain.audit import AuditEvent, AuditOutcome
 from ..domain.principals import Capability
 from ..domain.requests import ChatRequest
-from ..domain.results import ResultStatus
+from ..domain.results import ResultStatus, ToolResult
 from ..persistence.control_plane import AnswerEnvelopeMetadata, ModelAttemptMetadata, answer_hash, now_utc
 from ..persistence.database import InMemoryControlStore, PostgresControlStore, SqliteControlStore
 from ..policy.query_limits import QueryLimits
@@ -27,7 +28,18 @@ from .result_aggregator import aggregate
 from .tool_executor import execute_plan
 
 
-def _audit_outcome(answer: AssistantAnswer, results: tuple) -> AuditOutcome:
+class AuditBase(TypedDict):
+    event_type: str
+    request_id: str
+    principal_id: str | None
+    conversation_id: str | None
+    endpoint: str
+    source_ids: tuple[str, ...]
+    tool_names: tuple[str, ...]
+    redactions_applied: tuple[str, ...]
+
+
+def _audit_outcome(answer: AssistantAnswer, results: tuple[ToolResult, ...]) -> AuditOutcome:
     if any(result.status is ResultStatus.UNAUTHORIZED for result in results):
         return AuditOutcome.DENIED
     if answer.status == "complete":
@@ -113,7 +125,7 @@ class AssistantService:
 
     async def _ask_public_web(self, request: ChatRequest, principal) -> AssistantAnswer:
         started = monotonic()
-        audit_base = {
+        audit_base: AuditBase = {
             "event_type": "assistant.web_research",
             "request_id": request.request_id,
             "principal_id": principal.principal_id if principal.authenticated else None,
