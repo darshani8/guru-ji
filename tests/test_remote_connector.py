@@ -35,10 +35,18 @@ class RemoteConnectorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(request.headers["x-request-id"], "req-remote")
             payload = json.loads(request.content)
             self.assertEqual(payload["tool_name"], "institution.overview")
-            self.assertEqual(payload["principal"], {"id": "faculty-1", "type": "faculty"})
+            self.assertEqual(payload["principal"], {
+                "id": "faculty-1",
+                "type": "faculty",
+                "capabilities": [],
+                "scopes": [{"college_id": "college_a", "department_id": "dept_1", "batch_id": None}],
+                "consent_verified": False,
+                "revoked": False,
+            })
             self.assertEqual(payload["institution_scope"], {"college_id": "college_a", "department_id": "dept_1", "batch_id": None})
             self.assertEqual(payload["limits"]["max_rows"], 500)
             return httpx.Response(200, json={
+                "contract_version": "2",
                 "tool_name": "institution.overview",
                 "status": "success",
                 "data": {"active_students": 500},
@@ -89,6 +97,7 @@ class RemoteConnectorTests(unittest.IsolatedAsyncioTestCase):
         async def handler(request: httpx.Request) -> httpx.Response:
             del request
             return httpx.Response(200, json={
+                "contract_version": "2",
                 "tool_name": "institution.overview",
                 "status": "success",
                 "data": {"active_students": 500},
