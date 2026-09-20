@@ -30,7 +30,8 @@ class ConnectorContext:
 
 
 class ReadOnlyConnector(Protocol):
-    source_id: str
+    @property
+    def source_id(self) -> str: ...
 
     async def health(self) -> SourceHealth: ...
 
