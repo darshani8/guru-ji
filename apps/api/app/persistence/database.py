@@ -3,12 +3,14 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from ..domain.audit import AuditEvent, AuditOutcome
 from ..domain.source_health import Freshness, SourceHealth, SourceHealthStatus
+from .control_plane import AnswerEnvelopeMetadata, ModelAttemptMetadata, OutboxRecord, now_utc
 
 
 class InMemoryControlStore:
@@ -23,6 +25,9 @@ class InMemoryControlStore:
         self._max_events = max_events
         self._health: dict[str, SourceHealth] = {}
         self._briefings: list[dict[str, Any]] = []
+        self._answers: list[AnswerEnvelopeMetadata] = []
+        self._attempts: list[ModelAttemptMetadata] = []
+        self._outbox: list[OutboxRecord] = []
 
     def append_audit(self, event: AuditEvent) -> None:
         self._events.append(event)
@@ -58,6 +63,47 @@ class InMemoryControlStore:
         if limit <= 0:
             return ()
         return tuple(self._briefings[-limit:][::-1])
+
+    def record_answer_envelope(self, envelope: AnswerEnvelopeMetadata) -> None:
+        self._answers = [item for item in self._answers if item.request_id != envelope.request_id]
+        self._answers.append(envelope)
+
+    def record_model_attempt(self, attempt: ModelAttemptMetadata) -> None:
+        self._attempts.append(attempt)
+        if len(self._attempts) > self._max_events:
+            del self._attempts[:-self._max_events]
+
+    def enqueue_outbox(self, event_type: str, payload: dict[str, Any]) -> str:
+        outbox_id = f"outbox-{uuid4().hex}"
+        self._outbox.append(OutboxRecord(outbox_id, event_type, dict(payload), now_utc()))
+        return outbox_id
+
+    def drain_outbox(self, limit: int = 100) -> tuple[OutboxRecord, ...]:
+        if limit <= 0:
+            return ()
+        pending = [item for item in self._outbox if item.delivered_at is None][:limit]
+        return tuple(pending)
+
+    def ack_outbox(self, outbox_ids: tuple[str, ...]) -> None:
+        acknowledged = set(outbox_ids)
+        if not acknowledged:
+            return
+        self._outbox = [
+            item for item in self._outbox
+            if item.outbox_id not in acknowledged
+        ]
+
+    def prune_retention(self, retention_days: int) -> int:
+        if retention_days <= 0:
+            raise ValueError("retention_days must be positive")
+        cutoff = now_utc() - timedelta(days=retention_days)
+        before = len(self._events) + len(self._answers) + len(self._attempts) + len(self._outbox) + len(self._briefings)
+        self._events = [item for item in self._events if item.occurred_at >= cutoff]
+        self._answers = [item for item in self._answers if item.created_at >= cutoff]
+        self._attempts = [item for item in self._attempts if item.created_at >= cutoff]
+        self._outbox = [item for item in self._outbox if item.created_at >= cutoff]
+        self._briefings = [item for item in self._briefings if datetime.fromisoformat(item["created_at"]) >= cutoff]
+        return before - (len(self._events) + len(self._answers) + len(self._attempts) + len(self._outbox) + len(self._briefings))
 
     def ping(self) -> bool:
         return True
@@ -149,6 +195,44 @@ class SqliteControlStore:
             );
             CREATE INDEX IF NOT EXISTS idx_briefing_runs_created_at
                 ON briefing_runs(created_at DESC);
+            CREATE TABLE IF NOT EXISTS answer_envelopes (
+                request_id TEXT PRIMARY KEY,
+                conversation_id TEXT,
+                principal_id TEXT,
+                college_id TEXT,
+                status TEXT NOT NULL,
+                citations_count INTEGER NOT NULL,
+                warnings_count INTEGER NOT NULL,
+                answer_sha256 TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_answer_envelopes_created_at
+                ON answer_envelopes(created_at DESC);
+            CREATE TABLE IF NOT EXISTS model_attempts (
+                attempt_id TEXT PRIMARY KEY,
+                request_id TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                latency_ms INTEGER NOT NULL,
+                fallback INTEGER NOT NULL DEFAULT 0,
+                prompt_tokens INTEGER,
+                completion_tokens INTEGER,
+                total_tokens INTEGER,
+                cost REAL,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_model_attempts_created_at
+                ON model_attempts(created_at DESC);
+            CREATE TABLE IF NOT EXISTS control_outbox (
+                outbox_id TEXT PRIMARY KEY,
+                event_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                delivered_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_control_outbox_pending
+                ON control_outbox(delivered_at, created_at);
             """
         )
         for column, definition in (
@@ -329,6 +413,88 @@ class SqliteControlStore:
             for row in rows
         )
 
+    def record_answer_envelope(self, envelope: AnswerEnvelopeMetadata) -> None:
+        with self._lock:
+            self._connection.execute(
+                """
+                INSERT OR REPLACE INTO answer_envelopes(
+                    request_id, conversation_id, principal_id, college_id, status,
+                    citations_count, warnings_count, answer_sha256, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    envelope.request_id, envelope.conversation_id, envelope.principal_id,
+                    envelope.college_id, envelope.status, envelope.citations_count,
+                    envelope.warnings_count, envelope.answer_sha256, envelope.created_at.isoformat(),
+                ),
+            )
+            self._connection.commit()
+
+    def record_model_attempt(self, attempt: ModelAttemptMetadata) -> None:
+        with self._lock:
+            self._connection.execute(
+                """
+                INSERT INTO model_attempts(
+                    attempt_id, request_id, provider_id, model_id, outcome, latency_ms,
+                    fallback, prompt_tokens, completion_tokens, total_tokens, cost, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"attempt-{uuid4().hex}", attempt.request_id, attempt.provider_id,
+                    attempt.model_id, attempt.outcome, attempt.latency_ms, int(attempt.fallback),
+                    attempt.prompt_tokens, attempt.completion_tokens, attempt.total_tokens,
+                    attempt.cost, attempt.created_at.isoformat(),
+                ),
+            )
+            self._connection.commit()
+
+    def enqueue_outbox(self, event_type: str, payload: dict[str, Any]) -> str:
+        outbox_id = f"outbox-{uuid4().hex}"
+        with self._lock:
+            self._connection.execute(
+                "INSERT INTO control_outbox(outbox_id, event_type, payload_json, created_at) VALUES (?, ?, ?, ?)",
+                (outbox_id, event_type, self._json(payload), now_utc().isoformat()),
+            )
+            self._connection.commit()
+        return outbox_id
+
+    def drain_outbox(self, limit: int = 100) -> tuple[OutboxRecord, ...]:
+        if limit <= 0:
+            return ()
+        with self._lock:
+            rows = self._connection.execute(
+                "SELECT * FROM control_outbox WHERE delivered_at IS NULL ORDER BY created_at LIMIT ?", (int(limit),)
+            ).fetchall()
+        return tuple(OutboxRecord(
+            outbox_id=row["outbox_id"], event_type=row["event_type"],
+            payload=json.loads(row["payload_json"]), created_at=self._parse_datetime(row["created_at"]),
+            delivered_at=self._parse_datetime(row["delivered_at"]) if row["delivered_at"] else None,
+        ) for row in rows)
+
+    def ack_outbox(self, outbox_ids: tuple[str, ...]) -> None:
+        if not outbox_ids:
+            return
+        delivered_at = now_utc().isoformat()
+        with self._lock:
+            self._connection.executemany(
+                "UPDATE control_outbox SET delivered_at = ? WHERE outbox_id = ? AND delivered_at IS NULL",
+                [(delivered_at, outbox_id) for outbox_id in outbox_ids],
+            )
+            self._connection.commit()
+
+    def prune_retention(self, retention_days: int) -> int:
+        if retention_days <= 0:
+            raise ValueError("retention_days must be positive")
+        cutoff = (now_utc() - timedelta(days=retention_days)).isoformat()
+        with self._lock:
+            total = 0
+            for table in ("audit_events", "answer_envelopes", "model_attempts", "control_outbox", "briefing_runs"):
+                column = "occurred_at" if table == "audit_events" else "created_at"
+                cursor = self._connection.execute(f"DELETE FROM {table} WHERE {column} < ?", (cutoff,))
+                total += cursor.rowcount
+            self._connection.commit()
+        return total
+
     def ping(self) -> bool:
         with self._lock:
             self._connection.execute("SELECT 1").fetchone()
@@ -423,6 +589,47 @@ class PostgresControlStore:
             )
             """,
             "CREATE INDEX IF NOT EXISTS idx_briefing_runs_created_at ON briefing_runs(created_at DESC)",
+            """
+            CREATE TABLE IF NOT EXISTS answer_envelopes (
+                request_id TEXT PRIMARY KEY,
+                conversation_id TEXT,
+                principal_id TEXT,
+                college_id TEXT,
+                status TEXT NOT NULL,
+                citations_count INTEGER NOT NULL,
+                warnings_count INTEGER NOT NULL,
+                answer_sha256 TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_answer_envelopes_created_at ON answer_envelopes(created_at DESC)",
+            """
+            CREATE TABLE IF NOT EXISTS model_attempts (
+                attempt_id TEXT PRIMARY KEY,
+                request_id TEXT NOT NULL,
+                provider_id TEXT NOT NULL,
+                model_id TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                latency_ms INTEGER NOT NULL,
+                fallback BOOLEAN NOT NULL DEFAULT FALSE,
+                prompt_tokens INTEGER,
+                completion_tokens INTEGER,
+                total_tokens INTEGER,
+                cost DOUBLE PRECISION,
+                created_at TEXT NOT NULL
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_model_attempts_created_at ON model_attempts(created_at DESC)",
+            """
+            CREATE TABLE IF NOT EXISTS control_outbox (
+                outbox_id TEXT PRIMARY KEY,
+                event_type TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                delivered_at TEXT
+            )
+            """,
+            "CREATE INDEX IF NOT EXISTS idx_control_outbox_pending ON control_outbox(delivered_at, created_at)",
         )
         with self._lock:
             try:
@@ -608,6 +815,106 @@ class PostgresControlStore:
             }
             for row in rows
         )
+
+    def record_answer_envelope(self, envelope: AnswerEnvelopeMetadata) -> None:
+        with self._lock:
+            with self._connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO answer_envelopes(
+                        request_id, conversation_id, principal_id, college_id, status,
+                        citations_count, warnings_count, answer_sha256, created_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (request_id) DO UPDATE SET
+                        conversation_id = EXCLUDED.conversation_id,
+                        principal_id = EXCLUDED.principal_id,
+                        college_id = EXCLUDED.college_id,
+                        status = EXCLUDED.status,
+                        citations_count = EXCLUDED.citations_count,
+                        warnings_count = EXCLUDED.warnings_count,
+                        answer_sha256 = EXCLUDED.answer_sha256,
+                        created_at = EXCLUDED.created_at
+                    """,
+                    (
+                        envelope.request_id, envelope.conversation_id, envelope.principal_id,
+                        envelope.college_id, envelope.status, envelope.citations_count,
+                        envelope.warnings_count, envelope.answer_sha256, envelope.created_at.isoformat(),
+                    ),
+                )
+            self._connection.commit()
+
+    def record_model_attempt(self, attempt: ModelAttemptMetadata) -> None:
+        with self._lock:
+            with self._connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    INSERT INTO model_attempts(
+                        attempt_id, request_id, provider_id, model_id, outcome, latency_ms,
+                        fallback, prompt_tokens, completion_tokens, total_tokens, cost, created_at
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """,
+                    (
+                        f"attempt-{uuid4().hex}", attempt.request_id, attempt.provider_id,
+                        attempt.model_id, attempt.outcome, attempt.latency_ms, attempt.fallback,
+                        attempt.prompt_tokens, attempt.completion_tokens, attempt.total_tokens,
+                        attempt.cost, attempt.created_at.isoformat(),
+                    ),
+                )
+            self._connection.commit()
+
+    def enqueue_outbox(self, event_type: str, payload: dict[str, Any]) -> str:
+        outbox_id = f"outbox-{uuid4().hex}"
+        with self._lock:
+            with self._connection.cursor() as cursor:
+                cursor.execute(
+                    "INSERT INTO control_outbox(outbox_id, event_type, payload_json, created_at) VALUES (%s, %s, %s, %s)",
+                    (outbox_id, event_type, self._json(payload), now_utc().isoformat()),
+                )
+            self._connection.commit()
+        return outbox_id
+
+    def drain_outbox(self, limit: int = 100) -> tuple[OutboxRecord, ...]:
+        if limit <= 0:
+            return ()
+        with self._lock:
+            with self._connection.cursor() as cursor:
+                cursor.execute(
+                    "SELECT * FROM control_outbox WHERE delivered_at IS NULL ORDER BY created_at LIMIT %s",
+                    (int(limit),),
+                )
+                rows = cursor.fetchall()
+        return tuple(OutboxRecord(
+            outbox_id=row["outbox_id"], event_type=row["event_type"],
+            payload=json.loads(row["payload_json"]), created_at=self._parse_datetime(row["created_at"]),
+            delivered_at=self._parse_datetime(row["delivered_at"]) if row["delivered_at"] else None,
+        ) for row in rows)
+
+    def ack_outbox(self, outbox_ids: tuple[str, ...]) -> None:
+        if not outbox_ids:
+            return
+        delivered_at = now_utc().isoformat()
+        with self._lock:
+            with self._connection.cursor() as cursor:
+                for outbox_id in outbox_ids:
+                    cursor.execute(
+                        "UPDATE control_outbox SET delivered_at = %s WHERE outbox_id = %s AND delivered_at IS NULL",
+                        (delivered_at, outbox_id),
+                    )
+            self._connection.commit()
+
+    def prune_retention(self, retention_days: int) -> int:
+        if retention_days <= 0:
+            raise ValueError("retention_days must be positive")
+        cutoff = (now_utc() - timedelta(days=retention_days)).isoformat()
+        with self._lock:
+            with self._connection.cursor() as cursor:
+                total = 0
+                for table in ("audit_events", "answer_envelopes", "model_attempts", "control_outbox", "briefing_runs"):
+                    column = "occurred_at" if table == "audit_events" else "created_at"
+                    cursor.execute(f"DELETE FROM {table} WHERE {column} < %s", (cutoff,))
+                    total += cursor.rowcount
+            self._connection.commit()
+        return total
 
     def ping(self) -> bool:
         with self._lock:
