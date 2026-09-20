@@ -50,6 +50,18 @@ def _claim_values(claims: Mapping[str, Any], name: str) -> tuple[str, ...]:
     return tuple(item.strip() for item in values if item.strip())
 
 
+def _truthy_claim(claims: Mapping[str, Any], *names: str) -> bool:
+    for name in names:
+        value = claims.get(name)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value == 1
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "verified", "active"}
+    return False
+
+
 def _capabilities(claims: Mapping[str, Any], principal_type: PrincipalType) -> frozenset[Capability]:
     raw = _claim_values(claims, "guru_capabilities")
     if not raw:
@@ -94,8 +106,6 @@ def _scopes(claims: Mapping[str, Any]) -> tuple[InstitutionScope, ...]:
     if scopes:
         return tuple(scopes)
 
-    # A single college claim is supported for simple institutional IdPs. It is
-    # still explicit and never expands to another college.
     college_id = claims.get("college_id") or claims.get("college")
     if isinstance(college_id, str) and college_id.strip():
         return (InstitutionScope(college_id=college_id.strip()),)
@@ -116,6 +126,8 @@ def principal_from_claims(claims: Mapping[str, Any]) -> Principal:
         capabilities=_capabilities(claims, role),
         scopes=_scopes(claims),
         authenticated=True,
+        consent_verified=_truthy_claim(claims, "guru_parental_consent", "parental_consent", "consent_verified"),
+        revoked=_truthy_claim(claims, "guru_revoked", "revoked", "account_revoked"),
     )
 
 
