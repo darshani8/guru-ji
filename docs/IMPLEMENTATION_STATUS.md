@@ -57,7 +57,7 @@ All six roadmap phases now have code, contracts, tests, and deployment reference
 
 ## Validation completed in this export
 
-- `101 passed` in the full pytest suite, including the new all-phase tests.
+- `102 passed` in the full pytest suite, including the new all-phase tests.
 - Python compilation passes for API, connector, tests, and scripts.
 - Ruff CI-equivalent undefined-name/import check (`ruff check --select F`) passes.
 - New targeted tests cover Cerbos allow/deny behavior, connector authentication/scope attestation, SQLite metadata/outbox retry behavior, trusted edge claims, MCP allowlisting, trace redaction, voice normalization, and stream sequencing.
