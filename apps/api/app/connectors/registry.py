@@ -9,7 +9,7 @@ from .base import ReadOnlyConnector
 
 class ConnectorRegistry:
     def __init__(self, connectors: Iterable[ReadOnlyConnector] = ()) -> None:
-        self._connectors = {}
+        self._connectors: dict[str, ReadOnlyConnector] = {}
         for connector in connectors:
             self.register(connector)
 
