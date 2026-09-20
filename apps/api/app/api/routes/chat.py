@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Literal, cast
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
@@ -76,8 +76,9 @@ async def _stream_answer(body: ChatBody, request: Request, principal) -> Streami
     domain_request = _build_request(body, request, principal)
     answer = await runtime.assistant.ask(domain_request, principal)
     answer_payload = answer.as_dict()
-    status: Literal["complete", "partial", "refused", "failed", "degraded"] = (
-        answer.status if answer.status in {"complete", "partial", "refused", "failed", "degraded"} else "failed"
+    status = cast(
+        Literal["complete", "partial", "refused", "failed", "degraded"],
+        answer.status if answer.status in {"complete", "partial", "refused", "failed", "degraded"} else "failed",
     )
 
     async def events():
