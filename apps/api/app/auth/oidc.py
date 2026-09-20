@@ -41,6 +41,7 @@ def _anonymous() -> Principal:
 
 def _claim_values(claims: Mapping[str, Any], name: str) -> tuple[str, ...]:
     value = claims.get(name)
+    values: tuple[str, ...]
     if isinstance(value, str):
         values = (value,)
     elif isinstance(value, (list, tuple, set)):
