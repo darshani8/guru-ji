@@ -16,7 +16,7 @@ The repository now contains the complete all-phase reference implementation for 
 
 The College A deterministic connector remains available only for development/tests. The reference compose stack adds PostgreSQL, Cerbos, and the authenticated connector service; it does not create or contact a real college system. The browser voice path receives final transcripts only, rejects binary audio frames, uses one-use tickets, and keeps bounded session/utterance limits.
 
-The detailed ledger is in `docs/IMPLEMENTATION_STATUS.md`. It distinguishes repository-complete implementation from production gates requiring real institutional contracts, credentials, deployments, and approvals.
+The detailed ledger is in `docs/IMPLEMENTATION_STATUS.md`. The executable staging, production-canary, evidence, rollback, and sign-off sequence is in `docs/EXTERNAL_VALIDATION_PLAN.md`. These documents distinguish repository-complete implementation from production gates requiring real institutional contracts, credentials, deployments, and approvals.
 
 ## Validation
 
