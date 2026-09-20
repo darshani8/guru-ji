@@ -29,7 +29,7 @@ With Python 3.12+ and project dependencies synchronized:
     make hygiene
     make lint
 
-The current export’s full suite contains 101 passing tests. The CI-equivalent undefined-name/import lint check passes. `make smoke` validates a running API; `make postgres-smoke` validates a configured PostgreSQL service; and `docker compose -f infra/docker/compose.dev.yml up --build` exercises the reference multi-service stack when Docker is available.
+The current export’s full suite contains 102 passing tests. The CI-equivalent undefined-name/import lint check passes. `make smoke` validates a running API; `make postgres-smoke` validates a configured PostgreSQL service; and `docker compose -f infra/docker/compose.dev.yml up --build` exercises the reference multi-service stack when Docker is available.
 
 ## Local configuration
 
