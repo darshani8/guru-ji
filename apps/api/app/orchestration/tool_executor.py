@@ -45,6 +45,9 @@ async def execute_plan(
                 principal_id=principal.principal_id,
                 principal_type=principal.principal_type,
                 institution_scope=requested_scope,
+                capabilities=principal.capabilities,
+                consent_verified=principal.consent_verified,
+                revoked=principal.revoked,
             ),
         ))
     return tuple(results)
