@@ -62,7 +62,7 @@ All six roadmap phases now have code, contracts, tests, and deployment reference
 - Ruff CI-equivalent undefined-name/import check (`ruff check --select F`) passes.
 - New targeted tests cover Cerbos allow/deny behavior, connector authentication/scope attestation, SQLite metadata/outbox retry behavior, trusted edge claims, MCP allowlisting, trace redaction, voice normalization, and stream sequencing.
 
-The remaining validation commands are `make validate-openapi`, `make hygiene`, `make smoke` against a running API, `make postgres-smoke` against a real PostgreSQL service, and a compose-stack smoke test with Cerbos and the connector. They require the relevant local processes or external service to be available; their results are not invented here.
+The remaining repository validation commands are `make validate-openapi`, `make hygiene`, `make smoke` against a running API, `make postgres-smoke` against a real PostgreSQL service, and a compose-stack smoke test with Cerbos and the connector. They require the relevant local processes or external service to be available; their results are not invented here. The executable deployment-specific external validation sequence is documented in [`docs/EXTERNAL_VALIDATION_PLAN.md`](EXTERNAL_VALIDATION_PLAN.md).
 
 ## External gates still required before production claim
 
