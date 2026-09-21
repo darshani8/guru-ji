@@ -17,6 +17,7 @@ All six roadmap phases now have code, contracts, tests, and deployment reference
 - Added an authenticated connector service under `apps/connector` with `GET /v1/health`, `GET /v1/ready`, and `POST /v1/execute`.
 - The connector accepts only contract version 2 and approved semantic tools, rejects revoked or out-of-scope principals, requires `ask:read_only`, enforces student batch consent, and returns an attested effective scope plus provenance/redaction metadata.
 - Added a local deterministic aggregate repository for stack tests and a PostgreSQL reporting-view adapter intended for a database role with SELECT-only privileges. No raw student records or writes cross the connector boundary.
+- Added a deployment-managed multi-college connector registry with backward-compatible single-connector settings. Each registered source is bound to one institution, approved semantic tools, a distinct endpoint, a server-side secret reference, and optional scope attestation; plan construction selects only sources for the requested College scope.
 - Added `infra/docker/Dockerfile.connector` and a development compose service.
 
 ### P2 — policy decision point
