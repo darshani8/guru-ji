@@ -8,11 +8,11 @@ from ..auth.oidc import JwtVerifier
 from ..auth.principal import principal_from_headers
 from ..config.settings import AppSettings
 from ..config.source_registry import SourceDefinition, SourceRegistry
-from ..integrations.edge import EdgeIdentityAdapter, MoodleAdapter, OpenEdxAdapter
+from ..connectors.base import ReadOnlyConnector
 from ..connectors.college_a.connector import CollegeADemoConnector
 from ..connectors.registry import ConnectorRegistry
 from ..connectors.remote_http import RemoteHttpConnector
-from ..connectors.base import ReadOnlyConnector
+from ..integrations.edge import EdgeIdentityAdapter, MoodleAdapter, OpenEdxAdapter
 from ..observability.export import HttpJsonTraceExporter
 from ..observability.tracing import TraceRecorder
 from ..orchestration.assistant_service import AssistantService
@@ -64,19 +64,18 @@ def _build_sources(settings: AppSettings) -> SourceRegistry:
                 "institution.source_health",
             ),
         ))
-    if settings.institution_connector_base_url:
-        if any(item.source_id == settings.institution_connector_source_id for item in definitions):
-            raise ValueError("institution connector source ID conflicts with an existing source")
+    for connector in settings.configured_institution_connectors():
+        if any(item.source_id == connector.source_id for item in definitions):
+            raise ValueError(
+                "institution connector source ID conflicts with an existing source: "
+                f"{connector.source_id}"
+            )
         definitions.append(SourceDefinition(
-            source_id=settings.institution_connector_source_id,
-            institution_id=settings.institution_connector_institution_id,
-            display_name=settings.institution_connector_display_name,
+            source_id=connector.source_id,
+            institution_id=connector.institution_id,
+            display_name=connector.display_name,
             connector_type="remote_http",
-            allowed_tools=(
-                "institution.overview",
-                "institution.attendance_summary",
-                "institution.source_health",
-            ),
+            allowed_tools=connector.allowed_tools,
         ))
     return SourceRegistry(tuple(definitions))
 
@@ -157,28 +156,28 @@ def _build_web_research(settings: AppSettings) -> PublicWebResearchService | Non
 
 def _build_connectors(settings: AppSettings) -> ConnectorRegistry:
     connectors: list[ReadOnlyConnector] = []
-    source_ids: list[str] = []
+    source_ids: set[str] = set()
     if settings.demo_data_enabled:
         connectors.append(CollegeADemoConnector())
-        source_ids.append("college_a_demo")
-    if settings.institution_connector_base_url:
-        if settings.institution_connector_source_id in source_ids:
-            raise ValueError("institution connector source ID conflicts with an existing connector")
+        source_ids.add("college_a_demo")
+    for definition in settings.configured_institution_connectors():
+        if definition.source_id in source_ids:
+            raise ValueError(
+                "institution connector source ID conflicts with an existing connector: "
+                f"{definition.source_id}"
+            )
         connectors.append(RemoteHttpConnector(
-            source_id=settings.institution_connector_source_id,
-            institution_id=settings.institution_connector_institution_id,
-            display_name=settings.institution_connector_display_name,
-            base_url=settings.institution_connector_base_url,
-            allowed_tools=frozenset({
-                "institution.overview",
-                "institution.attendance_summary",
-                "institution.source_health",
-            }),
+            source_id=definition.source_id,
+            institution_id=definition.institution_id,
+            display_name=definition.display_name,
+            base_url=definition.base_url,
+            allowed_tools=frozenset(definition.allowed_tools),
             timeout_seconds=settings.connector_timeout_seconds,
             max_response_bytes=settings.connector_max_response_bytes,
-            auth_token=settings.institution_connector_auth_token,
-            scope_attestation_required=settings.connector_scope_attestation_required,
+            auth_token=definition.auth_token,
+            scope_attestation_required=definition.scope_attestation_required,
         ))
+        source_ids.add(definition.source_id)
     return ConnectorRegistry(tuple(connectors))
 
 
