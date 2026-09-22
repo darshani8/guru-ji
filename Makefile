@@ -1,4 +1,4 @@
-.PHONY: test compile validate-openapi hygiene lint ci run db-init smoke postgres-smoke connector-smoke all-phases worker monitor platform-smoke openapi
+.PHONY: test compile validate-openapi hygiene lint ci run db-init smoke postgres-smoke connector-smoke all-phases worker monitor platform-smoke platform-postgres-smoke openapi
 
 PYTHON ?= python
 PYTHONPATH_VALUE = apps/api:apps
@@ -46,6 +46,9 @@ openapi:
 
 postgres-smoke:
 	PYTHONPATH=$(PYTHONPATH_VALUE) $(PYTHON) scripts/postgres_smoke.py
+
+platform-postgres-smoke:
+	PYTHONPATH=$(PYTHONPATH_VALUE) $(PYTHON) scripts/platform_postgres_smoke.py
 
 connector-smoke:
 	PYTHONPATH=$(PYTHONPATH_VALUE) $(PYTHON) -m pytest -q tests/test_all_phase_completion.py

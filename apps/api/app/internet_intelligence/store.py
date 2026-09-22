@@ -99,11 +99,21 @@ _STATEMENTS: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_intelligence_reports_institution ON intelligence_reports(institution_id, created_at)",
 )
-_TENANT_TABLES = ("institution_profiles", "internet_documents", "monitoring_runs", "monitoring_events", "intelligence_reports")
+# institution_profiles is deliberately not under row-level security: the monitoring
+# scheduler enumerates every profile with monitoring enabled without a tenant
+# context, and the store's own methods always filter profiles by institution_id.
+_TENANT_TABLES = ("internet_documents", "monitoring_runs", "monitoring_events", "intelligence_reports")
 
 
 def _rls() -> tuple[str, ...]:
-    statements: list[str] = []
+    statements: list[str] = [
+        # Earlier revisions placed institution_profiles under forced RLS, which hid
+        # every profile from the tenant-less scheduler; undo that idempotently so an
+        # existing database converges on the same shape as a fresh one.
+        "ALTER TABLE institution_profiles NO FORCE ROW LEVEL SECURITY",
+        "ALTER TABLE institution_profiles DISABLE ROW LEVEL SECURITY",
+        "DROP POLICY IF EXISTS institution_profiles_tenant_isolation ON institution_profiles",
+    ]
     for table in _TENANT_TABLES:
         policy = f"{table}_tenant_isolation"
         statements.append(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
@@ -169,6 +179,8 @@ class IntelligenceStore:
         return InstitutionProfile.from_dict(institution_id, _loads(row["profile_json"], {}))
 
     def monitored_institutions(self) -> list[str]:
+        """Institutions with monitoring enabled; a platform-level read used by the scheduler."""
+
         rows = self.backend.fetchall("SELECT institution_id, profile_json FROM institution_profiles ORDER BY institution_id")
         return [row["institution_id"] for row in rows if _loads(row["profile_json"], {}).get("monitoring_enabled")]
 

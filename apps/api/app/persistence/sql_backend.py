@@ -21,6 +21,11 @@ class SqlBackend:
     def __init__(self) -> None:
         self._lock = threading.RLock()
         self._closed = False
+        self._transaction_depth = 0
+
+    @property
+    def in_transaction(self) -> bool:
+        return self._transaction_depth > 0
 
     # -- lifecycle -----------------------------------------------------------------
     def close(self) -> None:
@@ -63,14 +68,19 @@ class SqlBackend:
         """Run a block atomically; PostgreSQL additionally pins the tenant for RLS."""
 
         with self._lock:
+            self._transaction_depth += 1
             try:
                 if tenant_id is not None:
                     self.set_tenant(tenant_id)
                 yield
-                self.commit()
+                if self._transaction_depth == 1:
+                    self.commit()
             except Exception:
-                self.rollback()
+                if self._transaction_depth == 1:
+                    self.rollback()
                 raise
+            finally:
+                self._transaction_depth -= 1
 
     def set_tenant(self, tenant_id: str) -> None:
         return None
@@ -168,9 +178,15 @@ class PostgresBackend(SqlBackend):
             return len(materialized)
 
     def fetchall(self, sql: str, params: Sequence[Any] = ()) -> list[dict[str, Any]]:
-        with self._lock, self._connection.cursor() as cursor:
-            cursor.execute(self._adapt(sql), tuple(params))
-            return [dict(row) for row in cursor.fetchall()]
+        with self._lock:
+            with self._connection.cursor() as cursor:
+                cursor.execute(self._adapt(sql), tuple(params))
+                rows = [dict(row) for row in cursor.fetchall()]
+            if not self.in_transaction:
+                # A read outside an explicit transaction must not leave the
+                # connection idle-in-transaction (and holding a tenant setting).
+                self._connection.commit()
+            return rows
 
     def set_tenant(self, tenant_id: str) -> None:
         # Row-level security policies read app.institution_id; SET LOCAL binds it

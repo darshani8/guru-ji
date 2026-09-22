@@ -74,6 +74,7 @@ See `.env.example`. Local defaults need no external service: SQLite, local/in-me
 - `make worker` drains background jobs (required for `GURU_JOB_QUEUE=sqs`; optional alongside the thread queue).
 - `make monitor` runs one monitoring pass for every institution with monitoring enabled (schedule with cron/EventBridge).
 - `make platform-smoke` exercises upload → import → command → report against a running development API.
+- `make platform-postgres-smoke` (with `CONTROL_DATABASE_URL` pointing at a disposable PostgreSQL database) verifies the canonical store, ingestion state, the intelligence store, and that row-level security hides rows without a tenant context. Set `GURU_SMOKE_INSTITUTION` to run `platform_smoke.py` against a persistent database with a fresh institution.
 - `make openapi` regenerates `openapi.yaml`; `make validate-openapi` checks it against the live routes.
 
 ## Phases delivered

@@ -56,7 +56,7 @@ With Python 3.12+ and project dependencies synchronized:
     make hygiene
     make lint
 
-The full suite contains 200+ passing tests covering the connector path and the data platform. The CI-equivalent undefined-name/import lint check passes. `make smoke` validates a running API; `make postgres-smoke` validates a configured PostgreSQL service; and `docker compose -f infra/docker/compose.dev.yml up --build` exercises the reference multi-service stack when Docker is available.
+The full suite contains 200+ passing tests covering the connector path and the data platform. The CI-equivalent undefined-name/import lint check passes. `make smoke` validates a running API; `make postgres-smoke` validates a configured PostgreSQL service; `make platform-postgres-smoke` exercises the data platform stores, the intelligence store, and row-level security against a disposable PostgreSQL database; and `docker compose -f infra/docker/compose.dev.yml up --build` exercises the reference multi-service stack when Docker is available.
 
 ## Local configuration
 

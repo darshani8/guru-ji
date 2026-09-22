@@ -14,7 +14,9 @@ import uuid
 from urllib.request import Request, urlopen
 
 BASE_URL = os.getenv("GURU_BASE_URL", "http://127.0.0.1:8000")
-HEADERS = {"Authorization": "Bearer dev-token", "X-Demo-Principal": "platform-smoke", "X-Demo-Role": "principal", "X-Demo-College": "college_a"}
+# Override on a persistent database so each run starts from an empty institution.
+INSTITUTION = os.getenv("GURU_SMOKE_INSTITUTION", "college_a")
+HEADERS = {"Authorization": "Bearer dev-token", "X-Demo-Principal": "platform-smoke", "X-Demo-Role": "principal", "X-Demo-College": INSTITUTION}
 
 
 def call(path: str, method: str = "GET", payload: dict[str, object] | None = None, *, raw: bytes | None = None, content_type: str | None = None, role: str | None = None):
@@ -48,7 +50,7 @@ def multipart(fields: dict[str, str], file_name: str, content: bytes) -> tuple[b
 
 def main() -> None:
     # Registering an institution needs access:manage; the rest of the flow runs as a principal.
-    call("/v1/institutions/college_a", "PUT", {"name": "College A", "location": "Bengaluru", "email_domains": ["college-a.example"]}, role="institution_admin")
+    call(f"/v1/institutions/{INSTITUTION}", "PUT", {"name": "College A", "location": "Bengaluru", "email_domains": ["college-a.example"]}, role="institution_admin")
     csv = "Student Name,USN,Course,Sem,Phone\nRavi Kumar,1MS23MBA001,MBA,1,9876543210\nAsha Rao,1MS23MBA002,MBA,1,9876543211\n".encode()
     body, content_type = multipart({"entity": "student"}, "students.csv", csv)
     job = call("/v1/ingestion/uploads", "POST", raw=body, content_type=content_type)["job"]
