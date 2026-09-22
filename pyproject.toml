@@ -16,7 +16,7 @@ dependencies = [
     "python-multipart>=0.0.20,<1.0",
     "sse-starlette>=2.2,<4.0",
     "sqlalchemy>=2.0,<3.0",
-    "structlog>=25.1,<26.0",
+    "structlog>=25.1,<27.0",
     "tenacity>=9.0,<10.0",
     "uvicorn[standard]>=0.34,<1.0",
 ]
