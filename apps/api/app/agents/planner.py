@@ -115,16 +115,21 @@ def _extract_student_id(text: str) -> str | None:
     match = re.search(r"\b([0-9][A-Za-z0-9]{2,3}[0-9]{2}[A-Za-z]{2,4}[0-9]{3})\b", text)
     if match:
         return match.group(1).upper()
-    # Short institutional IDs such as MBA002 or BCA0017: letters then digits, not a
-    # percentage, a year, or a semester spelling. This loose shape also matches
-    # hyphenated words (COVID-19, SEM-03), so it only applies when the command
-    # names a student, USN, roll number or id explicitly ("students" is a
-    # listing noun, not an identifier cue).
-    if not re.search(r"\b(?:student|usn|roll|id)\b", text, flags=re.IGNORECASE):
-        return None
+    # Short institutional IDs such as MBA002 or BCA0017: a known program prefix
+    # followed directly by digits is an identifier on its own ("results of
+    # MBA001"). The looser shape with a separator also matches hyphenated words
+    # (COVID-19, SEM-03), so it only counts when the command names a student,
+    # USN, roll number or id explicitly ("students" is a listing noun).
+    keyword = re.search(r"\b(?:student|usn|roll|id)\b", text, flags=re.IGNORECASE)
     for match in re.finditer(r"\b([A-Za-z]{2,6}[-/]?\d{2,6})\b(?!\s*%)", text):
-        if not _SEMESTER_TOKEN.fullmatch(match.group(1)):
-            return match.group(1).upper()
+        token = match.group(1)
+        if _SEMESTER_TOKEN.fullmatch(token):
+            continue
+        plain = re.fullmatch(r"([A-Za-z]{2,6})(\d{2,6})", token)
+        if plain and plain.group(1).lower() in PROGRAM_ALIASES:
+            return token.upper()
+        if keyword:
+            return token.upper()
     return None
 
 
@@ -167,7 +172,7 @@ def _extract_recipients(text: str) -> tuple[list[str], str | None]:
 _CLAUSE_BOUNDARY = r"(?!(?:and|then|also|but|or)\b)"
 _SINGLE_TOKEN_VALUE = rf"{_CLAUSE_BOUNDARY}([^\s,.;]+)"
 _TWO_TOKEN_VALUE = rf"{_CLAUSE_BOUNDARY}([^\s,.;]+(?:\s+{_CLAUSE_BOUNDARY}[^\s,.;]+)?)"
-_SINGLE_TOKEN_FIELDS = frozenset({"semester", "section", "status", "phone", "email", "guardian_phone", "batch"})
+_SINGLE_TOKEN_FIELDS = frozenset({"semester", "section", "phone", "email", "guardian_phone", "batch"})  # status is free text ("on hold")
 
 
 def _extract_change(text: str) -> tuple[str, Any] | None:
@@ -183,7 +188,7 @@ def _extract_change(text: str) -> tuple[str, Any] | None:
             if field_name == "email":
                 email = re.search(r"[\w.+-]+@[\w-]+\.[\w.-]+", text)
                 value = email.group(0) if email else value
-            elif field_name == "phone":
+            elif field_name in {"phone", "guardian_phone"}:
                 digits = re.search(r"(\+?\d[\d\s-]{6,}\d)", text)
                 value = re.sub(r"[\s-]", "", digits.group(1)) if digits else value
             return field_name, value

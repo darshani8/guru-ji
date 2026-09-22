@@ -122,6 +122,9 @@ class InternetIntelligenceService:
             hit = entry["hit"]
             title, text, published, extracted = hit.title, hit.snippet, hit.published_at, False
             page_warnings: list[str] = []
+            # The content is attributed to the host that actually served it: a
+            # redirect off the official domain must not inherit its standing.
+            source_url = hit.url
             if self.fetcher is not None:
                 page = await self.fetcher.fetch(hit.url)
                 if page is not None:
@@ -130,12 +133,13 @@ class InternetIntelligenceService:
                     text = page.text or text
                     published = page.published_at or published
                     page_warnings.extend(page.warnings)
+                    source_url = page.url or hit.url
                 else:
                     page_warnings.append("snippet_only")
-            untrusted = wrap_untrusted(hit.url, f"{title}\n{text}")
+            untrusted = wrap_untrusted(source_url, f"{title}\n{text}")
             page_warnings.extend(untrusted.warnings)
-            match = resolve_entity(profile, url=hit.url, title=title, text=text)
-            source_type = classify_source(hit.url, profile)
+            match = resolve_entity(profile, url=source_url, title=title, text=text)
+            source_type = classify_source(source_url, profile)
             tags = topic_tags(text, title)
             relevance = relevance_score(title=title, text=text, question=question, topics=topics, matched_entity=match.level != NOT_MATCHED)
             keep, date_status = within_window(published, window_days=window_days, now=searched_at)
@@ -151,7 +155,7 @@ class InternetIntelligenceService:
                 status, reason = "excluded", "not_relevant"
             excerpt = text.strip()[:600]
             record = {
-                "url": hit.url, "canonical_url": canonical, "domain": domain_of(hit.url), "title": title[:300] or hit.url, "excerpt": excerpt, "content_sha256": hashlib.sha256(f"{title}\n{text}".encode("utf-8")).hexdigest(),
+                "url": source_url, "requested_url": hit.url, "canonical_url": canonical, "domain": domain_of(source_url), "title": title[:300] or source_url, "excerpt": excerpt, "content_sha256": hashlib.sha256(f"{title}\n{text}".encode("utf-8")).hexdigest(),
                 "published_at": published.isoformat() if published else None, "date_status": date_status, "retrieved_at": hit.retrieved_at.isoformat(), "match_level": match.level, "match_score": match.score,
                 "match_reasons": list(match.reasons), "relevance_score": relevance, "topics": tags, "status": status, "extracted": extracted, "warnings": list(dict.fromkeys(page_warnings)),
                 "source_type": source_type, "source_label": SOURCE_LABELS.get(source_type, source_type), "queries": list(dict.fromkeys(entry["queries"])), "importance": importance(tags, source_type),

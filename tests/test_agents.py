@@ -67,6 +67,9 @@ class PlannerTests(unittest.TestCase):
             "Update the phone number of student MBA001 to 9999988888 and notify me": ("phone", "9999988888"),
             "Update the address of student MBA001 to Jayanagar Bengaluru": ("address", "Jayanagar Bengaluru"),
             "Update the address of student MBA001 to Jayanagar and notify me": ("address", "Jayanagar"),
+            "Change the guardian phone of student MBA001 to 98765 43210": ("guardian_phone", "9876543210"),
+            "Set status of student MBA001 to on hold": ("status", "on hold"),
+            "Set status of student MBA001 to on hold and notify me": ("status", "on hold"),
         }
         for text, expected in cases.items():
             self.assertEqual(extract_entities(text, self.vocab).field_change, expected, text)
@@ -79,6 +82,12 @@ class PlannerTests(unittest.TestCase):
         self.assertIsNone(extract_entities("results for semester-3 MBA", self.vocab).student_id)
         self.assertIsNone(extract_entities("what is the pass percentage of sem 3 students", self.vocab).student_id)
         self.assertEqual(extract_entities("Show results of student MBA001", self.vocab).student_id, "MBA001")
+        # A known program prefix followed by digits is an identifier on its own.
+        self.assertEqual(extract_entities("Show results of MBA001", self.vocab).student_id, "MBA001")
+        self.assertEqual(extract_entities("What are the marks of BCA0017?", self.vocab).student_id, "BCA0017")
+        self.assertEqual(extract_entities("fees pending for MBA001", self.vocab).student_id, "MBA001")
+        bare = self.planner.plan("Show results of MBA001", self.tools, self.vocab)
+        self.assertEqual([(step.tool, step.arguments) for step in bare.steps], [("get_student_results", {"student_id": "MBA001"})])
         self.assertEqual(extract_entities("Get the results of student number MBA001", self.vocab).student_id, "MBA001")
         self.assertEqual(extract_entities("results of student sem-03 MBA001", self.vocab).student_id, "MBA001")
         self.assertEqual(extract_entities("Show marks of usn 1AB21CS001", self.vocab).student_id, "1AB21CS001")
