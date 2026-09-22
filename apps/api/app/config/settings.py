@@ -148,10 +148,18 @@ class AppSettings:
     agent_planner: str = "deterministic"
     approval_ttl_seconds: int = 900
     voice_agent_mode: str = "assistant"
+    # The client assistant is always served at ``/``. The developer platform
+    # console at ``/console/`` is a separate app; ``None`` means "not configured":
+    # served outside production, not served in production unless a deployment
+    # opts in with GURU_WEB_CONSOLE_ENABLED=true (ideally one that clients do not
+    # reach). The API routes keep their own capability checks either way.
+    web_console_enabled: bool | None = None
 
     def __post_init__(self) -> None:
         if self.platform_enabled is None:
             object.__setattr__(self, "platform_enabled", self.environment != "production")
+        if self.web_console_enabled is None:
+            object.__setattr__(self, "web_console_enabled", self.environment != "production")
 
     @classmethod
     def from_env(cls) -> "AppSettings":
@@ -257,6 +265,7 @@ class AppSettings:
             agent_planner=os.getenv("GURU_AGENT_PLANNER", "deterministic").strip().lower(),
             approval_ttl_seconds=int(os.getenv("GURU_APPROVAL_TTL_SECONDS", "900")),
             voice_agent_mode=os.getenv("GURU_VOICE_AGENT_MODE", "assistant").strip().lower(),
+            web_console_enabled=None if os.getenv("GURU_WEB_CONSOLE_ENABLED") is None else _bool_env("GURU_WEB_CONSOLE_ENABLED", False),
         )
 
     def resolved_institution_database_url(self) -> str:

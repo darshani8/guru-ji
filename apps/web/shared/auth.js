@@ -14,6 +14,8 @@
  *
  * Tokens live in sessionStorage so they do not outlive the tab. No refresh
  * token is stored; when the ID token expires the user signs in again.
+ *
+ * This file is shared by the client assistant and the developer console.
  */
 (function (global) {
   'use strict';
@@ -131,8 +133,13 @@
     return value;
   }
 
+  // The client assistant (/) and the developer console (/console/) are separate
+  // apps, so each returns to its own entry page after sign-in and sign-out. A
+  // page names that page with `data-auth-return-path` on <body>; it must be
+  // registered with the identity provider as both a callback and a sign-out URL.
   function redirectUri() {
-    return global.location.origin + '/';
+    const path = global.document.body.dataset.authReturnPath || '/';
+    return global.location.origin + (path.charAt(0) === '/' ? path : '/');
   }
 
   async function loadDiscovery() {
