@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 from .api.dependencies import build_runtime
 from .api.error_handlers import guruji_error_handler, http_exception_handler, validation_exception_handler
 from .api.routes.audit import router as audit_router
+from .api.routes.auth import router as auth_router
 from .api.routes.briefings import router as briefings_router
 from .api.routes.chat import router as chat_router
 from .api.routes.health import router as health_router
@@ -41,13 +42,14 @@ app.add_exception_handler(GuruJiError, guruji_error_handler)  # type: ignore[arg
 app.add_exception_handler(HTTPException, http_exception_handler)  # type: ignore[arg-type]
 app.add_exception_handler(RequestValidationError, validation_exception_handler)  # type: ignore[arg-type]
 app.add_middleware(RequestIdMiddleware)
-app.add_middleware(SecurityHeadersMiddleware, production=settings.environment == "production")
+app.add_middleware(SecurityHeadersMiddleware, production=settings.environment == "production", auth_origins=settings.oidc_browser_origins)
 app.add_middleware(RequestTimeoutMiddleware, timeout_seconds=settings.request_timeout_seconds)
 app.add_middleware(RateLimitMiddleware, max_requests=settings.rate_limit_requests, window_seconds=settings.rate_limit_window_seconds)
 app.add_middleware(RequestSizeLimitMiddleware, max_bytes=settings.max_request_bytes)
 if settings.allowed_origins:
     app.add_middleware(CORSMiddleware, allow_origins=list(settings.allowed_origins), allow_credentials=True, allow_methods=["GET", "POST", "DELETE", "OPTIONS"], allow_headers=["*"])
 app.include_router(health_router)
+app.include_router(auth_router)
 app.include_router(chat_router)
 app.include_router(briefings_router)
 app.include_router(voice_router)
