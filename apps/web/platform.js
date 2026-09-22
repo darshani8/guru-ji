@@ -406,6 +406,36 @@ ${payload.headers.map((header) => `<div>${escapeHtml(header)}</div><div><select 
     try { renderFindings(await api('/v1/intelligence/digest?days=1')); } catch (error) { toast(error.message); }
   });
 
+  // ---------------------------------------------------------------- internet map
+  const GRADE_KIND = { O: 'ok', A: 'ok', 'A-arch': 'warn', B: 'ok', C: 'warn', D: 'bad' };
+  function gradePill(grade) {
+    return grade ? `<span class="pill ${GRADE_KIND[grade] || ''}">${escapeHtml(grade)}</span>` : '<span class="muted">—</span>';
+  }
+  async function loadMap() {
+    const box = $('map-result');
+    box.hidden = false;
+    box.innerHTML = '<p class="muted">Loading…</p>';
+    try {
+      const data = await api('/v1/intelligence/map/summary');
+      const grades = Object.entries(data.by_grade || {}).filter(([, count]) => count).map(([grade, count]) => `${gradePill(grade)} ${count}`).join(' ');
+      const coverage = data.coverage || {};
+      const estimate = coverage.estimated_total ? `about ${Math.round(coverage.estimated_total)} accounts estimated to exist (${Math.round((coverage.coverage || 0) * 100)}% found; ${escapeHtml(coverage.assumption)})` : 'not enough independent sightings yet to estimate how many accounts exist';
+      const platforms = (data.grid && data.grid.platforms) || [];
+      const grid = table(['Entity', ...platforms], (data.grid && data.grid.rows) || [], (row) => [escapeHtml(row.entity), ...platforms.map((platform) => gradePill(row.cells[platform].grade))]);
+      let manager = '';
+      if (data.incidents_open) {
+        const incidents = table(['Severity', 'Incident', 'Seen', 'Last seen'], data.incidents_open, (item) => [`<span class="pill ${item.severity === 'high' ? 'bad' : 'warn'}">${escapeHtml(item.severity)}</span>`, escapeHtml(`${item.kind.replace(/_/g, ' ')}: ${item.target}`), String(item.times_seen), escapeHtml((item.last_seen_at || '').slice(0, 10))]);
+        const waiting = Object.entries(data.review_waiting || {}).map(([kind, count]) => `${count} ${escapeHtml(kind.replace(/_/g, ' '))}`).join(', ') || 'nothing';
+        const truth = data.ground_truth || {};
+        manager = `<h4>Open incidents</h4>${incidents}<p class="result-meta">Waiting for review: ${waiting}. Ground truth: holdout recall ${truth.holdout_recall ?? '—'}, seed verification ${truth.seed_verification_rate ?? '—'}, look-alike leaks ${(truth.canary_leaks || []).length}.</p>`;
+      }
+      box.innerHTML = `<p>${data.verified} verified of ${data.assets} mapped. ${grades}</p><p class="result-meta">Coverage: ${data.grid ? `${data.grid.covered} of ${data.grid.cells} entity–platform cells have a verified account` : ''}; ${estimate}.</p>${grid}${manager}`;
+    } catch (error) {
+      box.innerHTML = `<p class="muted">${escapeHtml(error.message)}</p>`;
+    }
+  }
+  $('map-load').addEventListener('click', loadMap);
+
   // ------------------------------------------------------------------ activity
   async function loadReports() {
     try {

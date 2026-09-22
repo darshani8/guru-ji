@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS intel_budget_ledger ( day TEXT NOT NULL, connector TE
 CREATE TABLE IF NOT EXISTS intel_fetch_state ( url_sha256 TEXT PRIMARY KEY, etag TEXT, last_modified TEXT, outcome TEXT NOT NULL, content_sha256 TEXT, fetched_at TEXT NOT NULL );
 ALTER TABLE intel_assets ADD COLUMN IF NOT EXISTS last_activity_at TEXT;
 ALTER TABLE intel_assets ADD COLUMN IF NOT EXISTS registration_expires_at TEXT;
+ALTER TABLE intel_sources ADD COLUMN IF NOT EXISTS priority REAL NOT NULL DEFAULT 0;
 -- PostgreSQL row-level security (skipped on SQLite)
 ALTER TABLE intel_entities ENABLE ROW LEVEL SECURITY;
 ALTER TABLE intel_entities FORCE ROW LEVEL SECURITY;

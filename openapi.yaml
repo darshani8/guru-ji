@@ -2883,6 +2883,37 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/summary:
+    get:
+      tags:
+      - intelligence-map
+      summary: 'The map at a glance: grades, the coverage grid, an estimate of how
+        complete it is (more for managers)'
+      operationId: summary_v1_intelligence_map_summary_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Summary V1 Intelligence Map Summary Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /v1/intelligence/map/connectors:
     get:
       tags:

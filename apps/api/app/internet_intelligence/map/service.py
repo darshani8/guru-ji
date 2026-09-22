@@ -17,6 +17,7 @@ from .gate import rescore
 from .assets import asset_ref
 from .connectors.base import ConnectorContext
 from .incidents import IncidentDesk
+from .learning import coverage_estimate, gap_grid
 from .ownership import OwnerClaimsConnector, instructions, verification_token
 from .harvest import OfficialSiteHarvester
 from .metrics import map_metrics, record_baseline
@@ -258,6 +259,39 @@ class MapService:
         existing = self.store.find_asset(institution_id, ref.key) if ref else None
         removed = bool(existing) and self.store.forget_asset(institution_id, existing["asset_id"])
         return {"suppressed": True, "removed": removed}
+
+    # ----------------------------------------------------------------- summary
+    def summary(self, principal: Principal, institution_id: str) -> dict[str, Any]:
+        """One view of the map: what it stands behind, where it has gaps, how complete it probably is.
+
+        Readers see grades of B and better only (a cell below that just shows
+        as not yet covered); managers also see incidents, the review queue,
+        runs, spend and what each connector yields.
+        """
+
+        self.guard(principal, institution_id, Capability.INTELLIGENCE_READ)
+        manager = principal.has_capability(Capability.INTELLIGENCE_MANAGE)
+        metrics = map_metrics(self.store, institution_id)
+        grid = gap_grid(self.store, institution_id)
+        if not manager:
+            for row in grid["rows"]:
+                for cell in row["cells"].values():
+                    if not cell["covered"]:
+                        cell["grade"] = None
+        result: dict[str, Any] = {
+            "institution_id": institution_id, "assets": metrics["assets"], "verified": metrics["verified"], "by_platform": metrics["by_platform"],
+            "by_grade": {grade: count for grade, count in metrics["by_grade"].items() if manager or grade in {"O", "A", "A-arch", "B"}},
+            "grid": {key: value for key, value in grid.items() if key != "gaps"}, "coverage": coverage_estimate(self.store, institution_id),
+        }
+        if manager:
+            today = datetime.now(timezone.utc).date().isoformat()
+            result.update({
+                "ground_truth": {key: metrics[key] for key in ("holdout_recall", "holdout_total", "seed_verification_rate", "seed_total", "canary_total", "canary_leaks")},
+                "incidents_open": [{key: row[key] for key in ("incident_id", "kind", "target", "severity", "status", "times_seen", "last_seen_at")} for row in self.store.list_incidents(institution_id, limit=50) if row["status"] != "resolved"],
+                "review_waiting": self.store.review_counts(institution_id), "runs": self.store.list_map_runs(institution_id, limit=5),
+                "connectors": self.store.source_yields(institution_id), "spend_today": self.store.tenant_spend(institution_id, day=today),
+            })
+        return result
 
     # --------------------------------------------------------------- ownership
     def ownership(self, principal: Principal, institution_id: str) -> dict[str, Any]:

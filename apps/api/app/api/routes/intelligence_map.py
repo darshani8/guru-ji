@@ -374,6 +374,17 @@ async def verify_ownership(request: Request, body: MapInstitutionBody) -> dict[s
     return result
 
 
+@router.get("/summary", summary="The map at a glance: grades, the coverage grid, an estimate of how complete it is (more for managers)")
+async def summary(request: Request, institution_id: str | None = None) -> dict[str, Any]:
+    service = map_service(request)
+    principal = require_principal(request, Capability.INTELLIGENCE_READ)
+    target = resolve_institution(principal, institution_id)
+    try:
+        return await run_in_threadpool(service.summary, principal, target)
+    except (ValueError, PermissionError) as exc:
+        raise translate(exc) from exc
+
+
 @router.get("/connectors", summary="The connectors the engine may use and how each reaches the web")
 async def connectors(request: Request, institution_id: str | None = None) -> dict[str, Any]:
     service = map_service(request)

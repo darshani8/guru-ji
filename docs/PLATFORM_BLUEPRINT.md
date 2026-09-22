@@ -39,6 +39,7 @@ There is no `execute-sql` tool. `app/institution_data/store.py` is the only modu
 | Voice | `app/api/routes/voice.py`, `voice/protocol.py` | `mode: "agent"` (or `GURU_VOICE_AGENT_MODE=agent`) routes final transcripts through the master agent; long work is accepted and completes in the background with a notification. |
 | Internet intelligence | `app/internet_intelligence/` | Profiles, query generation, open-web search (Tavily adapter + fixture provider), robots-aware fetching, URL dedupe, entity resolution (high/medium/low/not matched), relevance and time filters, source classification, evidence store, source-backed summaries. |
 | Continuous monitoring | `internet_intelligence/monitoring.py`, `scripts/run_monitor.py` | New/changed/duplicate detection, importance, daily digest, alerts to profile recipients. |
+| Internet map | `internet_intelligence/map/` | A graded register of the institution's official sites and accounts that grows every scheduled tick: entities and assets, an append-only evidence log, one versioned grading rule (O/A/A-arch/B/C/D), connectors (official sites, leads, re-checks, and opt-in search, feeds, YouTube, Wikidata, court records, certificates, RDAP, DNS, Wayback, link hubs, directories, owner claims), budgets, a review queue, a ground-truth gate, incidents with guidance, owner confirmation, and a coverage estimate. See the section below. |
 | Unified intelligence | `MasterAgent` + `internet_investigate` + `get_institution_summary` | "Complete update" commands combine internal indicators with public findings, each cited. |
 | Security & audit | `auth/roles.py`, `gateway/gateway.py`, control-plane audit tables | Seven roles; every tool invocation, denial, approval, and agent run is audited without persisting prompts or tool data. |
 | Data lineage & re-imports | `institution_data/models.py`, `IngestionService.commit` | Each record knows file, sheet/row, job; re-imports report new / updated / unchanged / skipped. |
@@ -63,6 +64,20 @@ Roles come from verified OIDC claims, a trusted LMS edge, or development demo he
 **Command**: `POST /v1/agent/commands` → capability and scope check → plan (deterministic or model) → for each step: resolve bindings → gateway (authorise, validate, approve, execute, minimise, audit) → verify → compose answer (optional model wording with numeric guard) → sources, artifacts, warnings → audit + run history.
 
 **Internet intelligence**: profile → queries → search provider → canonical URL dedupe → fetch (robots, size, content-type) or snippet → entity resolution → relevance → date window → source type → evidence store → deterministic or cited model summary → report.
+
+**Internet map**: scheduled tick (per-institution lock) → standing watches for anchored official domains and pages → expire idle leads → lease due sources (rotation / re-check / exploration; half by gap-and-yield priority, half by age) → reserve budget (institution quota and platform cap; deferred, never dropped) → connector → evidence → regrade touched assets → canary gate (a known look-alike at B or better is set back and reported) → review queue and incidents (high severity alerts at once, the rest in the daily digest) → reschedule each source from its yield → metrics against the seeded ground truth.
+
+## The internet map
+
+The map answers "which websites and accounts are really this institution's, and is anything wrong with them?" and gets more complete and more accurate with every run.
+
+- **Evidence, not opinion.** Every observation (a footer link on the official site, a search snippet, a Wikidata statement, a registry record, a reviewer's decision, the owner's confirmation) is a row in `intel_evidence`. Grades are recomputed from it by `map/grading.py` (`grader-1`), so any grade can be explained. O: confirmed by the owner (token on the domain, DNS TXT or `/.well-known/guruji.json`). A: a live identity link on a healthy official page, or a configured official domain. A-arch: the same, only in an archived copy. B: one step from an anchor, a regulator's listing, a reviewer's confirmation, or two independent channels. C: one channel. D: refuted, a look-alike, dead, parked or hijacked.
+- **Guardrails.** Connectors declare an access mode; the registry refuses anything that logs in, borrows a session or evades a block. Everything beyond public pages and the institution's own domains is off until named in `GURU_INTELLIGENCE_CONNECTORS`. Social platforms are never fetched (only the YouTube channel feed, a machine endpoint). Personal accounts are kept out by the entity rules (an account's own handle or display name must carry the institution's name) and, once identified, by a keyed suppression list. Court records and other sensitive items only ever go to managers.
+- **Ground truth.** The seed sweep is split into seeds, a hidden holdout (never seeded, used to measure recall) and canaries (known look-alikes that must never reach B). A rescore publishes new grades only if holdout recall and seed verification do not fall and no canary leaks.
+- **People in the loop.** Suspected impersonators, competing "official" accounts, court records and held rescores wait in a manager-only review queue; decisions become evidence and are audited. A person's account is removed entirely.
+- **Incidents.** Compromised, hijacked or parked official sites, expiring or lapsed domains, spam indexed under the domain, confirmed impersonators and canary leaks are recorded once each with guidance (including a CERT-In note for Indian domains) and routed by severity.
+- **Learning.** Sources keep a running yield; productive ones and searches for uncovered entity–platform cells go first. A capture–recapture estimate says roughly how many accounts exist and how many the map has found.
+- **Operations.** `scripts/run_monitor.py --map` (compose `map-engine`) runs ticks; `--digest` (compose `map-digest`) sends the daily digest; `scripts/import_intel_seed.py` seeds from a sweep. Routes live under `/v1/intelligence/map/`. Institution web administrators have their own guide: [`INTERNET_MAP_FOR_WEBMASTERS.md`](INTERNET_MAP_FOR_WEBMASTERS.md).
 
 ## Configuration
 
@@ -89,6 +104,7 @@ See `.env.example`. Local defaults need no external service: SQLite, local/in-me
 | 6 Voice (agent mode on the existing transcript transport) | done |
 | 7 Internet intelligence | done (Tavily adapter; other providers implement one protocol) |
 | 8 Continuous monitoring | done (scheduling is deployment-managed) |
+| 9 Internet map (graded official presence, connectors, review, incidents, owner confirmation) | done in the repository; every external connector is tested against fakes only and is off until configured |
 
 ## What is deliberately not built
 

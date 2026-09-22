@@ -34,6 +34,7 @@ from ..profile import InstitutionProfile
 from .connectors.base import ConnectorContext, ConnectorRegistry, ConnectorResult, Lead
 from .gate import guard_canaries
 from .incidents import IncidentDesk
+from .learning import prioritise_gaps
 from .metrics import map_metrics
 from .pipeline import regrade, sync_profile
 from .store import MapStore
@@ -98,6 +99,9 @@ class MapEngine:
             if callable(plan):
                 for lead in plan(self._context(institution_id, "planning", profile)):
                     added += int(self._add_lead(institution_id, lead, origin_override=lead.origin))
+        if self.registry.get("search"):
+            # Searches where the map has no verified account yet go first.
+            prioritise_gaps(self.store, institution_id, now=self.clock())
         return added
 
     def _context(self, institution_id: str, run_id: str, profile: InstitutionProfile | None) -> ConnectorContext:
@@ -123,7 +127,11 @@ class MapEngine:
         claimed: list[dict[str, Any]] = []
         for work_class, share in self.config.class_split:
             quota = max(1, round(total * share))
-            claimed.extend(self.store.claim_due(institution_id, now=now, worker=worker, lease_seconds=self.config.lease_seconds, limit=quota, work_class=work_class, connectors=enabled))
+            # Half of each class goes to gaps and productive sources, half to the
+            # longest overdue, so the productive go first and nothing starves.
+            first = self.store.claim_due(institution_id, now=now, worker=worker, lease_seconds=self.config.lease_seconds, limit=(quota + 1) // 2, work_class=work_class, connectors=enabled, order="priority")
+            rest = self.store.claim_due(institution_id, now=now, worker=worker, lease_seconds=self.config.lease_seconds, limit=quota - len(first), work_class=work_class, connectors=enabled) if quota > len(first) else []
+            claimed.extend(first + rest)
         if len(claimed) < total:
             # Slots a class left unused go to whatever else is due.
             claimed.extend(self.store.claim_due(institution_id, now=now, worker=worker, lease_seconds=self.config.lease_seconds, limit=total - len(claimed), connectors=enabled))

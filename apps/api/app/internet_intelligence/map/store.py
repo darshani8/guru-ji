@@ -275,6 +275,8 @@ _STATEMENTS: tuple[str, ...] = (
 ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("intel_assets", "last_activity_at", "TEXT"),
     ("intel_assets", "registration_expires_at", "TEXT"),
+    # A running average of what a source yields; productive sources are claimed first.
+    ("intel_sources", "priority", "REAL NOT NULL DEFAULT 0"),
 )
 TENANT_TABLES: tuple[str, ...] = ("intel_entities", "intel_assets", "intel_evidence", "intel_gold_items", "intel_suppression", "intel_map_runs", "intel_sources", "intel_quota", "intel_review_items", "intel_incidents")
 GLOBAL_TABLES: tuple[str, ...] = ("intel_budget_ledger", "intel_fetch_state")
@@ -368,11 +370,15 @@ class MapStoreScheduling:
         with self._tenant(institution_id):
             return self.backend.fetchall(f"SELECT * FROM intel_sources WHERE {' AND '.join(clauses)} ORDER BY due_at, source_id LIMIT ?", (*params, max(1, min(limit, 10000))))
 
-    def claim_due(self, institution_id: str, *, now: str, worker: str, lease_seconds: int, limit: int, work_class: str | None = None, connectors: Sequence[str] | None = None) -> list[dict[str, Any]]:
+    def claim_due(
+        self, institution_id: str, *, now: str, worker: str, lease_seconds: int, limit: int, work_class: str | None = None, connectors: Sequence[str] | None = None, order: str = "due",
+    ) -> list[dict[str, Any]]:
         """Lease up to ``limit`` due sources; a source leased by another live worker is skipped.
 
-        The lease is written with a condition on the lease columns, so two
-        workers racing for the same source cannot both win it.
+        ``order`` is "due" (longest overdue first) or "priority" (coverage
+        gaps, then the most productive, first). The lease is written with a
+        condition on the lease columns, so two workers racing for the same
+        source cannot both win it.
         """
 
         lease_until = (datetime.fromisoformat(now) + timedelta(seconds=lease_seconds)).isoformat()
@@ -387,7 +393,8 @@ class MapStoreScheduling:
                     return []
                 clauses.append(f"connector IN ({', '.join('?' for _ in connectors)})")
                 params.extend(connectors)
-            candidates = self.backend.fetchall(f"SELECT * FROM intel_sources WHERE {' AND '.join(clauses)} ORDER BY due_at, source_id LIMIT ?", (*params, max(1, limit * 3)))
+            ordering = "CASE WHEN topic = 'gap' THEN 0 ELSE 1 END, priority DESC, due_at, source_id" if order == "priority" else "due_at, source_id"
+            candidates = self.backend.fetchall(f"SELECT * FROM intel_sources WHERE {' AND '.join(clauses)} ORDER BY {ordering} LIMIT ?", (*params, max(1, limit * 3)))
             for row in candidates:
                 if len(claimed) >= limit:
                     break
@@ -413,12 +420,41 @@ class MapStoreScheduling:
             self.backend.execute(
                 """
                 UPDATE intel_sources SET last_outcome = ?, due_at = ?, interval_seconds = ?, yield_last = ?, yield_total = yield_total + ?, cost_total = cost_total + ?, runs = runs + 1,
+                    priority = priority * 0.7 + CAST(? AS REAL) * 0.3,
                     failure_streak = CASE WHEN ? = 1 THEN failure_streak + 1 ELSE 0 END, etag = COALESCE(?, etag), last_modified = COALESCE(?, last_modified),
                     status = COALESCE(?, status), origin = COALESCE(?, origin), lease_owner = NULL, lease_until = NULL, updated_at = ?
                 WHERE institution_id = ? AND source_id = ?
                 """,
-                (outcome[:60], next_due, max(60, int(interval_seconds)), yield_count, yield_count, float(cost), 1 if failed else 0, etag, last_modified, status, origin, now_iso(), institution_id, source_id),
+                (outcome[:60], next_due, max(60, int(interval_seconds)), yield_count, yield_count, float(cost), float(min(yield_count, 5)), 1 if failed else 0, etag, last_modified, status, origin, now_iso(), institution_id, source_id),
             )
+
+    def mark_gap_sources(self, institution_id: str, connector: str, gap_targets: Iterable[str], *, now: str, max_interval: int) -> int:
+        """Flag the sources that search where the map has no verified account yet, and bring them round sooner."""
+
+        targets = list(dict.fromkeys(gap_targets))
+        stamp = now_iso()
+        with self._tenant(institution_id):
+            self.backend.execute("UPDATE intel_sources SET topic = '', updated_at = ? WHERE institution_id = ? AND connector = ? AND topic = 'gap'", (stamp, institution_id, connector))
+            marked = 0
+            for chunk in iter_chunks(targets, 200):
+                marks = ", ".join("?" for _ in chunk)
+                marked += self.backend.execute(
+                    f"UPDATE intel_sources SET topic = 'gap', interval_seconds = CASE WHEN interval_seconds > ? THEN ? ELSE interval_seconds END, updated_at = ? "
+                    f"WHERE institution_id = ? AND connector = ? AND status = 'active' AND target IN ({marks})",
+                    (int(max_interval), int(max_interval), stamp, institution_id, connector, *chunk),
+                )
+        return marked
+
+    def source_yields(self, institution_id: str) -> list[dict[str, Any]]:
+        """Per connector: sources, runs, what they found and what they cost."""
+
+        with self._tenant(institution_id):
+            rows = self.backend.fetchall(
+                "SELECT connector, COUNT(*) AS sources, SUM(CASE WHEN status = 'active' THEN 1 ELSE 0 END) AS active, SUM(runs) AS runs, SUM(yield_total) AS found, SUM(cost_total) AS cost "
+                "FROM intel_sources WHERE institution_id = ? GROUP BY connector ORDER BY connector",
+                (institution_id,),
+            )
+        return [{**row, "found_per_run": round(int(row["found"] or 0) / int(row["runs"]), 3) if row["runs"] else None} for row in rows]
 
     def set_source_status(self, institution_id: str, source_id: str, status: str) -> None:
         with self._tenant(institution_id):
