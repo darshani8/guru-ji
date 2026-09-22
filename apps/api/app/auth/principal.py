@@ -7,6 +7,7 @@ from collections.abc import Mapping
 from ..config.settings import AppSettings
 from ..domain.principals import Capability, InstitutionScope, Principal, PrincipalType
 from .oidc import AuthenticationError, JwtVerifier
+from .roles import capabilities_for_role, role_from_alias
 
 
 def _anonymous() -> Principal:
@@ -20,19 +21,7 @@ def _anonymous() -> Principal:
 
 
 def _capabilities_for(role: PrincipalType) -> frozenset[Capability]:
-    if role is PrincipalType.MAIN_ADMIN:
-        return frozenset(Capability)
-    if role is PrincipalType.FACULTY:
-        return frozenset({
-            Capability.ASK_READ_ONLY,
-            Capability.VIEW_SOURCE_METADATA,
-            Capability.RUN_BRIEFING,
-            Capability.VIEW_BRIEFING_HISTORY,
-            Capability.START_VOICE_SESSION,
-        })
-    if role is PrincipalType.STUDENT:
-        return frozenset({Capability.ASK_READ_ONLY, Capability.START_VOICE_SESSION})
-    return frozenset()
+    return capabilities_for_role(role)
 
 
 def _principal_from_demo_headers(headers: Mapping[str, str], settings: AppSettings) -> Principal:
@@ -43,11 +32,7 @@ def _principal_from_demo_headers(headers: Mapping[str, str], settings: AppSettin
     if not demo_id:
         demo_id = "demo-user"
 
-    role_value = headers.get("x-demo-role", "student").lower()
-    try:
-        role = PrincipalType(role_value)
-    except ValueError:
-        role = PrincipalType.STUDENT
+    role = role_from_alias(headers.get("x-demo-role", "student"), PrincipalType.STUDENT)
     college_id = headers.get("x-demo-college", "college_a")
     capabilities = set(_capabilities_for(role))
     explicit = headers.get("x-demo-capabilities", "")

@@ -16,11 +16,25 @@ class RequestSizeLimitMiddleware:
     the application, so oversized input is never passed to route parsing.
     """
 
-    def __init__(self, app, max_bytes: int) -> None:
+    def __init__(self, app, max_bytes: int, *, upload_max_bytes: int | None = None, upload_routes: tuple[tuple[str, str], ...] = ()) -> None:
         if max_bytes <= 0:
             raise ValueError("max_bytes must be positive")
+        if upload_max_bytes is not None and upload_max_bytes <= 0:
+            raise ValueError("upload_max_bytes must be positive")
         self.app = app
         self.max_bytes = max_bytes
+        # File-upload routes get their own, larger bound; everything else keeps the
+        # tight default. Routes are (METHOD, path) pairs matched exactly, never by
+        # prefix, so sibling JSON routes such as POST /v1/documents/search do not
+        # inherit the upload allowance.
+        self.upload_max_bytes = upload_max_bytes or max_bytes
+        self.upload_routes = frozenset((method.upper(), path) for method, path in upload_routes)
+
+    def _limit_for(self, scope) -> int:
+        route = (str(scope.get("method", "")).upper(), str(scope.get("path", "")).rstrip("/") or "/")
+        if route in self.upload_routes:
+            return max(self.max_bytes, self.upload_max_bytes)
+        return self.max_bytes
 
     @staticmethod
     def _header(scope, name: bytes) -> str | None:
@@ -35,6 +49,7 @@ class RequestSizeLimitMiddleware:
             return
 
         request_id = self._header(scope, b"x-request-id") or f"req-{uuid4().hex}"
+        limit = self._limit_for(scope)
         content_length = self._header(scope, b"content-length")
         if content_length is not None:
             try:
@@ -55,7 +70,7 @@ class RequestSizeLimitMiddleware:
                 )
                 await response(scope, receive, send)
                 return
-            if declared_length > self.max_bytes:
+            if declared_length > limit:
                 response = JSONResponse(
                     status_code=413,
                     content={"error": {"code": "payload_too_large", "message": "request body exceeds the configured limit", "request_id": request_id}},
@@ -74,7 +89,7 @@ class RequestSizeLimitMiddleware:
             if message.get("type") != "http.request":
                 break
             total += len(message.get("body", b""))
-            if total > self.max_bytes:
+            if total > limit:
                 response = JSONResponse(
                     status_code=413,
                     content={"error": {"code": "payload_too_large", "message": "request body exceeds the configured limit", "request_id": request_id}},

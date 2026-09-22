@@ -12,7 +12,8 @@ from fastapi import APIRouter, HTTPException, Request, WebSocket, WebSocketDisco
 from pydantic import BaseModel, Field, ValidationError
 
 from ..dependencies import principal_from_request, runtime_from_request
-from ...domain.principals import InstitutionScope, Principal
+from ...agents.contracts import AgentCommand
+from ...domain.principals import Capability, InstitutionScope, Principal
 from ...domain.requests import ChatRequest, InteractionChannel
 from ...voice.protocol import (
     AuthenticateMessage,
@@ -211,6 +212,25 @@ async def voice_stream(session_id: str, websocket: WebSocket) -> None:
             conversation_id = event.conversation_id
             client_message_id = event.client_message_id
             request_id = f"voice-{uuid4().hex}"
+            mode = event.mode or runtime.settings.voice_agent_mode
+            platform = runtime.platform
+            if mode == "agent" and platform is not None and principal.has_capability(Capability.AGENT_COMMAND):
+                # Voice never waits on long work: the agent answers quickly or
+                # accepts the job and the caller is notified when it completes.
+                command = AgentCommand(
+                    request_id, principal, session.institution_scope, text, "voice",
+                    conversation_id.strip() if conversation_id else None,
+                )
+                agent_response = await platform.agent.handle(command)
+                payload = agent_response.as_dict(include_data=False)
+                if agent_response.status in {"needs_input", "approval_required"}:
+                    payload["refusal_reason"] = None
+                await websocket.send_json({
+                    "type": RealtimeEvent.ANSWER,
+                    "client_message_id": client_message_id,
+                    "answer": payload,
+                })
+                continue
             chat_request = ChatRequest(
                 request_id=request_id,
                 principal_id=principal.principal_id,

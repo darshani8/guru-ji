@@ -107,10 +107,58 @@ class AppSettings:
     agent_gateway_url: str | None = None
     openfga_url: str | None = None
     livekit_url: str | None = None
+    # Institutional data platform (ingestion, canonical database, agents, intelligence).
+    # ``None`` means "not configured": on for development, off for production,
+    # where a deployment opts in with GURU_PLATFORM_ENABLED=true once PostgreSQL,
+    # S3 and a queue are configured. ``__post_init__`` resolves it to a bool.
+    platform_enabled: bool | None = None
+    institution_database_url: str | None = field(default=None, repr=False)
+    object_store_backend: str = "local"
+    object_store_path: str = "./data/objects"
+    s3_bucket: str | None = None
+    s3_region: str | None = None
+    s3_prefix: str = ""
+    job_queue: str = "inline"
+    sqs_queue_url: str | None = None
+    # A background job still ``running`` after this many seconds is treated as
+    # interrupted (worker restart) and returned to the queue at boot.
+    job_stale_seconds: int = 180  # a running job whose heartbeat is older than this lost its worker
+    max_upload_bytes: int = 25_000_000
+    ingestion_max_rows: int = 50_000
+    ingestion_auto_commit: bool = True
+    mapping_confidence_threshold: float = 0.8
+    ocr_engine: str = "disabled"
+    ocr_languages: str = "eng"
+    email_provider: str = "outbox"
+    email_sender: str | None = None
+    smtp_host: str | None = None
+    smtp_port: int = 587
+    smtp_username: str | None = None
+    smtp_password: str | None = field(default=None, repr=False)
+    smtp_use_tls: bool = True
+    email_allowed_domains: tuple[str, ...] = ()
+    embedding_provider: str = "hashing"
+    embedding_model_id: str = ""
+    embedding_base_url: str | None = None
+    embedding_api_key: str | None = field(default=None, repr=False)
+    intelligence_search_provider: str = "disabled"
+    intelligence_fetch_pages: bool = True
+    intelligence_max_queries: int = 8
+    intelligence_results_per_query: int = 5
+    agent_planner: str = "deterministic"
+    approval_ttl_seconds: int = 900
+    voice_agent_mode: str = "assistant"
+
+    def __post_init__(self) -> None:
+        if self.platform_enabled is None:
+            object.__setattr__(self, "platform_enabled", self.environment != "production")
 
     @classmethod
     def from_env(cls) -> "AppSettings":
         environment = os.getenv("GURU_ENVIRONMENT", "development").strip().lower()
+        control_url = os.getenv("CONTROL_DATABASE_URL", "sqlite:///./data/guru_ji.db")
+        # An in-memory control plane is an ephemeral run (tests, CI); keep uploads in memory too.
+        default_object_store = "memory" if control_url in {":memory:", "sqlite:///:memory:"} else "local"
         configured_origins = os.getenv("GURU_ALLOWED_ORIGINS")
         default_origins = "" if environment == "production" else "http://localhost:5173"
         origins = tuple(item.strip() for item in (configured_origins or default_origins).split(",") if item.strip())
@@ -174,6 +222,61 @@ class AppSettings:
             agent_gateway_url=os.getenv("GURU_AGENT_GATEWAY_URL") or None,
             openfga_url=os.getenv("GURU_OPENFGA_URL") or None,
             livekit_url=os.getenv("GURU_LIVEKIT_URL") or None,
+            platform_enabled=None if os.getenv("GURU_PLATFORM_ENABLED") is None else _bool_env("GURU_PLATFORM_ENABLED", False),
+            institution_database_url=os.getenv("INSTITUTION_DATABASE_URL") or None,
+            object_store_backend=(os.getenv("GURU_OBJECT_STORE") or default_object_store).strip().lower(),
+            object_store_path=os.getenv("GURU_OBJECT_STORE_PATH", "./data/objects").strip(),
+            s3_bucket=os.getenv("GURU_S3_BUCKET") or None,
+            s3_region=os.getenv("GURU_S3_REGION") or os.getenv("AWS_REGION") or None,
+            s3_prefix=os.getenv("GURU_S3_PREFIX", "").strip(),
+            job_queue=os.getenv("GURU_JOB_QUEUE", "inline").strip().lower(),
+            sqs_queue_url=os.getenv("GURU_SQS_QUEUE_URL") or None,
+            job_stale_seconds=int(os.getenv("GURU_JOB_STALE_SECONDS", "180")),
+            max_upload_bytes=int(os.getenv("GURU_MAX_UPLOAD_BYTES", "25000000")),
+            ingestion_max_rows=int(os.getenv("GURU_INGESTION_MAX_ROWS", "50000")),
+            ingestion_auto_commit=_bool_env("GURU_INGESTION_AUTO_COMMIT", True),
+            mapping_confidence_threshold=float(os.getenv("GURU_MAPPING_CONFIDENCE_THRESHOLD", "0.8")),
+            ocr_engine=os.getenv("GURU_OCR_ENGINE", "disabled").strip().lower(),
+            ocr_languages=os.getenv("GURU_OCR_LANGUAGES", "eng").strip(),
+            email_provider=os.getenv("GURU_EMAIL_PROVIDER", "outbox").strip().lower(),
+            email_sender=os.getenv("GURU_EMAIL_SENDER") or None,
+            smtp_host=os.getenv("GURU_SMTP_HOST") or None,
+            smtp_port=int(os.getenv("GURU_SMTP_PORT", "587")),
+            smtp_username=os.getenv("GURU_SMTP_USERNAME") or None,
+            smtp_password=os.getenv("GURU_SMTP_PASSWORD") or None,
+            smtp_use_tls=_bool_env("GURU_SMTP_USE_TLS", True),
+            email_allowed_domains=tuple(item.strip().lower() for item in os.getenv("GURU_EMAIL_ALLOWED_DOMAINS", "").split(",") if item.strip()),
+            embedding_provider=os.getenv("GURU_EMBEDDING_PROVIDER", "hashing").strip().lower(),
+            embedding_model_id=os.getenv("GURU_EMBEDDING_MODEL_ID", "").strip(),
+            embedding_base_url=os.getenv("GURU_EMBEDDING_BASE_URL") or None,
+            embedding_api_key=os.getenv("GURU_EMBEDDING_API_KEY") or None,
+            intelligence_search_provider=os.getenv("GURU_INTELLIGENCE_SEARCH_PROVIDER", "disabled").strip().lower(),
+            intelligence_fetch_pages=_bool_env("GURU_INTELLIGENCE_FETCH_PAGES", True),
+            intelligence_max_queries=int(os.getenv("GURU_INTELLIGENCE_MAX_QUERIES", "8")),
+            intelligence_results_per_query=int(os.getenv("GURU_INTELLIGENCE_RESULTS_PER_QUERY", "5")),
+            agent_planner=os.getenv("GURU_AGENT_PLANNER", "deterministic").strip().lower(),
+            approval_ttl_seconds=int(os.getenv("GURU_APPROVAL_TTL_SECONDS", "900")),
+            voice_agent_mode=os.getenv("GURU_VOICE_AGENT_MODE", "assistant").strip().lower(),
+        )
+
+    def resolved_institution_database_url(self) -> str:
+        """The canonical institution database; defaults follow the control-plane choice."""
+
+        if self.institution_database_url:
+            return self.institution_database_url
+        control = self.control_database_url or ""
+        if control in {":memory:", "sqlite:///:memory:"} or not control:
+            return ":memory:"
+        if control.startswith(("postgresql://", "postgres://")):
+            return control
+        return "sqlite:///./data/institution_data.db"
+
+    def platform_production_ready(self) -> bool:
+        return (
+            self.platform_enabled
+            and self.resolved_institution_database_url().startswith(("postgresql://", "postgres://"))
+            and self.object_store_backend == "s3"
+            and self.job_queue in {"thread", "sqs"}
         )
 
     def configured_institution_connectors(self) -> tuple[InstitutionConnectorDefinition, ...]:
@@ -288,6 +391,7 @@ class AppSettings:
                     raise ValueError(f"{field_name} must be an absolute HTTP(S) URL")
                 if parsed_endpoint.username or parsed_endpoint.password or parsed_endpoint.query or parsed_endpoint.fragment:
                     raise ValueError(f"{field_name} must not contain credentials, query, or fragment data")
+        self._validate_platform()
         if self.environment != "production":
             return
         if self.web_search_provider == "tavily" and urlparse(self.web_search_endpoint).scheme != "https":
@@ -306,8 +410,11 @@ class AppSettings:
         if self.demo_data_enabled:
             raise ValueError("production cannot enable deterministic demo data")
         configured_connectors = self.configured_institution_connectors()
-        if not configured_connectors:
-            raise ValueError("production requires GURU_INSTITUTION_CONNECTOR_BASE_URL or GURU_INSTITUTION_CONNECTORS")
+        if not configured_connectors and not self.platform_production_ready():
+            raise ValueError(
+                "production requires GURU_INSTITUTION_CONNECTOR_BASE_URL or GURU_INSTITUTION_CONNECTORS, or a data platform with a PostgreSQL "
+                "INSTITUTION_DATABASE_URL, GURU_OBJECT_STORE=s3, and GURU_JOB_QUEUE=thread|sqs"
+            )
         for connector in configured_connectors:
             if urlparse(connector.base_url).scheme != "https":
                 raise ValueError("production requires institutional connectors to use HTTPS")
@@ -325,6 +432,57 @@ class AppSettings:
             raise ValueError("production cannot use the deterministic provider")
         if not self.audit_fail_closed:
             raise ValueError("production requires fail-closed audit handling")
+        if self.platform_enabled:
+            if not self.resolved_institution_database_url().startswith(("postgresql://", "postgres://")):
+                raise ValueError("production requires INSTITUTION_DATABASE_URL to use PostgreSQL (or GURU_PLATFORM_ENABLED=false)")
+            if self.object_store_backend != "s3":
+                raise ValueError("production requires GURU_OBJECT_STORE=s3 for the data platform")
+            if self.job_queue == "inline":
+                raise ValueError("production requires GURU_JOB_QUEUE=thread or sqs")
+            if self.email_provider == "smtp" and not self.smtp_use_tls:
+                raise ValueError("production requires GURU_SMTP_USE_TLS=true")
+
+    def _validate_platform(self) -> None:
+        if self.object_store_backend not in {"memory", "local", "s3"}:
+            raise ValueError("GURU_OBJECT_STORE must be memory, local, or s3")
+        if self.object_store_backend == "s3" and not self.s3_bucket:
+            raise ValueError("GURU_S3_BUCKET is required when GURU_OBJECT_STORE=s3")
+        if self.job_queue not in {"inline", "thread", "sqs"}:
+            raise ValueError("GURU_JOB_QUEUE must be inline, thread, or sqs")
+        if self.job_queue == "sqs" and not self.sqs_queue_url:
+            raise ValueError("GURU_SQS_QUEUE_URL is required when GURU_JOB_QUEUE=sqs")
+        if self.job_stale_seconds <= 0:
+            raise ValueError("GURU_JOB_STALE_SECONDS must be positive")
+        if self.max_upload_bytes <= 0 or self.ingestion_max_rows <= 0:
+            raise ValueError("upload and ingestion limits must be positive")
+        if not 0.5 <= self.mapping_confidence_threshold <= 1.0:
+            raise ValueError("GURU_MAPPING_CONFIDENCE_THRESHOLD must be between 0.5 and 1.0")
+        if self.ocr_engine not in {"disabled", "tesseract", "textract"}:
+            raise ValueError("GURU_OCR_ENGINE must be disabled, tesseract, or textract")
+        if self.email_provider not in {"outbox", "smtp", "ses"}:
+            raise ValueError("GURU_EMAIL_PROVIDER must be outbox, smtp, or ses")
+        if self.email_provider in {"smtp", "ses"} and not self.email_sender:
+            raise ValueError("GURU_EMAIL_SENDER is required for smtp or ses email delivery")
+        if self.email_provider == "smtp" and not self.smtp_host:
+            raise ValueError("GURU_SMTP_HOST is required when GURU_EMAIL_PROVIDER=smtp")
+        if self.embedding_provider not in {"hashing", "ollama", "openai_compatible"}:
+            raise ValueError("GURU_EMBEDDING_PROVIDER must be hashing, ollama, or openai_compatible")
+        if self.embedding_provider != "hashing" and not self.embedding_base_url:
+            raise ValueError("GURU_EMBEDDING_BASE_URL is required for remote embedding providers")
+        if self.intelligence_search_provider not in {"disabled", "tavily"}:
+            raise ValueError("GURU_INTELLIGENCE_SEARCH_PROVIDER must be disabled or tavily")
+        if self.intelligence_search_provider == "tavily" and not self.web_search_api_key:
+            raise ValueError("GURU_WEB_SEARCH_API_KEY is required when GURU_INTELLIGENCE_SEARCH_PROVIDER=tavily")
+        if not 1 <= self.intelligence_max_queries <= 20 or not 1 <= self.intelligence_results_per_query <= 20:
+            raise ValueError("intelligence query limits must be between 1 and 20")
+        if self.agent_planner not in {"deterministic", "model"}:
+            raise ValueError("GURU_AGENT_PLANNER must be deterministic or model")
+        if self.agent_planner == "model" and self.model_provider == "deterministic":
+            raise ValueError("GURU_AGENT_PLANNER=model requires a real model provider")
+        if self.approval_ttl_seconds <= 0:
+            raise ValueError("GURU_APPROVAL_TTL_SECONDS must be positive")
+        if self.voice_agent_mode not in {"assistant", "agent"}:
+            raise ValueError("GURU_VOICE_AGENT_MODE must be assistant or agent")
 
 
 __all__ = ["AppSettings"]

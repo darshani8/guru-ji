@@ -40,6 +40,17 @@ voice = [
 llm = [
     "litellm>=1.60,<2.0",
 ]
+# Richer file parsing for the ingestion layer. The core reader handles CSV, XLSX,
+# DOCX, JSON, and text without these; PDFs and legacy .xls need one of them.
+ingest = [
+    "pdfplumber>=0.11,<1.0",
+    "pypdf>=5.0,<7.0",
+    "openpyxl>=3.1,<4.0",
+    "xlrd>=2.0,<3.0",
+]
+aws = [
+    "boto3>=1.35,<2.0",
+]
 
 [tool.uv]
 # The repository is an application monorepo, not an installable library yet.

@@ -341,3 +341,26 @@ config/sources.example.yaml
 ```
 
 Add each institution only after its source inventory, read-only credentials, reporting views, data classification, and authorization rules are approved.
+
+
+## Institutional data platform additions
+
+```
+apps/api/app/
+├── actions/               # report files (csv/xlsx/pdf), email senders, notifications
+├── agents/                # master agent, planners, specialists, bindings, verification
+├── data_access/           # tenant-enforced domain queries + field minimisation policy
+├── documents/             # chunking, embeddings, RAG with citations
+├── gateway/               # tool specs, registry, ToolGateway (authorise/validate/approve/audit)
+├── ingestion/             # parsers (csv/xlsx/docx/pdf/image/json), OCR adapters, connectors, service
+├── institution_data/      # canonical schema, store, record models
+├── internet_intelligence/ # profiles, search, fetch, entity resolution, relevance, store, monitoring
+├── normalization/         # canonical model, mapping engine, cleaning, validation, deduplication
+├── platform_tools/        # registered tools per domain group
+├── storage/               # object store backends
+└── workers/               # job queue backends and handlers
+apps/web/platform.html, platform.js   # platform console
+migrations/002_institution_data.sql   # canonical schema + RLS (generated from the canonical model)
+scripts/run_worker.py, run_monitor.py, platform_smoke.py, export_openapi.py
+docs/PLATFORM_BLUEPRINT.md            # blueprint -> implementation map
+```

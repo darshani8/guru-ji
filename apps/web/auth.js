@@ -33,7 +33,13 @@
     capabilities: ['ask:read_only', 'voice:start'],
   };
 
-  let config = { mode: 'demo' };
+  // Fail closed: until the server has said which scheme it accepts, nothing is
+  // sent and nobody counts as signed in. Demo headers are only ever used when
+  // the server explicitly answers `mode: "demo"`.
+  const KNOWN_MODES = ['demo', 'oidc', 'unavailable'];
+  const RETRY_HINT = 'Reload the page to try again.';
+
+  let config = { mode: 'unavailable' };
   let discovery = null;
   let token = null;
 
@@ -139,6 +145,12 @@
   }
 
   async function beginLogin() {
+    if (config.mode !== 'oidc') {
+      // Reached when the config could not be loaded (or sign-in is disabled):
+      // the gate's button then doubles as "retry", which re-fetches the config.
+      global.location.reload();
+      return;
+    }
     const meta = await loadDiscovery();
     const verifier = randomUrlSafe(48);
     const stateValue = randomUrlSafe(16);
@@ -191,16 +203,44 @@
   }
 
   /**
+   * Ask the server which scheme it accepts. Anything other than a well-formed
+   * answer is an error the page shows on the sign-in gate; it never becomes a
+   * silent fallback to demo headers.
+   */
+  async function loadConfig() {
+    let response;
+    try {
+      response = await fetch('/v1/auth/config', { cache: 'no-store' });
+    } catch {
+      throw new Error('The server could not be reached to find out how to sign in. ' + RETRY_HINT);
+    }
+    if (!response.ok) {
+      throw new Error('The server did not say how to sign in (HTTP ' + response.status + '). ' + RETRY_HINT);
+    }
+    let payload;
+    try {
+      payload = await response.json();
+    } catch {
+      throw new Error('The sign-in configuration could not be read. ' + RETRY_HINT);
+    }
+    if (!payload || KNOWN_MODES.indexOf(payload.mode) === -1) {
+      throw new Error('The server answered with an unknown sign-in mode. ' + RETRY_HINT);
+    }
+    if (payload.mode === 'oidc' && (!payload.issuer || !payload.client_id)) {
+      throw new Error('The sign-in configuration is incomplete. ' + RETRY_HINT);
+    }
+    return payload;
+  }
+
+  /**
    * Resolve how this page should authenticate, and finish a redirect if one is
    * in progress. Returns the active mode so the caller can render accordingly.
+   * Throws when the configuration could not be loaded; `config` then stays
+   * `unavailable`, so no request carries credentials and nobody is signed in.
    */
   async function init() {
-    try {
-      const response = await fetch('/v1/auth/config');
-      if (response.ok) config = await response.json();
-    } catch {
-      // Fall through to demo mode; the request itself will surface the failure.
-    }
+    config = { mode: 'unavailable' };
+    config = await loadConfig();
 
     if (config.mode !== 'oidc') return config.mode;
 
@@ -226,24 +266,28 @@
   }
 
   function isAuthenticated() {
-    return config.mode !== 'oidc' || tokenIsUsable(token);
+    if (config.mode === 'demo') return true;
+    if (config.mode === 'oidc') return tokenIsUsable(token);
+    return false;
   }
 
   function currentUser() {
-    if (config.mode !== 'oidc') return demoSession.principal;
-    return token ? token.email || token.subject : '';
+    if (config.mode === 'demo') return demoSession.principal;
+    if (config.mode === 'oidc' && token) return token.email || token.subject;
+    return '';
   }
 
   function collegeId() {
-    if (config.mode !== 'oidc') return demoSession.college;
-    return token ? token.collegeId : '';
+    if (config.mode === 'demo') return demoSession.college;
+    if (config.mode === 'oidc' && token) return token.collegeId;
+    return '';
   }
 
   function headers(json) {
     const result = {};
     if (config.mode === 'oidc') {
       if (tokenIsUsable(token)) result.Authorization = 'Bearer ' + token.idToken;
-    } else {
+    } else if (config.mode === 'demo') {
       result.Authorization = 'Bearer dev-token';
       result['X-Demo-Principal'] = demoSession.principal;
       result['X-Demo-Role'] = demoSession.role;

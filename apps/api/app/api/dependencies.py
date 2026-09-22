@@ -29,6 +29,7 @@ from ..voice.session_manager import VoiceSessionManager
 from ..web_research.extractor import AllowlistedHttpExtractor
 from ..web_research.research_service import PublicWebResearchService
 from ..web_research.search import TavilyHttpSearchProvider
+from .platform_runtime import PlatformRuntime, build_platform
 
 
 ControlStore = InMemoryControlStore | PostgresControlStore | SqliteControlStore
@@ -48,6 +49,12 @@ class Runtime:
     web_research: PublicWebResearchService | None = None
     auth_verifier: JwtVerifier | None = None
     edge_identity: EdgeIdentityAdapter | None = None
+    platform: PlatformRuntime | None = None
+
+    def close(self) -> None:
+        if self.platform is not None:
+            self.platform.close()
+        self.store.close()
 
 
 def _build_sources(settings: AppSettings) -> SourceRegistry:
@@ -181,7 +188,7 @@ def _build_connectors(settings: AppSettings) -> ConnectorRegistry:
     return ConnectorRegistry(tuple(connectors))
 
 
-def build_runtime(settings: AppSettings | None = None) -> Runtime:
+def build_runtime(settings: AppSettings | None = None, *, start_workers: bool = False) -> Runtime:
     settings = settings or AppSettings.from_env()
     settings.ensure_safe_for_production()
     sources = _build_sources(settings)
@@ -212,6 +219,7 @@ def build_runtime(settings: AppSettings | None = None) -> Runtime:
         pdp=pdp,
         tracer=tracer,
     )
+    platform = build_platform(settings, control_store=store, pdp=pdp, tracer=tracer, model=model, start_workers=start_workers) if settings.platform_enabled else None
     return Runtime(
         settings=settings,
         sources=sources,
@@ -225,11 +233,21 @@ def build_runtime(settings: AppSettings | None = None) -> Runtime:
         web_research=web_research,
         auth_verifier=auth_verifier,
         edge_identity=edge_identity,
+        platform=platform,
     )
 
 
 def runtime_from_request(request: Request) -> Runtime:
     return request.app.state.runtime
+
+
+def platform_from_request(request: Request) -> PlatformRuntime:
+    from fastapi import HTTPException
+
+    platform = request.app.state.runtime.platform
+    if platform is None:
+        raise HTTPException(status_code=503, detail="the institutional data platform is disabled (GURU_PLATFORM_ENABLED=false)")
+    return platform
 
 
 def principal_from_request(request: Request):
@@ -243,4 +261,4 @@ def principal_from_request(request: Request):
     return principal_from_headers(request.headers, runtime.settings, runtime.auth_verifier)
 
 
-__all__ = ["Runtime", "build_runtime", "principal_from_request", "runtime_from_request"]
+__all__ = ["Runtime", "build_runtime", "platform_from_request", "principal_from_request", "runtime_from_request"]

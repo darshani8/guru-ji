@@ -15,18 +15,14 @@ from jwt import PyJWKClient
 
 from ..config.settings import AppSettings
 from ..domain.principals import Capability, InstitutionScope, Principal, PrincipalType
+from .roles import ROLE_ALIASES, capabilities_for_role
 
 
 class AuthenticationError(ValueError):
     """Safe authentication failure; details must not be returned to callers."""
 
 
-_ROLE_ALIASES = {
-    "student": PrincipalType.STUDENT,
-    "faculty": PrincipalType.FACULTY,
-    "main_admin": PrincipalType.MAIN_ADMIN,
-    "admin": PrincipalType.MAIN_ADMIN,
-}
+_ROLE_ALIASES = ROLE_ALIASES
 
 
 def _anonymous() -> Principal:
@@ -83,19 +79,7 @@ def _capabilities(claims: Mapping[str, Any], principal_type: PrincipalType) -> f
         raw = _claim_values(claims, "capabilities")
     if raw:
         return frozenset(Capability(item) for item in raw if item in Capability._value2member_map_)
-    if principal_type is PrincipalType.MAIN_ADMIN:
-        return frozenset(Capability)
-    if principal_type is PrincipalType.FACULTY:
-        return frozenset({
-            Capability.ASK_READ_ONLY,
-            Capability.VIEW_SOURCE_METADATA,
-            Capability.RUN_BRIEFING,
-            Capability.VIEW_BRIEFING_HISTORY,
-            Capability.START_VOICE_SESSION,
-        })
-    if principal_type is PrincipalType.STUDENT:
-        return frozenset({Capability.ASK_READ_ONLY, Capability.START_VOICE_SESSION})
-    return frozenset()
+    return capabilities_for_role(principal_type)
 
 
 def _scopes(claims: Mapping[str, Any]) -> tuple[InstitutionScope, ...]:
