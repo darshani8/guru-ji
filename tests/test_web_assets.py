@@ -54,6 +54,20 @@ class WebAssetTests(unittest.TestCase):
         js = (ASSISTANT / "app.js").read_text(encoding="utf-8")
         self.assertRegex(js, r"recognition\.onstart = \(\) => \{[^}]*state\.finalResultKeys\.clear\(\);")
 
+    def test_browser_reads_the_college_claims_the_server_accepts(self):
+        # Cognito sends custom:college_id. Missing it left collegeId() empty and
+        # every voice session and chat request failed validation.
+        auth = (SHARED / "auth.js").read_text(encoding="utf-8")
+        self.assertIn("claims['custom:' + name]", auth)
+        self.assertIn("claim(claims, 'institution_scopes')", auth)
+        self.assertIn("collegeId: firstCollegeId(claims)", auth)
+        self.assertIn("rememberToken(parsed.idToken)", auth)
+
+    def test_voice_session_never_sends_an_empty_college(self):
+        js = (ASSISTANT / "app.js").read_text(encoding="utf-8")
+        self.assertIn("JSON.stringify(collegeId ? { college_id: collegeId } : {})", js)
+        self.assertNotIn("JSON.stringify({ college_id: window.GuruAuth.collegeId() })", js)
+
 
 class AppSeparationTests(unittest.TestCase):
     """The assistant is for clients and the console is for developers: neither

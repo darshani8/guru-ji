@@ -394,9 +394,12 @@ async function startVoiceSession() {
   renderVoiceState('Requesting microphone permission…');
   try {
     await requestMicrophonePermission();
+    const collegeId = window.GuruAuth.collegeId();
     const data = await api('/v1/voice/sessions', {
       method: 'POST',
-      body: JSON.stringify({ college_id: window.GuruAuth.collegeId() }),
+      // With no college on hand, let the server use the verified token's own
+      // scope; an empty college_id is rejected as a contract violation.
+      body: JSON.stringify(collegeId ? { college_id: collegeId } : {}),
     });
     if (data.transport !== 'browser_web_speech_ws' || !data.transport_ticket || !data.websocket_url) {
       throw new Error('The server did not provide a supported live voice transport.');
