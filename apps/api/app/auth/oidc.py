@@ -39,8 +39,22 @@ def _anonymous() -> Principal:
     )
 
 
+# Cognito exposes user-pool custom attributes under a "custom:" prefix, so a
+# claim configured as guru_role arrives as custom:guru_role. Accepting both
+# spellings keeps the provider from needing a token-rewriting Lambda purely to
+# strip the prefix. The prefix carries no authority of its own: these values
+# are still only read from a token whose signature has already been verified.
+_CUSTOM_PREFIX = "custom:"
+
+
+def _lookup(claims: Mapping[str, Any], name: str) -> Any:
+    if name in claims:
+        return claims[name]
+    return claims.get(_CUSTOM_PREFIX + name)
+
+
 def _claim_values(claims: Mapping[str, Any], name: str) -> tuple[str, ...]:
-    value = claims.get(name)
+    value = _lookup(claims, name)
     values: tuple[str, ...]
     if isinstance(value, str):
         values = (value,)
@@ -53,7 +67,7 @@ def _claim_values(claims: Mapping[str, Any], name: str) -> tuple[str, ...]:
 
 def _truthy_claim(claims: Mapping[str, Any], *names: str) -> bool:
     for name in names:
-        value = claims.get(name)
+        value = _lookup(claims, name)
         if isinstance(value, bool):
             return value
         if isinstance(value, (int, float)):
@@ -85,7 +99,9 @@ def _capabilities(claims: Mapping[str, Any], principal_type: PrincipalType) -> f
 
 
 def _scopes(claims: Mapping[str, Any]) -> tuple[InstitutionScope, ...]:
-    raw_scopes = claims.get("guru_scopes", claims.get("institution_scopes", ()))
+    raw_scopes = _lookup(claims, "guru_scopes")
+    if raw_scopes is None:
+        raw_scopes = _lookup(claims, "institution_scopes") or ()
     if isinstance(raw_scopes, Mapping):
         raw_scopes = (raw_scopes,)
     if not isinstance(raw_scopes, (list, tuple)):
@@ -107,7 +123,7 @@ def _scopes(claims: Mapping[str, Any]) -> tuple[InstitutionScope, ...]:
     if scopes:
         return tuple(scopes)
 
-    college_id = claims.get("college_id") or claims.get("college")
+    college_id = _lookup(claims, "college_id") or _lookup(claims, "college")
     if isinstance(college_id, str) and college_id.strip():
         return (InstitutionScope(college_id=college_id.strip()),)
     return ()
@@ -119,7 +135,11 @@ def principal_from_claims(claims: Mapping[str, Any]) -> Principal:
     subject = claims.get("sub")
     if not isinstance(subject, str) or not subject.strip():
         raise AuthenticationError("token subject is missing")
-    role_claim = claims.get("guru_role", claims.get("role", "student"))
+    role_claim = _lookup(claims, "guru_role")
+    if not isinstance(role_claim, str) or not role_claim.strip():
+        role_claim = _lookup(claims, "role")
+    if not isinstance(role_claim, str) or not role_claim.strip():
+        role_claim = "student"
     role = _ROLE_ALIASES.get(role_claim.lower(), PrincipalType.STUDENT) if isinstance(role_claim, str) else PrincipalType.STUDENT
     return Principal(
         principal_id=subject.strip(),

@@ -4,7 +4,7 @@ import unittest
 import jwt
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from app.auth.oidc import AuthenticationError, JwtVerifier
+from app.auth.oidc import AuthenticationError, JwtVerifier, principal_from_claims
 from app.auth.principal import principal_from_headers
 from app.config.settings import AppSettings
 from app.domain.principals import Capability, InstitutionScope, PrincipalType
@@ -95,6 +95,50 @@ class OidcAuthenticationTests(unittest.TestCase):
         self.assertTrue(principal.authenticated)
         self.assertEqual(principal.principal_id, "demo-faculty")
         self.assertEqual(principal.principal_type, PrincipalType.FACULTY)
+
+
+class CognitoCustomClaimTests(unittest.TestCase):
+    """Cognito prefixes user-pool custom attributes with "custom:", so the
+    verifier has to read that spelling or every Cognito login would come back
+    as an unscoped student."""
+
+    def test_custom_prefixed_role_and_scope_are_honoured(self):
+        principal = principal_from_claims({
+            "sub": "a1b2c3",
+            "custom:guru_role": "main_admin",
+            "custom:college_id": "college_a",
+        })
+        self.assertEqual(principal.principal_type, PrincipalType.MAIN_ADMIN)
+        self.assertEqual([s.college_id for s in principal.scopes], ["college_a"])
+
+    def test_bare_claim_names_still_work(self):
+        principal = principal_from_claims({
+            "sub": "a1b2c3", "guru_role": "faculty", "college_id": "college_b",
+        })
+        self.assertEqual(principal.principal_type, PrincipalType.FACULTY)
+        self.assertEqual([s.college_id for s in principal.scopes], ["college_b"])
+
+    def test_unprefixed_claim_wins_over_prefixed(self):
+        principal = principal_from_claims({
+            "sub": "a1b2c3", "guru_role": "faculty", "custom:guru_role": "main_admin",
+        })
+        self.assertEqual(principal.principal_type, PrincipalType.FACULTY)
+
+    def test_custom_prefixed_capabilities_are_honoured(self):
+        principal = principal_from_claims({
+            "sub": "a1b2c3",
+            "custom:guru_role": "faculty",
+            "custom:guru_capabilities": "ask:read_only",
+        })
+        self.assertEqual(sorted(c.value for c in principal.capabilities), ["ask:read_only"])
+
+    def test_missing_role_still_defaults_to_least_privilege(self):
+        principal = principal_from_claims({"sub": "a1b2c3"})
+        self.assertEqual(principal.principal_type, PrincipalType.STUDENT)
+
+    def test_an_unknown_role_string_does_not_escalate(self):
+        principal = principal_from_claims({"sub": "a1b2c3", "custom:guru_role": "superuser"})
+        self.assertEqual(principal.principal_type, PrincipalType.STUDENT)
 
 
 if __name__ == "__main__":
