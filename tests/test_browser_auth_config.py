@@ -80,9 +80,6 @@ class ForgedDemoHeaderTests(unittest.TestCase):
         self.assertEqual(response.status_code, 401)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class LoginContentSecurityPolicyTests(unittest.TestCase):
     """default-src alone blocks the browser from reaching the identity
@@ -122,3 +119,5 @@ class LoginContentSecurityPolicyTests(unittest.TestCase):
         # A URL carrying a path is reduced to its origin.
         self.assertIn("https://ok.example.test", policy)
         self.assertNotIn("/with/path", policy)
+if __name__ == "__main__":
+    unittest.main()
