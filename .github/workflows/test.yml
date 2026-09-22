@@ -25,7 +25,7 @@ jobs:
           version: "0.6.x"
           enable-cache: true
       - name: Install dependencies
-        run: uv sync --extra dev
+        run: uv sync --extra dev --extra anthropic
       - name: Run unit and route tests
         env:
           PYTHONPATH: apps/api:apps

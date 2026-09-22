@@ -27,6 +27,6 @@ jobs:
           version: "0.6.x"
           enable-cache: true
       - name: Install development tools
-        run: uv sync --extra dev
+        run: uv sync --extra dev --extra anthropic
       - name: Audit resolved Python dependencies
         run: uv run pip-audit --strict --progress-spinner off

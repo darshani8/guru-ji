@@ -108,26 +108,46 @@
     if (!raw) return null;
     try {
       const parsed = JSON.parse(raw);
-      return tokenIsUsable(parsed) ? parsed : null;
+      // Re-derive from the token itself so a session stored by an older copy
+      // of this file picks up the current claim mapping.
+      return tokenIsUsable(parsed) ? rememberToken(parsed.idToken) : null;
     } catch {
       return null;
     }
+  }
+
+  // Cognito exposes custom attributes as `custom:<name>`. The server accepts
+  // both spellings (app.auth.oidc._lookup), so the page reads both as well.
+  function claim(claims, name) {
+    return name in claims ? claims[name] : claims['custom:' + name];
+  }
+
+  // Mirrors the server's own precedence in app.auth.oidc._scopes: an explicit
+  // scope list wins, then a single college claim. The server re-derives this
+  // from the verified token; the copy here only populates request bodies so
+  // the page does not have to guess.
+  function firstCollegeId(claims) {
+    let scopes = claim(claims, 'guru_scopes');
+    if (scopes === undefined || scopes === null) scopes = claim(claims, 'institution_scopes') || [];
+    if (scopes && typeof scopes === 'object' && !Array.isArray(scopes)) scopes = [scopes];
+    if (Array.isArray(scopes)) {
+      const first = scopes.find((s) => s && typeof s.college_id === 'string' && s.college_id.trim());
+      if (first) return first.college_id;
+    }
+    const college = claim(claims, 'college_id') || claim(claims, 'college');
+    return typeof college === 'string' ? college.trim() : '';
   }
 
   function rememberToken(idToken) {
     // `exp` is only read to decide when to re-authenticate. Authority still
     // comes from the server verifying the signature.
     const claims = decodeJwtPayload(idToken);
-    const scopes = Array.isArray(claims.guru_scopes) ? claims.guru_scopes : [];
     const value = {
       idToken,
       expiresAt: Number(claims.exp) || 0,
       subject: claims.sub || '',
       email: claims.email || '',
-      // Mirrors the server's own precedence in app.auth.oidc._scopes. The
-      // server re-derives this from the verified token; the copy here only
-      // populates request bodies so the page does not have to guess.
-      collegeId: claims.college_id || claims.college || (scopes[0] && scopes[0].college_id) || '',
+      collegeId: firstCollegeId(claims),
     };
     writeStored(TOKEN_KEY, JSON.stringify(value));
     return value;

@@ -7,6 +7,7 @@ const state = {
   shouldListen: false,
   waitingForAnswer: false,
   speaking: false,
+  utterance: null,
   voiceTransportReady: false,
   intentionalClose: false,
   requestInFlight: false,
@@ -197,6 +198,9 @@ function speakAnswer(text) {
   stopRecognition();
   window.speechSynthesis.cancel();
   const utterance = new SpeechSynthesisUtterance(text);
+  // Chrome can garbage-collect an unreferenced utterance mid-speech and never
+  // fire onend, which would leave the microphone off after the first answer.
+  state.utterance = utterance;
   utterance.lang = 'en-IN';
   utterance.onend = () => {
     state.speaking = false;
@@ -240,6 +244,9 @@ function configureRecognition() {
   recognition.lang = 'en-IN';
 
   recognition.onstart = () => {
+    // Result indexes restart at 0 on every start, so keys from an earlier run
+    // would swallow a phrase the user repeats (for example "yes" twice).
+    state.finalResultKeys.clear();
     renderVoiceState('Listening…');
   };
   recognition.onresult = (event) => {
@@ -313,10 +320,20 @@ function handleVoiceMessage(event) {
   }
 }
 
+// The page and the API share an origin. Behind a TLS-terminating load balancer
+// the server sees plain HTTP and advertises ws://, which an HTTPS page is not
+// allowed to open, so the socket always takes this page's own scheme and host.
+function voiceSocketUrl(advertised) {
+  const { pathname, search } = new URL(advertised, window.location.href);
+  const url = new URL(pathname + search, window.location.href);
+  url.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return url.toString();
+}
+
 function startTransport(data) {
   return new Promise((resolve, reject) => {
     let settled = false;
-    const socket = new WebSocket(data.websocket_url);
+    const socket = new WebSocket(voiceSocketUrl(data.websocket_url));
     state.voiceSocket = socket;
     socket.onopen = () => {
       socket.send(JSON.stringify({ type: 'auth', ticket: data.transport_ticket }));
@@ -377,9 +394,12 @@ async function startVoiceSession() {
   renderVoiceState('Requesting microphone permission…');
   try {
     await requestMicrophonePermission();
+    const collegeId = window.GuruAuth.collegeId();
     const data = await api('/v1/voice/sessions', {
       method: 'POST',
-      body: JSON.stringify({ college_id: window.GuruAuth.collegeId() }),
+      // With no college on hand, let the server use the verified token's own
+      // scope; an empty college_id is rejected as a contract violation.
+      body: JSON.stringify(collegeId ? { college_id: collegeId } : {}),
     });
     if (data.transport !== 'browser_web_speech_ws' || !data.transport_ticket || !data.websocket_url) {
       throw new Error('The server did not provide a supported live voice transport.');

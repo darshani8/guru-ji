@@ -10,6 +10,8 @@ from ..config.institution_connectors import (
     InstitutionConnectorDefinition,
     parse_institution_connectors,
 )
+from ..providers.anthropic import DEFAULT_MODEL_ID as ANTHROPIC_DEFAULT_MODEL_ID
+from ..providers.anthropic import EFFORT_LEVELS as ANTHROPIC_EFFORT_LEVELS
 from ..web_research.domain_allowlist import DEFAULT_ALLOWED_DOMAINS
 
 
@@ -68,6 +70,16 @@ class AppSettings:
     litellm_base_url: str | None = None
     litellm_model_id: str = ""
     litellm_api_key: str | None = field(default=None, repr=False)
+    # Claude through the Anthropic SDK, on the Claude API (provider "anthropic")
+    # or in Amazon Bedrock (provider "bedrock"). Voice and chat answers use
+    # anthropic_effort; the agent planner, which decides the actions, uses
+    # anthropic_planner_effort. No key here means the SDK reads ANTHROPIC_API_KEY;
+    # Bedrock signs with AWS credentials instead and needs bedrock_region.
+    anthropic_model_id: str = ANTHROPIC_DEFAULT_MODEL_ID
+    anthropic_api_key: str | None = field(default=None, repr=False)
+    anthropic_effort: str = "low"
+    anthropic_planner_effort: str = "medium"
+    bedrock_region: str | None = None
     model_timeout_seconds: float = 8.0
     model_max_tokens: int = 800
     institution_connector_base_url: str | None = None
@@ -188,6 +200,11 @@ class AppSettings:
             litellm_base_url=os.getenv("GURU_LITELLM_BASE_URL") or None,
             litellm_model_id=os.getenv("GURU_LITELLM_MODEL_ID", "").strip(),
             litellm_api_key=os.getenv("GURU_LITELLM_API_KEY") or None,
+            anthropic_model_id=os.getenv("GURU_ANTHROPIC_MODEL_ID", ANTHROPIC_DEFAULT_MODEL_ID).strip(),
+            anthropic_api_key=os.getenv("GURU_ANTHROPIC_API_KEY") or None,
+            anthropic_effort=os.getenv("GURU_ANTHROPIC_EFFORT", "low").strip().lower(),
+            anthropic_planner_effort=os.getenv("GURU_ANTHROPIC_PLANNER_EFFORT", "medium").strip().lower(),
+            bedrock_region=(os.getenv("GURU_BEDROCK_REGION") or os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "").strip() or None,
             model_timeout_seconds=float(os.getenv("GURU_MODEL_TIMEOUT_SECONDS", "8")),
             model_max_tokens=int(os.getenv("GURU_MODEL_MAX_TOKENS", "800")),
             institution_connector_base_url=os.getenv("GURU_INSTITUTION_CONNECTOR_BASE_URL") or None,
@@ -320,8 +337,8 @@ class AppSettings:
             raise ValueError("GURU_RATE_LIMIT_REQUESTS must be positive")
         if self.rate_limit_window_seconds <= 0:
             raise ValueError("GURU_RATE_LIMIT_WINDOW_SECONDS must be positive")
-        if self.model_provider not in {"deterministic", "ollama", "litellm"}:
-            raise ValueError("GURU_MODEL_PROVIDER must be deterministic, ollama, or litellm")
+        if self.model_provider not in {"deterministic", "ollama", "litellm", "anthropic", "bedrock"}:
+            raise ValueError("GURU_MODEL_PROVIDER must be deterministic, ollama, litellm, anthropic, or bedrock")
         if self.model_timeout_seconds <= 0:
             raise ValueError("GURU_MODEL_TIMEOUT_SECONDS must be positive")
         if self.model_max_tokens <= 0:
@@ -330,6 +347,13 @@ class AppSettings:
             raise ValueError("GURU_OLLAMA_BASE_URL is required when GURU_MODEL_PROVIDER=ollama")
         if self.model_provider == "litellm" and not self.litellm_model_id:
             raise ValueError("GURU_LITELLM_MODEL_ID is required when GURU_MODEL_PROVIDER=litellm")
+        if self.model_provider in {"anthropic", "bedrock"} and not self.anthropic_model_id:
+            raise ValueError(f"GURU_ANTHROPIC_MODEL_ID must not be blank when GURU_MODEL_PROVIDER={self.model_provider}")
+        if self.model_provider == "bedrock" and not self.bedrock_region:
+            raise ValueError("GURU_BEDROCK_REGION (or AWS_REGION) is required when GURU_MODEL_PROVIDER=bedrock")
+        for name, effort in (("GURU_ANTHROPIC_EFFORT", self.anthropic_effort), ("GURU_ANTHROPIC_PLANNER_EFFORT", self.anthropic_planner_effort)):
+            if effort not in ANTHROPIC_EFFORT_LEVELS:
+                raise ValueError(f"{name} must be one of {', '.join(ANTHROPIC_EFFORT_LEVELS)}")
         if self.pdp_mode not in {"local", "cerbos"}:
             raise ValueError("GURU_PDP_MODE must be local or cerbos")
         if self.cerbos_timeout_seconds <= 0:
