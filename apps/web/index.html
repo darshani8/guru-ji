@@ -1,17 +1,56 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="theme-color" content="#102a43"><title>Guru Ji — Institutional Intelligence</title><link rel="stylesheet" href="/styles.css"></head>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#102a43">
+  <meta name="description" content="Guru Ji institutional text and voice assistant">
+  <title>Guru Ji — Assistant</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
 <body>
-<div class="app-shell">
-<aside class="sidebar"><div class="brand"><div class="brand-mark">GJ</div><div><strong>Guru Ji</strong><span>Institutional intelligence</span></div></div><nav class="nav" aria-label="Primary navigation"><a class="nav-item active" href="#overview"><span>◈</span>Overview</a><a class="nav-item" href="#chat"><span>✦</span>Ask Guru Ji</a><a class="nav-item" href="#research"><span>⌕</span>Official web research</a><a class="nav-item" href="#sources"><span>⌁</span>Approved sources</a><a class="nav-item" href="#audit"><span>▤</span>Audit trail</a></nav><div class="sidebar-note"><span class="pulse"></span><div><strong>Local reference mode</strong><p>Demo data only. No college system is contacted.</p></div></div><div class="sidebar-footer">Read-only by design<br><span>Policy-bound · cited · auditable</span></div></aside>
-<main class="main-content">
-<header class="topbar"><div><p class="eyebrow">Saturday, 19 September 2026</p><h1>Good afternoon, <span id="principal-label">demo-user</span></h1></div><div class="top-actions"><span id="api-badge" class="status-badge neutral">Checking API</span><button id="refresh-button" class="icon-button" title="Refresh dashboard" aria-label="Refresh dashboard">↻</button></div></header>
-<section id="overview" class="hero panel"><div class="hero-copy"><p class="eyebrow accent">Evidence before answers</p><h2>One safe place to understand your institution.</h2><p>Ask questions in plain language. Guru Ji plans against approved sources, keeps College → Department → Batch scope intact, and shows what supports every answer.</p><div class="hero-actions"><button id="daily-button" class="button primary">Prepare daily briefing</button><button id="health-button" class="button secondary">Check source health</button></div></div><div class="hero-orbit"><div class="orbit-ring ring-one"></div><div class="orbit-ring ring-two"></div><div class="orbit-core"><span>GJ</span><small>trusted<br>context</small></div><span class="orbit-dot dot-one"></span><span class="orbit-dot dot-two"></span><span class="orbit-dot dot-three"></span></div></section>
-<section class="metric-grid" aria-label="System status"><article class="metric-card"><div class="metric-icon blue">⌁</div><div><p>Approved sources</p><strong id="source-count">—</strong><span id="source-summary">Loading registry</span></div></article><article class="metric-card"><div class="metric-icon green">✓</div><div><p>Control database</p><strong id="database-status">—</strong><span id="database-summary">Checking readiness</span></div></article><article class="metric-card"><div class="metric-icon amber">◷</div><div><p>Recent decisions</p><strong id="audit-count">—</strong><span>Stored audit events</span></div></article><article class="metric-card"><div class="metric-icon purple">◎</div><div><p>Voice sessions</p><strong>10</strong><span>Concurrent cap</span></div></article></section>
-<div class="content-grid"><section id="chat" class="panel chat-panel"><div class="section-heading"><div><p class="eyebrow accent">Ask Guru Ji</p><h2>What do you need to know?</h2></div><span class="scope-chip" id="scope-chip">College A</span></div><div id="conversation" class="conversation"><div class="welcome-message"><div class="assistant-avatar">GJ</div><div><strong>Namaste. I’m ready.</strong><p>Ask about attendance, institutional overview, or source health. I will refuse anything outside the approved scope rather than guess.</p><div class="suggestions"><button class="suggestion">Give me the institutional overview</button><button class="suggestion">What is the attendance summary?</button><button class="suggestion">Are the approved sources healthy?</button></div></div></div></div><form id="chat-form" class="composer"><label for="prompt" class="sr-only">Ask Guru Ji</label><textarea id="prompt" rows="2" placeholder="Ask a read-only institutional question…" maxlength="10000"></textarea><div class="composer-footer"><span><span class="keyboard-key">Enter</span> to send · scope is enforced</span><button class="button primary send-button" type="submit">Send <span>↗</span></button></div></form></section>
-<aside class="panel settings-panel"><div class="section-heading"><div><p class="eyebrow">Session controls</p><h2>Identity &amp; scope</h2></div><span class="lock">⌾</span></div><p class="muted small">Development identity only. Production will use OIDC/JWT.</p><div class="field"><label for="principal">Principal ID</label><input id="principal" value="demo-user" autocomplete="off"></div><div class="field"><label for="role">Role</label><select id="role"><option value="student">Student</option><option value="faculty">Faculty</option><option value="main_admin" selected>Main Admin</option></select></div><div class="field"><label for="college">College scope</label><input id="college" value="college_a" autocomplete="off"><span class="field-hint">Department and Batch scopes refuse until a connector declares support.</span></div><div class="capability-list"><span class="field-label">Demo capabilities</span><label><input type="checkbox" value="ask:read_only" checked> Ask read-only</label><label><input type="checkbox" value="source:view_metadata" checked> View source metadata</label><label><input type="checkbox" value="voice:start" checked> Start voice session</label></div><div class="identity-summary"><div class="identity-dot"></div><div><strong id="identity-summary">Main Admin · College A</strong><span>Capabilities are sent explicitly</span></div></div></aside></div>
-<section id="research" class="panel research-panel"><div class="section-heading"><div><p class="eyebrow accent">Explicit web research</p><h2>Search configured official sources</h2></div><span class="scope-chip">Untrusted data</span></div><p class="muted small">Use this only when you want public-web context. Guru Ji searches the server-configured official-domain allowlist, retrieves pages without following redirects, and shows citations and warnings.</p><form id="research-form" class="research-form"><label for="research-query" class="sr-only">Public-web research query</label><input id="research-query" maxlength="500" placeholder="e.g. official higher-education attendance guidance"><button class="button primary" type="submit">Search official sources ↗</button></form><div id="research-results" class="research-results"><div class="empty-row">No public-web research run yet.</div></div></section>
-<div class="lower-grid"><section id="sources" class="panel"><div class="section-heading"><div><p class="eyebrow">Control plane</p><h2>Approved sources</h2></div><button id="sources-button" class="text-button">Refresh ↻</button></div><div id="sources-list" class="source-list"><div class="loading-row">Loading approved sources…</div></div></section><section id="audit" class="panel"><div class="section-heading"><div><p class="eyebrow">Accountability</p><h2>Recent audit trail</h2></div><button id="audit-button" class="text-button">Refresh ↻</button></div><div id="audit-list" class="audit-list"><div class="loading-row">Loading audit events…</div></div></section></div>
-<footer class="footer"><span>Guru Ji local reference implementation</span><span>Read-only · least privilege · source-cited</span></footer>
-</main></div><div id="toast" class="toast" role="status" aria-live="polite"></div><script src="/app.js"></script>
-</body></html>
+  <main class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">GJ</div>
+        <div>
+          <div class="brand-name">Guru Ji</div>
+          <span class="brand-subtitle">Institutional assistant</span>
+        </div>
+      </div>
+      <div id="api-status" class="status neutral" role="status" aria-live="polite">
+        <span class="status-dot"></span>
+        <span id="api-status-label">Connecting…</span>
+      </div>
+    </header>
+
+    <section id="chat-history" class="chat-history" aria-label="Chat history">
+      <div class="empty-space"></div>
+      <article class="message assistant-message">
+        <div class="avatar">GJ</div>
+        <div class="message-body">
+          <span class="message-label">Guru Ji</span>
+          <div class="bubble">Namaste. I’m ready to help. You can type a message or start the Voice Assistant.</div>
+        </div>
+      </article>
+    </section>
+
+    <section class="composer-wrap" aria-label="Assistant input">
+      <p id="voice-status-line" class="voice-status-line" role="status" aria-live="polite"></p>
+      <form id="text-form" class="composer">
+        <label class="sr-only" for="text-input">Type a message</label>
+        <input id="text-input" class="text-input" type="text" autocomplete="off" maxlength="12000" placeholder="Type your message…">
+        <button id="voice-button" class="voice-button" type="button" aria-pressed="false">
+          <span class="voice-icon" aria-hidden="true">◉</span>
+          <span id="voice-button-label">Voice Assistant</span>
+        </button>
+        <button id="send-button" class="send-button" type="submit">Send <span aria-hidden="true">↗</span></button>
+      </form>
+      <p class="composer-hint"><kbd>Enter</kbd> to send · browser speech input/output · final transcripts only reach the server</p>
+    </section>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/app.js" defer></script>
+</body>
+</html>

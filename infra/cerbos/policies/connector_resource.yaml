@@ -1,0 +1,19 @@
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  version: "guru-cerbos-v1"
+  resource: "connector_resource"
+  rules:
+    - actions: ["*"]
+      effect: EFFECT_DENY
+      roles: ["*"]
+    - actions: ["retrieve", "list", "search", "mcp.tool.call"]
+      effect: EFFECT_ALLOW
+      roles: ["main_admin", "faculty", "student", "system"]
+      condition:
+        match:
+          all:
+            of:
+              - expr: request.principal.attr.revoked == false
+              - expr: request.principal.attr.capabilities.exists(capability, capability == "ask:read_only")
+              - expr: request.principal.attr.institution_scopes.exists(scope, scope.college_id == request.resource.attr.institution_scope.college_id && (scope.department_id == null || scope.department_id == request.resource.attr.institution_scope.department_id) && (scope.batch_id == null || scope.batch_id == request.resource.attr.institution_scope.batch_id))
+              - expr: request.principal.attr.consent_verified == true || request.resource.attr.institution_scope.batch_id == null

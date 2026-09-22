@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
 import httpx
 
 from ..domain.errors import ErrorCode, GuruJiError, PublicError
+from .model_base import ModelEvent, ProviderCapabilities
 
 
 def _provider_error(message: str) -> GuruJiError:
@@ -21,6 +23,16 @@ class OllamaProvider:
     timeout_seconds: float = 8.0
     transport: httpx.AsyncBaseTransport | None = None
     provider_id: str = "ollama"
+
+    @property
+    def capabilities(self) -> ProviderCapabilities:
+        return ProviderCapabilities(
+            supports_streaming=True,
+            supports_json_schema=False,
+            supports_tools=False,
+            supports_multimodal=False,
+            supports_realtime=False,
+        )
 
     def __post_init__(self) -> None:
         if not self.base_url:
@@ -61,6 +73,20 @@ class OllamaProvider:
         if not isinstance(answer, str) or not answer.strip():
             raise _provider_error("The configured local model provider returned no usable answer.")
         return answer.strip()
+
+    async def _stream(self, prompt: str, *, max_tokens: int = 800) -> AsyncIterator[ModelEvent]:
+        answer = await self.complete(prompt, max_tokens=max_tokens)
+        yield ModelEvent(
+            type="delta",
+            text=answer,
+            is_final=True,
+            provider_id=self.provider_id,
+            model_id=self.model_id,
+            usage=None,
+        )
+
+    def stream(self, prompt: str, *, max_tokens: int = 800) -> AsyncIterator[ModelEvent]:
+        return self._stream(prompt, max_tokens=max_tokens)
 
 
 __all__ = ["OllamaProvider"]

@@ -13,12 +13,14 @@ router = APIRouter(prefix="/v1/sources", tags=["sources"])
 async def list_sources(request: Request) -> dict[str, object]:
     runtime = runtime_from_request(request)
     principal = principal_from_request(request)
-    if not principal.authenticated:
+    if not principal.active:
         raise HTTPException(status_code=401, detail="authentication is required")
     if Capability.VIEW_SOURCE_METADATA not in principal.capabilities:
         raise HTTPException(status_code=403, detail="source:view_metadata capability is required")
     items = []
     for definition in runtime.sources.all():
+        if not any(scope.college_id == definition.institution_id for scope in principal.scopes):
+            continue
         health = await runtime.connectors.get(definition.source_id).health()
         runtime.store.set_health(health)
         items.append({

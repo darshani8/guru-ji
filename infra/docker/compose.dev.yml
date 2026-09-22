@@ -15,6 +15,36 @@ services:
     volumes:
       - guru-ji-postgres:/var/lib/postgresql/data
 
+  cerbos:
+    image: ghcr.io/cerbos/cerbos:0.40.0
+    command: ["server", "--config=/conf/cerbos.yaml"]
+    volumes:
+      - ../cerbos/cerbos.yaml:/conf/cerbos.yaml:ro
+      - ../cerbos/policies:/policies:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:3592/_cerbos/health || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    ports:
+      - "3592:3592"
+
+  connector:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.connector
+    environment:
+      GURU_CONNECTOR_ENVIRONMENT: development
+      GURU_CONNECTOR_SERVICE_TOKEN: connector-dev-token
+      GURU_CONNECTOR_SOURCE_ID: college_a_remote
+      GURU_CONNECTOR_INSTITUTION_ID: college_a
+      GURU_CONNECTOR_ALLOWED_COLLEGE_ID: college_a
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8010:8010"
+
   api:
     build:
       context: ../..
@@ -22,11 +52,23 @@ services:
     environment:
       GURU_ENVIRONMENT: development
       GURU_DEV_BEARER_TOKEN: dev-token
+      GURU_PDP_MODE: cerbos
+      GURU_CERBOS_URL: http://cerbos:3592
+      GURU_CERBOS_POLICY_VERSION: guru-cerbos-v1
+      GURU_CERBOS_REQUIRE_FRESH: "false"
       CONTROL_DATABASE_URL: postgresql://guru_ji:guru_ji_dev_only@postgres:5432/guru_ji
+      GURU_ENABLE_DEMO_DATA: "false"
+      GURU_INSTITUTION_CONNECTOR_BASE_URL: http://connector:8010
+      GURU_INSTITUTION_CONNECTOR_AUTH_TOKEN: connector-dev-token
+      GURU_CONNECTOR_SCOPE_ATTESTATION_REQUIRED: "true"
       GURU_ALLOWED_ORIGINS: http://localhost:8000,http://localhost:5173
     depends_on:
       postgres:
         condition: service_healthy
+      cerbos:
+        condition: service_healthy
+      connector:
+        condition: service_started
     ports:
       - "8000:8000"
     volumes:

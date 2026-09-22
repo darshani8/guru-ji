@@ -41,6 +41,7 @@ def _anonymous() -> Principal:
 
 def _claim_values(claims: Mapping[str, Any], name: str) -> tuple[str, ...]:
     value = claims.get(name)
+    values: tuple[str, ...]
     if isinstance(value, str):
         values = (value,)
     elif isinstance(value, (list, tuple, set)):
@@ -48,6 +49,18 @@ def _claim_values(claims: Mapping[str, Any], name: str) -> tuple[str, ...]:
     else:
         values = ()
     return tuple(item.strip() for item in values if item.strip())
+
+
+def _truthy_claim(claims: Mapping[str, Any], *names: str) -> bool:
+    for name in names:
+        value = claims.get(name)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value == 1
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "verified", "active"}
+    return False
 
 
 def _capabilities(claims: Mapping[str, Any], principal_type: PrincipalType) -> frozenset[Capability]:
@@ -59,7 +72,13 @@ def _capabilities(claims: Mapping[str, Any], principal_type: PrincipalType) -> f
     if principal_type is PrincipalType.MAIN_ADMIN:
         return frozenset(Capability)
     if principal_type is PrincipalType.FACULTY:
-        return frozenset({Capability.ASK_READ_ONLY, Capability.VIEW_SOURCE_METADATA, Capability.START_VOICE_SESSION})
+        return frozenset({
+            Capability.ASK_READ_ONLY,
+            Capability.VIEW_SOURCE_METADATA,
+            Capability.RUN_BRIEFING,
+            Capability.VIEW_BRIEFING_HISTORY,
+            Capability.START_VOICE_SESSION,
+        })
     if principal_type is PrincipalType.STUDENT:
         return frozenset({Capability.ASK_READ_ONLY, Capability.START_VOICE_SESSION})
     return frozenset()
@@ -88,8 +107,6 @@ def _scopes(claims: Mapping[str, Any]) -> tuple[InstitutionScope, ...]:
     if scopes:
         return tuple(scopes)
 
-    # A single college claim is supported for simple institutional IdPs. It is
-    # still explicit and never expands to another college.
     college_id = claims.get("college_id") or claims.get("college")
     if isinstance(college_id, str) and college_id.strip():
         return (InstitutionScope(college_id=college_id.strip()),)
@@ -110,6 +127,8 @@ def principal_from_claims(claims: Mapping[str, Any]) -> Principal:
         capabilities=_capabilities(claims, role),
         scopes=_scopes(claims),
         authenticated=True,
+        consent_verified=_truthy_claim(claims, "guru_parental_consent", "parental_consent", "consent_verified"),
+        revoked=_truthy_claim(claims, "guru_revoked", "revoked", "account_revoked"),
     )
 
 

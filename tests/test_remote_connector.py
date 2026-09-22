@@ -8,6 +8,7 @@ from app.api.dependencies import build_runtime
 from app.config.settings import AppSettings
 from app.connectors.base import ConnectorContext
 from app.connectors.remote_http import RemoteHttpConnector
+from app.domain.principals import InstitutionScope, PrincipalType
 from app.domain.results import ResultStatus
 from app.policy.query_limits import QueryLimits
 
@@ -34,8 +35,18 @@ class RemoteConnectorTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(request.headers["x-request-id"], "req-remote")
             payload = json.loads(request.content)
             self.assertEqual(payload["tool_name"], "institution.overview")
+            self.assertEqual(payload["principal"], {
+                "id": "faculty-1",
+                "type": "faculty",
+                "capabilities": [],
+                "scopes": [{"college_id": "college_a", "department_id": "dept_1", "batch_id": None}],
+                "consent_verified": False,
+                "revoked": False,
+            })
+            self.assertEqual(payload["institution_scope"], {"college_id": "college_a", "department_id": "dept_1", "batch_id": None})
             self.assertEqual(payload["limits"]["max_rows"], 500)
             return httpx.Response(200, json={
+                "contract_version": "2",
                 "tool_name": "institution.overview",
                 "status": "success",
                 "data": {"active_students": 500},
@@ -52,7 +63,14 @@ class RemoteConnectorTests(unittest.IsolatedAsyncioTestCase):
         result = await self.connector(httpx.MockTransport(handler)).execute(
             "institution.overview",
             {},
-            ConnectorContext("req-remote", "college_a_remote", QueryLimits()),
+            ConnectorContext(
+                "req-remote",
+                "college_a_remote",
+                QueryLimits(),
+                principal_id="faculty-1",
+                principal_type=PrincipalType.FACULTY,
+                institution_scope=InstitutionScope("college_a", "dept_1"),
+            ),
         )
         self.assertEqual(result.status, ResultStatus.SUCCESS)
         self.assertEqual(result.data, {"active_students": 500})
@@ -79,6 +97,7 @@ class RemoteConnectorTests(unittest.IsolatedAsyncioTestCase):
         async def handler(request: httpx.Request) -> httpx.Response:
             del request
             return httpx.Response(200, json={
+                "contract_version": "2",
                 "tool_name": "institution.overview",
                 "status": "success",
                 "data": {"active_students": 500},

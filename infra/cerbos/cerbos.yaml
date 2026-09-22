@@ -1,0 +1,11 @@
+# Cerbos sidecar configuration for the local/deployment reference stack.
+# Production deployments should pin the image and provide TLS/mTLS at the
+# service boundary rather than exposing Cerbos directly to public clients.
+server:
+  httpListenAddr: 0.0.0.0:3592
+  grpcListenAddr: 0.0.0.0:3593
+storage:
+  driver: disk
+  disk:
+    directory: /policies
+    watchForChanges: true
