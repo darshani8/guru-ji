@@ -1,6 +1,5 @@
 import asyncio
 import importlib.util
-import threading
 import unittest
 from unittest import mock
 
@@ -134,24 +133,34 @@ class PlatformRouteTests(unittest.TestCase):
 
     def test_blocking_store_and_object_store_work_runs_off_the_event_loop(self):
         platform = app.state.runtime.platform
-        loop_thread: list[int] = []
-        seen: dict[str, tuple[bool, int]] = {}
+        seen: dict[str, tuple[bool, asyncio.AbstractEventLoop | None]] = {}
 
         def record(name):
             def _mark():
                 try:
-                    asyncio.get_running_loop()
+                    loop = asyncio.get_running_loop()
                     on_loop = True
                 except RuntimeError:
+                    loop = None
                     on_loop = False
-                seen[name] = (on_loop, threading.get_ident())
+                seen[name] = (on_loop, loop)
             return _mark
 
-        real_list_jobs = platform.store.list_jobs
+        # Captures the loop that handles each ingestion request, on the request loop itself.
+        from app.api.routes import ingestion as ingestion_routes
 
-        def list_jobs_probe(*args, **kwargs):
-            loop_thread.append(threading.get_ident())
-            return real_list_jobs(*args, **kwargs)
+        real_require = ingestion_routes.require_principal
+        request_loops: list[asyncio.AbstractEventLoop] = []
+
+        def require_probe(request, *args, **kwargs):
+            request_loops.append(asyncio.get_running_loop())
+            return real_require(request, *args, **kwargs)
+
+        # Positive control: the notifications inbox is called synchronously by its
+        # route, so the probe must observe a running loop there.
+        def inbox_probe(service, principal, institution_id, *, limit=50, unread_only=False):
+            record("inbox")()
+            return []
 
         def ping_probe():
             record("ping")()
@@ -170,21 +179,25 @@ class PlatformRouteTests(unittest.TestCase):
             record("report_fetch")()
             return {"object_key": f"{institution_id}/reports/{report_id}.csv", "format": "csv"}, b"a,b\n"
 
-        with mock.patch.object(platform.store, "list_jobs", list_jobs_probe), mock.patch.object(platform.store, "ping", ping_probe), \
+        with mock.patch.object(platform.store, "ping", ping_probe), \
                 mock.patch.object(type(platform.ingestion), "commit", commit_probe), mock.patch.object(type(platform.ingestion), "apply_mapping", apply_mapping_probe), \
-                mock.patch.object(type(platform.reports), "fetch", fetch_probe):
-            self.assertEqual(self.client.get("/v1/ingestion/jobs", headers=self.principal).status_code, 200)
+                mock.patch.object(type(platform.reports), "fetch", fetch_probe), mock.patch.object(type(platform.notifications), "inbox", inbox_probe), mock.patch.object(ingestion_routes, "require_principal", require_probe):
+            self.assertEqual(self.client.get("/v1/notifications", headers=self.principal).status_code, 200)
             self.assertEqual(self.client.get("/v1/health/ready").json()["status"], "ready")
             self.assertEqual(self.client.post(f"/v1/ingestion/jobs/{self.job_id}/commit", headers=self.principal).status_code, 200)
             self.assertEqual(self.client.post(f"/v1/ingestion/jobs/{self.job_id}/mapping", headers=self.principal, json={"mapping": {}, "entity": "student"}).status_code, 200)
             self.assertEqual(self.client.get("/v1/reports/r1/download", headers=self.principal).status_code, 200)
-        self.assertEqual(len(loop_thread), 1)
+        # Thread identities are not compared: the test client runs each request's
+        # event loop in a fresh thread, so identities get reused. A worker thread
+        # never has a running loop, which is the property that matters.
+        self.assertTrue(seen["inbox"][0], "the control probe did not observe the event loop")
         for name in ("ping", "commit", "report_fetch"):
-            on_loop, ident = seen[name]
+            on_loop, _ident = seen[name]
             self.assertFalse(on_loop, f"{name} ran on the event loop")
-            self.assertNotEqual(ident, loop_thread[0], f"{name} ran on the event-loop thread")
-        # apply_mapping runs on its own loop inside a pool thread, never on the request loop's thread.
-        self.assertNotEqual(seen["apply_mapping"][1], loop_thread[0])
+        # apply_mapping runs to completion on its own loop inside a pool thread, never on the request loop.
+        on_loop, loop = seen["apply_mapping"]
+        self.assertTrue(on_loop, "apply_mapping did not run under its own loop")
+        self.assertIsNot(loop, request_loops[-1], "apply_mapping ran on the request loop")
 
 
 if __name__ == "__main__":
