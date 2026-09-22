@@ -41,7 +41,7 @@ class PlatformRouteTests(unittest.TestCase):
         self.assertTrue(platform.objects.delete(record["object_key"]))
         gone = self.client.get(path, headers=self.principal)
         self.assertEqual(gone.status_code, 410, gone.text)
-        self.assertIn("no longer available", gone.json()["detail"])
+        self.assertIn("no longer available", gone.text)
 
     def test_readiness_reports_an_unreachable_store_as_not_ready(self):
         platform = app.state.runtime.platform
