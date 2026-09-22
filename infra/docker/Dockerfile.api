@@ -1,31 +1,40 @@
-FROM python:3.12-slim
+# Build stage: resolve the locked dependency set (with the extras production
+# needs) into a virtual environment. The runtime stage copies only that
+# environment and the sources, so uv, pip caches and build tooling never ship
+# in the image; a smaller image pulls and starts faster on small nodes.
+FROM python:3.12-slim AS builder
 
 WORKDIR /app
 
 # Matches the uv series the CI workflows pin, so the lockfile is read identically.
 RUN pip install --no-cache-dir "uv>=0.6,<0.7"
 
-ENV PYTHONPATH=/app/apps/api \
-    UV_PROJECT_ENVIRONMENT=/app/.venv \
+ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
     UV_COMPILE_BYTECODE=1 \
-    UV_LINK_MODE=copy \
-    PATH=/app/.venv/bin:$PATH
+    UV_LINK_MODE=copy
 
 # Runtime dependencies resolve from uv.lock rather than a hand-copied list, so the
 # image gets exactly what CI tested and cannot drift when a bound is widened.
-# Copied ahead of the sources so the dependency layer caches across code changes.
-# The aws extra (boto3) is required by the S3 object store, the SQS queue, SES
-# and Textract that production validation mandates for the data platform; the
-# ingest extra adds PDF and legacy .xls parsing for uploads.
+# The aws extra (S3, SQS, SES, Textract) and the ingest extra (PDF and legacy
+# Excel readers) are what production settings require.
 COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-dev --no-install-project --extra aws --extra ingest
 
+FROM python:3.12-slim
+
+WORKDIR /app
+
+ENV PYTHONPATH=/app/apps/api \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PATH=/app/.venv/bin:$PATH
+
+COPY --from=builder /app/.venv /app/.venv
 COPY apps ./apps
 COPY migrations ./migrations
 COPY scripts ./scripts
-RUN mkdir -p /app/data/objects && chown -R 10001:10001 /app/data
-
-RUN useradd --system --create-home --uid 10001 guruji
+RUN useradd --system --create-home --uid 10001 guruji \
+    && mkdir -p /app/data/objects \
+    && chown -R 10001:10001 /app/data
 USER guruji
 
 EXPOSE 8000
