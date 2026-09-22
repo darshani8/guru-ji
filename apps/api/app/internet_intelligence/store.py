@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
+from ..persistence.schema_tools import apply_schema, begin_migration, existing_policies, row_level_security_state, tenant_isolation_statements
 from ..persistence.sql_backend import SqlBackend, open_backend
 from .profile import InstitutionProfile
 
@@ -105,25 +106,26 @@ _STATEMENTS: tuple[str, ...] = (
 _TENANT_TABLES = ("internet_documents", "monitoring_runs", "monitoring_events", "intelligence_reports")
 
 
-def _rls() -> tuple[str, ...]:
-    statements: list[str] = [
-        # Earlier revisions placed institution_profiles under forced RLS, which hid
-        # every profile from the tenant-less scheduler; undo that idempotently so an
-        # existing database converges on the same shape as a fresh one.
-        "ALTER TABLE institution_profiles NO FORCE ROW LEVEL SECURITY",
-        "ALTER TABLE institution_profiles DISABLE ROW LEVEL SECURITY",
-        "DROP POLICY IF EXISTS institution_profiles_tenant_isolation ON institution_profiles",
-    ]
-    for table in _TENANT_TABLES:
-        policy = f"{table}_tenant_isolation"
-        statements.append(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
-        statements.append(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
-        statements.append(
-            "DO $$ BEGIN "
-            f"IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = '{table}' AND policyname = '{policy}') THEN "
-            f"CREATE POLICY {policy} ON {table} USING (institution_id = current_setting('app.institution_id', true)) "
-            "WITH CHECK (institution_id = current_setting('app.institution_id', true)); END IF; END $$"
-        )
+def _rls(state: Mapping[str, tuple[bool, bool]], policies: Iterable[tuple[str, str]]) -> tuple[str, ...]:
+    """Row-level security statements the catalog shows are still missing.
+
+    Every ``ALTER TABLE`` takes an ACCESS EXCLUSIVE lock even when it changes
+    nothing, and the previous release is still serving while a new one
+    starts, so a converged database gets no statement at all.
+    """
+
+    statements: list[str] = []
+    # Earlier revisions placed institution_profiles under forced RLS, which hid
+    # every profile from the tenant-less scheduler; undo that so an existing
+    # database converges on the same shape as a fresh one.
+    enabled, forced = state.get("institution_profiles", (False, False))
+    if forced:
+        statements.append("ALTER TABLE institution_profiles NO FORCE ROW LEVEL SECURITY")
+    if enabled:
+        statements.append("ALTER TABLE institution_profiles DISABLE ROW LEVEL SECURITY")
+    if ("institution_profiles", "institution_profiles_tenant_isolation") in set(policies):
+        statements.append("DROP POLICY IF EXISTS institution_profiles_tenant_isolation ON institution_profiles")
+    statements.extend(tenant_isolation_statements(_TENANT_TABLES, state=state, policies=policies))
     return tuple(statements)
 
 
@@ -148,10 +150,17 @@ class IntelligenceStore:
     def __init__(self, database_url: str | None = None, backend: SqlBackend | None = None) -> None:
         self.backend = backend or open_backend(database_url)
         self.backend_name = self.backend.dialect
-        self.backend.executescript(_STATEMENTS)
-        if self.backend.dialect == "postgresql":
-            self.backend.executescript(_rls())
+        self._migrate()
+
+    def _migrate(self) -> None:
+        # One transaction under lock_timeout, issuing DDL only for what the
+        # catalog shows missing; see persistence.schema_tools.
         with self.backend.transaction():
+            begin_migration(self.backend)
+            apply_schema(self.backend, _STATEMENTS)
+            if self.backend.dialect == "postgresql":
+                for statement in _rls(row_level_security_state(self.backend), existing_policies(self.backend)):
+                    self.backend.execute(statement)
             self.backend.execute("INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?) ON CONFLICT (version) DO NOTHING", (SCHEMA_VERSION, now_iso()))
 
     def close(self) -> None:

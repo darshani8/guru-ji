@@ -11,6 +11,7 @@ from uuid import uuid4
 from ..domain.audit import AuditEvent, AuditOutcome
 from ..domain.source_health import Freshness, SourceHealth, SourceHealthStatus
 from .control_plane import AnswerEnvelopeMetadata, ModelAttemptMetadata, OutboxRecord, now_utc
+from .schema_tools import MIGRATION_LOCK_TIMEOUT
 from .sql_backend import open_postgres_connection
 
 
@@ -542,7 +543,7 @@ class PostgresControlStore:
     # How long start-up may wait for a table lock before failing loudly. A
     # hang here is invisible (no log line, health check never answers), an
     # error is not.
-    MIGRATION_LOCK_TIMEOUT = "15s"
+    MIGRATION_LOCK_TIMEOUT = MIGRATION_LOCK_TIMEOUT
 
     # Columns added after their table first shipped and the indexes, each run
     # only when the catalog shows it missing: ``ADD COLUMN IF NOT EXISTS`` and
