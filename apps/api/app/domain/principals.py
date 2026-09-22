@@ -12,7 +12,12 @@ class PrincipalType(StrEnum):
     ANONYMOUS = "anonymous"
     STUDENT = "student"
     FACULTY = "faculty"
+    STAFF = "staff"
+    HOD = "hod"
+    PRINCIPAL = "principal"
+    INSTITUTION_ADMIN = "institution_admin"
     MAIN_ADMIN = "main_admin"
+    PLATFORM_SUPER_ADMIN = "platform_super_admin"
     SYSTEM = "system"
 
 
@@ -25,6 +30,25 @@ class Capability(StrEnum):
     RUN_BRIEFING = "briefing:run"
     VIEW_BRIEFING_HISTORY = "briefing:view_history"
     MANAGE_ACCESS = "access:manage"
+    # Institutional data platform capabilities. Each maps to one tool group in
+    # the tool gateway; none of them is implied by another.
+    AGENT_COMMAND = "agent:command"
+    DATA_INGEST = "data:ingest"
+    DATA_REVIEW = "data:review"
+    STUDENTS_READ = "students:read"
+    STUDENTS_READ_CONTACT = "students:read_contact"
+    ATTENDANCE_READ = "attendance:read"
+    FEES_READ = "fees:read"
+    FACULTY_READ = "faculty:read"
+    EXAMS_READ = "exams:read"
+    DOCUMENTS_READ = "documents:read"
+    DOCUMENTS_MANAGE = "documents:manage"
+    REPORTS_GENERATE = "reports:generate"
+    ACTIONS_EMAIL = "actions:email"
+    ACTIONS_NOTIFY = "actions:notify"
+    RECORDS_WRITE = "records:write"
+    INTELLIGENCE_READ = "intelligence:read"
+    INTELLIGENCE_MANAGE = "intelligence:manage"
 
 
 @dataclass(frozen=True, slots=True)

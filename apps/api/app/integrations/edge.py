@@ -14,21 +14,17 @@ from urllib.parse import urlparse
 
 import httpx
 
+from ..auth.roles import ROLE_ALIASES, ROLE_CAPABILITIES
 from ..domain.principals import Capability, InstitutionScope, Principal, PrincipalType
 
 
-_ROLE_TYPES = {
-    "student": PrincipalType.STUDENT,
-    "faculty": PrincipalType.FACULTY,
-    "main_admin": PrincipalType.MAIN_ADMIN,
-    "admin": PrincipalType.MAIN_ADMIN,
-    "system": PrincipalType.SYSTEM,
-}
+_ROLE_TYPES = ROLE_ALIASES
+# LMS edge sessions receive the shared role grant plus source metadata, which the
+# LMS integration exposes to every authenticated member.
 _CAPABILITIES_BY_ROLE = {
-    PrincipalType.STUDENT: frozenset({Capability.ASK_READ_ONLY, Capability.START_VOICE_SESSION, Capability.VIEW_SOURCE_METADATA}),
-    PrincipalType.FACULTY: frozenset({Capability.ASK_READ_ONLY, Capability.START_VOICE_SESSION, Capability.VIEW_SOURCE_METADATA, Capability.RUN_BRIEFING}),
-    PrincipalType.MAIN_ADMIN: frozenset({Capability.ASK_READ_ONLY, Capability.START_VOICE_SESSION, Capability.VIEW_SOURCE_METADATA, Capability.RUN_BRIEFING, Capability.VIEW_BRIEFING_HISTORY, Capability.MANAGE_ACCESS}),
-    PrincipalType.SYSTEM: frozenset(Capability),
+    role: grant | frozenset({Capability.VIEW_SOURCE_METADATA})
+    for role, grant in ROLE_CAPABILITIES.items()
+    if role is not PrincipalType.ANONYMOUS
 }
 
 

@@ -8,7 +8,7 @@ resourcePolicy:
       roles: ["*"]
     - actions: ["retrieve", "list", "search", "mcp.tool.call"]
       effect: EFFECT_ALLOW
-      roles: ["main_admin", "faculty", "student", "system"]
+      roles: ["platform_super_admin", "institution_admin", "main_admin", "principal", "hod", "faculty", "staff", "student", "system"]
       condition:
         match:
           all:

@@ -1,0 +1,153 @@
+import unittest
+
+from app.institution_data.models import CanonicalRecord
+from app.normalization.canonical import ATTENDANCE, CANONICAL_ENTITIES, STUDENT
+from app.normalization.cleaning import clean_record, normalize_date, normalize_person_name, normalize_phone, normalize_program, normalize_semester
+from app.normalization.deduplication import find_duplicates
+from app.normalization.mapping import MappingEngine, apply_mapping, header_signature
+from app.normalization.validation import identifier_pattern, ocr_suspicion, validate_record
+
+
+class _JsonModel:
+    provider_id = "fake"
+    model_id = "fake"
+
+    def __init__(self, reply: str):
+        self.reply = reply
+        self.prompts: list[str] = []
+
+    async def complete(self, prompt: str, *, max_tokens: int = 800) -> str:
+        self.prompts.append(prompt)
+        return self.reply
+
+
+class MappingTests(unittest.IsolatedAsyncioTestCase):
+    async def test_student_headers_map_with_confidence_and_review(self):
+        engine = MappingEngine()
+        headers = ["Student Name", "USN", "Course", "Sem", "Phone", "Email ID", "Father Name", "DOB", "Remarks"]
+        samples = {"USN": ["1MS23MBA001"], "Phone": ["9876543210"], "Email ID": ["a@b.com"], "DOB": ["12/05/2003"]}
+        proposal = await engine.propose(headers, samples)
+        self.assertEqual(proposal.entity, "student")
+        mapped = proposal.mapped()
+        self.assertEqual(mapped["USN"], "student_id")
+        self.assertEqual(mapped["Course"], "program")
+        self.assertEqual(mapped["Father Name"], "guardian_name")
+        self.assertEqual(mapped["DOB"], "date_of_birth")
+        self.assertEqual(proposal.unmapped(), ("Remarks",))
+        self.assertEqual(proposal.missing_required(), ())
+
+    async def test_abbreviated_and_conflicting_headers_go_to_review(self):
+        engine = MappingEngine()
+        proposal = await engine.propose(["Name", "ID", "Prog", "Mobile", "Mobile No"], {"Mobile": ["9876543210"], "Mobile No": ["9876543211"]}, entity_hint="student")
+        review = {item.source_header for item in proposal.review_required()}
+        self.assertIn("Prog", review)
+        self.assertTrue({"Mobile", "Mobile No"} & review, "two headers claiming phone must not both auto-apply")
+        self.assertIn("Prog", [item.source_header for item in proposal.mappings if item.method == "heuristic"])
+
+    async def test_entity_detection_for_attendance_fee_and_faculty(self):
+        engine = MappingEngine()
+        attendance = await engine.propose(["USN", "Subject Code", "Total Classes", "Attended", "Attendance %", "Month"])
+        self.assertEqual(attendance.entity, "attendance")
+        self.assertEqual(attendance.mapped()["Total Classes"], "classes_held")
+        fee = await engine.propose(["USN", "Fee Type", "Total Fee", "Paid", "Balance", "Due Date"])
+        self.assertEqual(fee.entity, "fee")
+        faculty = await engine.propose(["Employee ID", "Faculty Name", "Designation", "Department", "Qualification"])
+        self.assertEqual(faculty.entity, "faculty")
+
+    async def test_model_suggestions_are_validated_and_never_auto_applied(self):
+        model = _JsonModel('{"Prog": {"field": "program", "confidence": 0.99}, "Remarks": {"field": "made_up_field", "confidence": 0.9}}')
+        engine = MappingEngine(model=model)
+        proposal = await engine.propose(["Name", "ID", "Prog", "Remarks"], entity_hint="student")
+        prog = next(item for item in proposal.mappings if item.source_header == "Prog")
+        self.assertEqual(prog.canonical_field, "program")
+        self.assertEqual(prog.method, "model_suggestion")
+        self.assertLess(prog.confidence, engine.threshold)
+        remarks = next(item for item in proposal.mappings if item.source_header == "Remarks")
+        self.assertIsNone(remarks.canonical_field)
+        self.assertTrue(model.prompts and "made_up_field" not in "".join(model.prompts))
+
+    async def test_saved_profile_short_circuits_mapping(self):
+        engine = MappingEngine()
+        proposal = await engine.propose(["A", "B"], entity_hint="student", saved_profile={"A": "student_id", "B": "name", "C": "phone"})
+        self.assertTrue(proposal.profile_applied)
+        self.assertEqual(proposal.mapped(), {"A": "student_id", "B": "name"})
+        self.assertEqual(header_signature(["B", "a "]), "a|b")
+
+    def test_apply_mapping_preserves_unmapped_columns_and_combines_names(self):
+        canonical, extras = apply_mapping(STUDENT, {"First": "first_name", "Last": "last_name", "ID": "student_id"}, {"First": "Ravi", "Last": "Kumar", "ID": "X1", "Hobby": "chess", "Blank": ""})
+        self.assertEqual(canonical["name"], "Ravi Kumar")
+        self.assertEqual(extras, {"Hobby": "chess"})
+
+
+class CleaningAndValidationTests(unittest.TestCase):
+    def test_safe_normalizations(self):
+        self.assertEqual(normalize_person_name("RAVI  KUMAR")[0], "Ravi Kumar")
+        self.assertEqual(normalize_person_name("Ravi Kumar")[0], "Ravi Kumar")
+        self.assertEqual(normalize_program("Master of Business Administration")[0], "MBA")
+        self.assertEqual(normalize_program("m.b.a")[0], "MBA")
+        self.assertEqual(normalize_semester("Sem III")[0], 3)
+        self.assertEqual(normalize_semester("third")[0], 3)
+        self.assertIsNone(normalize_semester("99")[0])
+        self.assertEqual(normalize_phone("98765 43210")[0], "9876543210")
+        self.assertEqual(normalize_phone("+91 98765-43210")[0], "+919876543210")
+        self.assertEqual(normalize_date("12/05/2003"), ("2003-05-12", True, True))
+        self.assertEqual(normalize_date("2003-05-12"), ("2003-05-12", False, False))
+        self.assertEqual(normalize_date("15 Jan 2024"), ("2024-01-15", True, False))
+        self.assertEqual(normalize_date(45000)[0], "2023-03-15")
+        self.assertIsNone(normalize_date("not a date")[0])
+
+    def test_clean_record_derives_attendance_and_fee_fields_without_inventing_values(self):
+        cleaned, notes, issues = clean_record(ATTENDANCE, {"student_id": " mba001 ", "classes_held": "20", "classes_absent": "5"})
+        self.assertEqual(cleaned["classes_attended"], 15)
+        self.assertEqual(cleaned["attendance_percent"], 75.0)
+        self.assertIn("attendance_percent:derived_from_counts", notes)
+        cleaned, _, issues = clean_record(STUDENT, {"student_id": "X", "name": "A", "phone": "N/A", "semester": "abc"})
+        self.assertIsNone(cleaned["phone"])
+        self.assertIsNone(cleaned["semester"])
+        self.assertEqual([item["code"] for item in issues], ["invalid_semester"])
+
+    def test_validation_severity_and_ocr_suspicion(self):
+        issues = validate_record(STUDENT, {"student_id": "", "name": "", "phone": "12", "email": "bad"})
+        codes = {item["code"]: item["severity"] for item in issues}
+        self.assertEqual(codes["missing_required"], "error")
+        self.assertEqual(codes["invalid_phone"], "warning")
+        self.assertEqual(codes["invalid_email"], "warning")
+        pattern = identifier_pattern(["1MS23MBA001", "1MS23MBA002", "1MS23MBA003", "IMS23MBA00I"])
+        self.assertEqual(pattern, "9AA99AAA999")
+        suspicion = ocr_suspicion("IMS23MBA00I", pattern)
+        self.assertEqual(suspicion["suggested"], "1MS23MBA001")
+        issues = validate_record(ATTENDANCE, {"student_id": "X", "classes_held": 10, "classes_attended": 12})
+        self.assertIn("attended_exceeds_held", [item["code"] for item in issues])
+        self.assertIn("low_ocr_confidence", [item["code"] for item in validate_record(STUDENT, {"student_id": "X1", "name": "A"}, ocr=True, ocr_confidence=0.5)])
+
+    def test_canonical_model_is_consistent(self):
+        for entity in CANONICAL_ENTITIES.values():
+            self.assertTrue(entity.required_fields())
+            for key in entity.natural_key:
+                entity.field(key)
+
+
+class DeduplicationTests(unittest.TestCase):
+    def test_deterministic_keys_then_fuzzy_person_matching(self):
+        records = [
+            CanonicalRecord("student", {"student_id": "MBA001", "name": "Ravi Kumar", "phone": "9876543210"}),
+            CanonicalRecord("student", {"student_id": "MBA001", "name": "Ravi Kumar", "phone": "9876543210"}),
+            CanonicalRecord("student", {"student_id": "MBA001", "name": "Ravi Kumar", "phone": "1111111111"}),
+            CanonicalRecord("student", {"student_id": "MBA009", "name": "Ravi Kumar", "phone": "9876543210", "date_of_birth": "2003-05-12"}),
+            CanonicalRecord("student", {"student_id": "MBA010", "name": "Ravi Kumar", "phone": "2222222222"}),
+        ]
+        existing = {"mba002": {"name": "Ravi Kumar", "date_of_birth": "2003-05-12", "phone": "9876543210"}}
+        candidates, actions = find_duplicates(records, existing)
+        self.assertEqual(actions[0], "insert")
+        self.assertEqual(actions[1], "duplicate_in_batch")
+        self.assertEqual(actions[2], "conflict_in_batch")
+        kinds = [item.kind for item in candidates]
+        self.assertIn("exact_key", kinds)
+        self.assertIn("conflicting_key", kinds)
+        probable = [item for item in candidates if item.kind == "probable_person"]
+        self.assertTrue(any(item.record_key == "mba002" for item in probable), "same person under a different id must be flagged against existing data")
+        self.assertFalse(any(item.evidence.get("existing_record_key") == "mba002" and "MBA010" in item.left_locator for item in probable))
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -101,7 +101,11 @@ class CerbosPolicyDecisionPoint(PolicyDecisionPoint):
         resource_type: str,
         resource_id: str,
         requested_scope: InstitutionScope,
+        required_capability: Capability | None = None,
     ) -> dict[str, object]:
+        resource_attributes: dict[str, object] = {"institution_scope": _scope_payload(requested_scope)}
+        if required_capability is not None:
+            resource_attributes["required_capability"] = required_capability.value
         return {
             "requestId": f"guru-{uuid4().hex}",
             "principal": {
@@ -119,7 +123,7 @@ class CerbosPolicyDecisionPoint(PolicyDecisionPoint):
                     "resource": {
                         "id": resource_id,
                         "kind": resource_type,
-                        "attr": {"institution_scope": _scope_payload(requested_scope)},
+                        "attr": resource_attributes,
                     },
                     "actions": [action],
                 },
@@ -265,7 +269,7 @@ class CerbosPolicyDecisionPoint(PolicyDecisionPoint):
                 principal=principal, action=action, resource_type=resource_type, resource_id=resource_id,
                 requested_scope=requested_scope, reason=DenialReason.MISSING_CAPABILITY, decision_id=decision_id,
             )
-        if action not in {"list", "search", "retrieve", "mcp.tool.call"}:
+        if action not in {"list", "search", "retrieve", "mcp.tool.call", "execute", "write", "high_risk"}:
             return self._denied(
                 principal=principal, action=action, resource_type=resource_type, resource_id=resource_id,
                 requested_scope=requested_scope, reason=DenialReason.UNKNOWN_ACTION, decision_id=decision_id,
@@ -281,6 +285,7 @@ class CerbosPolicyDecisionPoint(PolicyDecisionPoint):
                         resource_type=resource_type,
                         resource_id=resource_id,
                         requested_scope=requested_scope,
+                        required_capability=required_capability,
                     )),
                 )
                 response.raise_for_status()

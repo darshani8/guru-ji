@@ -77,7 +77,7 @@ class LocalPolicyDecisionPoint:
     """Small fail-closed PDP used for development and isolated tests."""
 
     policy_version = "guru-local-v1"
-    _allowed_actions = frozenset({"list", "search", "retrieve", "mcp.tool.call"})
+    _allowed_actions = frozenset({"list", "search", "retrieve", "mcp.tool.call", "execute", "write", "high_risk"})
 
     def evaluate(
         self,

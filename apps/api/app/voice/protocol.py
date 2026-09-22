@@ -21,6 +21,9 @@ class UtteranceMessage(VoiceMessageBase):
     text: str = Field(min_length=1, max_length=12_000)
     conversation_id: str | None = Field(default=None, min_length=1, max_length=128)
     client_message_id: str | None = Field(default=None, min_length=1, max_length=128)
+    # "assistant" keeps the read-only connector path; "agent" routes the final
+    # transcript through the master agent so voice can perform work.
+    mode: Literal["assistant", "agent"] | None = None
 
 
 class PingMessage(VoiceMessageBase):

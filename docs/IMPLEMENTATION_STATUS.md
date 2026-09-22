@@ -56,6 +56,17 @@ All six roadmap phases now have code, contracts, tests, and deployment reference
 - Added LiveKit/Pipecat-style event normalization that carries lifecycle/transcript metadata only and never persists raw audio.
 - Existing browser voice transport remains the safe local reference path; provider-backed WebRTC/STT/TTS is intentionally an external deployment adapter.
 
+### P7 — institutional data platform
+
+- Ingestion of Excel, CSV, JSON, Word, PDF, images/scans (OCR adapters), Google Sheets, and existing databases into an intermediate representation with lineage.
+- AI mapping engine with deterministic scoring, entity detection, human review for uncertain mappings, validated model suggestions, and reusable approved profiles.
+- Safe cleaning, validation with OCR suspicion, deterministic-then-fuzzy deduplication with human review, and re-import reports (new / updated / unchanged / skipped).
+- Canonical tenant-isolated database (SQLite locally, PostgreSQL with row-level security in deployment), object storage (memory/local/S3), and a background job queue (inline/thread/SQS).
+- Unified data access service with role-based data minimisation, a tool/policy gateway with closed argument schemas and single-use approvals for high-risk actions, and 26 registered platform tools.
+- Master agent with deterministic and model planners, data/action/internet specialists, step bindings, verification, audit, and background execution with notifications; voice can route transcripts through the agent.
+- Document intelligence (chunking, embeddings, classification-aware retrieval, cited answers) and internet intelligence (profiles, query generation, robots-aware fetching, entity resolution, relevance/date filters, evidence store, monitoring digests and alerts).
+- Routes, OpenAPI contract, Cerbos policy for platform tools, platform console page, worker and monitor scripts, compose services, and tests for every layer. See `docs/PLATFORM_BLUEPRINT.md`.
+
 ## Validation completed in this export
 
 - `102 passed` in the full pytest suite, including the new all-phase tests.

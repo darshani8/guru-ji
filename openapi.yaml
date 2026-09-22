@@ -1,7 +1,8 @@
 openapi: 3.1.0
 info:
   title: guru-ji-api
-  description: Policy-bound, read-only institutional intelligence
+  description: 'AI-powered institutional intelligence platform: ingestion, canonical
+    data, policy-bound agents, and internet intelligence'
   version: 0.1.0
 paths:
   /v1/health/live:
@@ -87,16 +88,7 @@ paths:
       tags:
       - chat
       summary: Chat Stream
-      description: 'Return the same policy-bound answer through a stable SSE envelope.
-
-
-        The current answer envelope is bounded, so it emits one complete answer
-
-        event followed by ``done``. The optional model provider is resolved before
-
-        streaming; future transport chunking must not bypass authorization, audit,
-
-        provenance, or the final response contract.'
+      description: Return the policy-bound answer through a validated SSE event sequence.
       operationId: chat_stream_v1_chat_stream_post
       requestBody:
         content:
@@ -301,8 +293,2080 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /v1/ingestion/entities:
+    get:
+      tags:
+      - ingestion
+      summary: Describe the canonical data model files are mapped to
+      operationId: list_entities_v1_ingestion_entities_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response List Entities V1 Ingestion Entities Get
+  /v1/ingestion/uploads:
+    post:
+      tags:
+      - ingestion
+      summary: Upload an existing institutional file (Excel, CSV, PDF, Word, scan,
+        JSON)
+      operationId: upload_file_v1_ingestion_uploads_post
+      requestBody:
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Body_upload_file_v1_ingestion_uploads_post'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Upload File V1 Ingestion Uploads Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/ingestion/sheets:
+    post:
+      tags:
+      - ingestion
+      summary: Import a shared Google Sheet by URL
+      operationId: import_sheet_v1_ingestion_sheets_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SheetImportBody'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Import Sheet V1 Ingestion Sheets Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/ingestion/jobs:
+    get:
+      tags:
+      - ingestion
+      summary: List ingestion jobs
+      operationId: list_jobs_v1_ingestion_jobs_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: status
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Status
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 50
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response List Jobs V1 Ingestion Jobs Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/ingestion/jobs/{job_id}:
+    get:
+      tags:
+      - ingestion
+      summary: Inspect an ingestion job and its import report
+      operationId: get_job_v1_ingestion_jobs__job_id__get
+      parameters:
+      - name: job_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Job Id
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Get Job V1 Ingestion Jobs  Job Id  Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/ingestion/jobs/{job_id}/records:
+    get:
+      tags:
+      - ingestion
+      summary: Staged rows for a job with their normalization and issues
+      operationId: job_records_v1_ingestion_jobs__job_id__records_get
+      parameters:
+      - name: job_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Job Id
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: status
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Status
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 200
+          title: Limit
+      - name: offset
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 0
+          title: Offset
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Job Records V1 Ingestion Jobs  Job Id  Records Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/ingestion/jobs/{job_id}/mapping:
+    post:
+      tags:
+      - ingestion
+      summary: Approve or correct the proposed column mapping
+      operationId: decide_mapping_v1_ingestion_jobs__job_id__mapping_post
+      parameters:
+      - name: job_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Job Id
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MappingDecisionBody'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Decide Mapping V1 Ingestion Jobs  Job Id  Mapping
+                  Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/ingestion/jobs/{job_id}/commit:
+    post:
+      tags:
+      - ingestion
+      summary: Import the staged rows into the canonical database
+      operationId: commit_job_v1_ingestion_jobs__job_id__commit_post
+      parameters:
+      - name: job_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Job Id
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Commit Job V1 Ingestion Jobs  Job Id  Commit Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/ingestion/jobs/{job_id}/report:
+    get:
+      tags:
+      - ingestion
+      summary: Import report with lineage counts
+      operationId: job_report_v1_ingestion_jobs__job_id__report_get
+      parameters:
+      - name: job_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Job Id
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Job Report V1 Ingestion Jobs  Job Id  Report Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/ingestion/reviews:
+    get:
+      tags:
+      - ingestion
+      summary: Pending human-review items (mappings, duplicates)
+      operationId: list_reviews_v1_ingestion_reviews_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: job_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Job Id
+      - name: status
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: pending
+          title: Status
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 100
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response List Reviews V1 Ingestion Reviews Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/ingestion/reviews/{review_id}:
+    post:
+      tags:
+      - ingestion
+      summary: Resolve a duplicate review item
+      operationId: resolve_review_v1_ingestion_reviews__review_id__post
+      parameters:
+      - name: review_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Review Id
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReviewDecisionBody'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Resolve Review V1 Ingestion Reviews  Review Id  Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/data/summary:
+    get:
+      tags:
+      - data
+      summary: Institution headline indicators
+      operationId: summary_v1_data_summary_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Summary V1 Data Summary Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/data/students:
+    get:
+      tags:
+      - data
+      summary: Find students with minimal fields
+      operationId: students_v1_data_students_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: program
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Program
+      - name: semester
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Semester
+      - name: department
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Department
+      - name: section
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Section
+      - name: name_contains
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Name Contains
+      - name: status
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Status
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 100
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Students V1 Data Students Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/data/students/count:
+    get:
+      tags:
+      - data
+      summary: Count students
+      operationId: students_count_v1_data_students_count_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: program
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Program
+      - name: semester
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Semester
+      - name: department
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Department
+      - name: status
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Status
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Students Count V1 Data Students Count Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/data/students/{student_id}:
+    get:
+      tags:
+      - data
+      summary: One student record
+      operationId: student_v1_data_students__student_id__get
+      parameters:
+      - name: student_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Student Id
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Student V1 Data Students  Student Id  Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/data/attendance/low:
+    get:
+      tags:
+      - data
+      summary: Students below an attendance threshold
+      operationId: attendance_low_v1_data_attendance_low_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: threshold
+        in: query
+        required: false
+        schema:
+          type: number
+          default: 75.0
+          title: Threshold
+      - name: program
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Program
+      - name: semester
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Semester
+      - name: department
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Department
+      - name: period
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Period
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 100
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Attendance Low V1 Data Attendance Low Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/data/attendance/summary:
+    get:
+      tags:
+      - data
+      summary: Attendance aggregates
+      operationId: attendance_summary_v1_data_attendance_summary_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: program
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Program
+      - name: semester
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Semester
+      - name: department
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Department
+      - name: period
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Period
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Attendance Summary V1 Data Attendance Summary Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/data/fees/pending:
+    get:
+      tags:
+      - data
+      summary: Students with pending fees
+      operationId: fees_pending_v1_data_fees_pending_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: program
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Program
+      - name: semester
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Semester
+      - name: academic_year
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Academic Year
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 100
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Fees Pending V1 Data Fees Pending Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/data/fees/summary:
+    get:
+      tags:
+      - data
+      summary: Fee collection summary
+      operationId: fees_summary_v1_data_fees_summary_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: program
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Program
+      - name: semester
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Semester
+      - name: academic_year
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Academic Year
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Fees Summary V1 Data Fees Summary Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/data/exams/summary:
+    get:
+      tags:
+      - data
+      summary: Exam performance summary
+      operationId: exams_summary_v1_data_exams_summary_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: program
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Program
+      - name: semester
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Semester
+      - name: course_code
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Course Code
+      - name: exam_name
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Exam Name
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Exams Summary V1 Data Exams Summary Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/data/programs:
+    get:
+      tags:
+      - data
+      summary: Programs offered
+      operationId: programs_v1_data_programs_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Programs V1 Data Programs Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/data/departments:
+    get:
+      tags:
+      - data
+      summary: Departments and heads
+      operationId: departments_v1_data_departments_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Departments V1 Data Departments Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/data/faculty:
+    get:
+      tags:
+      - data
+      summary: Faculty directory
+      operationId: faculty_v1_data_faculty_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: department
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Department
+      - name: designation
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Designation
+      - name: name_contains
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Name Contains
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 100
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Faculty V1 Data Faculty Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/data/events:
+    get:
+      tags:
+      - data
+      summary: Upcoming events
+      operationId: events_v1_data_events_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: days
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 30
+          title: Days
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 50
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Events V1 Data Events Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/data/admissions/summary:
+    get:
+      tags:
+      - data
+      summary: Admission applications by status
+      operationId: admissions_v1_data_admissions_summary_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: program
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Program
+      - name: academic_year
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Academic Year
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Admissions V1 Data Admissions Summary Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/agent/commands:
+    post:
+      tags:
+      - agent
+      summary: Run an institutional command through the master agent
+      operationId: run_command_v1_agent_commands_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CommandBody'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Run Command V1 Agent Commands Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/agent/tools:
+    get:
+      tags:
+      - agent
+      summary: Tools available to the caller through the gateway
+      operationId: list_tools_v1_agent_tools_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response List Tools V1 Agent Tools Get
+  /v1/agent/approvals:
+    get:
+      tags:
+      - agent
+      summary: Pending high-risk actions awaiting confirmation
+      operationId: list_approvals_v1_agent_approvals_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: status
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: pending
+          title: Status
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response List Approvals V1 Agent Approvals Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/agent/approvals/{approval_id}:
+    post:
+      tags:
+      - agent
+      summary: Confirm or reject a high-risk action
+      operationId: decide_approval_v1_agent_approvals__approval_id__post
+      parameters:
+      - name: approval_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Approval Id
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApprovalDecisionBody'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Decide Approval V1 Agent Approvals  Approval Id  Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/agent/runs:
+    get:
+      tags:
+      - agent
+      summary: Recent agent runs for the caller
+      operationId: list_runs_v1_agent_runs_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 20
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response List Runs V1 Agent Runs Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/agent/jobs/{job_id}:
+    get:
+      tags:
+      - agent
+      summary: Status of a background command or import
+      operationId: job_status_v1_agent_jobs__job_id__get
+      parameters:
+      - name: job_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Job Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Job Status V1 Agent Jobs  Job Id  Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/documents:
+    post:
+      tags:
+      - documents
+      summary: Upload a policy, circular, or other document for retrieval
+      operationId: upload_document_v1_documents_post
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              $ref: '#/components/schemas/Body_upload_document_v1_documents_post'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Upload Document V1 Documents Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    get:
+      tags:
+      - documents
+      summary: List indexed documents visible to the caller
+      operationId: list_documents_v1_documents_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: category
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Category
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 50
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response List Documents V1 Documents Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/documents/search:
+    post:
+      tags:
+      - documents
+      summary: Answer a question from documents with page-level sources
+      operationId: search_documents_v1_documents_search_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DocumentSearchBody'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Search Documents V1 Documents Search Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/documents/{document_id}:
+    delete:
+      tags:
+      - documents
+      summary: Remove a document and its index
+      operationId: delete_document_v1_documents__document_id__delete
+      parameters:
+      - name: document_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Document Id
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Delete Document V1 Documents  Document Id  Delete
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/profile:
+    get:
+      tags:
+      - intelligence
+      summary: The institution's intelligence profile
+      operationId: get_profile_v1_intelligence_profile_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Get Profile V1 Intelligence Profile Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    put:
+      tags:
+      - intelligence
+      summary: Create or update the intelligence profile
+      operationId: put_profile_v1_intelligence_profile_put
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProfileBody'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Put Profile V1 Intelligence Profile Put
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/investigate:
+    post:
+      tags:
+      - intelligence
+      summary: Search public sources about the institution now
+      operationId: investigate_v1_intelligence_investigate_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InvestigateBody'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Investigate V1 Intelligence Investigate Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/mentions:
+    get:
+      tags:
+      - intelligence
+      summary: Stored public mentions (evidence records)
+      operationId: mentions_v1_intelligence_mentions_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: days
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Days
+      - name: source_type
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Source Type
+      - name: status
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: kept
+          title: Status
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 50
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Mentions V1 Intelligence Mentions Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/digest:
+    get:
+      tags:
+      - intelligence
+      summary: Daily intelligence digest from continuous monitoring
+      operationId: digest_v1_intelligence_digest_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: days
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 1
+          title: Days
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Digest V1 Intelligence Digest Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/monitor/run:
+    post:
+      tags:
+      - intelligence
+      summary: Run a monitoring pass now (normally scheduled)
+      operationId: run_monitor_v1_intelligence_monitor_run_post
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: background
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: true
+          title: Background
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Run Monitor V1 Intelligence Monitor Run Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/reports:
+    get:
+      tags:
+      - intelligence
+      summary: Past investigation reports
+      operationId: reports_v1_intelligence_reports_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 20
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Reports V1 Intelligence Reports Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/institutions:
+    get:
+      tags:
+      - platform
+      summary: Institutions registered on the platform (scoped to the caller)
+      operationId: list_institutions_v1_institutions_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response List Institutions V1 Institutions Get
+  /v1/institutions/{institution_id}:
+    put:
+      tags:
+      - platform
+      summary: Register or update an institution
+      operationId: put_institution_v1_institutions__institution_id__put
+      parameters:
+      - name: institution_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Institution Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InstitutionBody'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Put Institution V1 Institutions  Institution Id  Put
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    get:
+      tags:
+      - platform
+      summary: Institution details and record counts
+      operationId: get_institution_v1_institutions__institution_id__get
+      parameters:
+      - name: institution_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Institution Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Get Institution V1 Institutions  Institution Id  Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/reports:
+    get:
+      tags:
+      - platform
+      summary: Generated reports
+      operationId: list_reports_v1_reports_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 50
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response List Reports V1 Reports Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/reports/{report_id}/download:
+    get:
+      tags:
+      - platform
+      summary: Download a generated report
+      operationId: download_report_v1_reports__report_id__download_get
+      parameters:
+      - name: report_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Report Id
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/notifications:
+    get:
+      tags:
+      - platform
+      summary: The caller's notifications
+      operationId: list_notifications_v1_notifications_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: unread_only
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: false
+          title: Unread Only
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 50
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response List Notifications V1 Notifications Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/notifications/{notification_id}/read:
+    post:
+      tags:
+      - platform
+      summary: Mark a notification as read
+      operationId: mark_read_v1_notifications__notification_id__read_post
+      parameters:
+      - name: notification_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Notification Id
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Mark Read V1 Notifications  Notification Id  Read
+                  Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/emails:
+    get:
+      tags:
+      - platform
+      summary: Email outbox for the institution
+      operationId: list_emails_v1_emails_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 50
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response List Emails V1 Emails Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
 components:
   schemas:
+    ApprovalDecisionBody:
+      properties:
+        approve:
+          type: boolean
+          title: Approve
+      type: object
+      required:
+      - approve
+      title: ApprovalDecisionBody
+    Body_upload_document_v1_documents_post:
+      properties:
+        file:
+          type: string
+          contentMediaType: application/octet-stream
+          title: File
+        title:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Title
+        classification:
+          type: string
+          title: Classification
+          default: internal
+        category:
+          type: string
+          title: Category
+          default: general
+        institution_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      type: object
+      required:
+      - file
+      title: Body_upload_document_v1_documents_post
+    Body_upload_file_v1_ingestion_uploads_post:
+      properties:
+        file:
+          type: string
+          contentMediaType: application/octet-stream
+          title: File
+        entity:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Entity
+        sheet:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Sheet
+        institution_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+        auto_commit:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Auto Commit
+        process:
+          type: boolean
+          title: Process
+          default: true
+      type: object
+      required:
+      - file
+      title: Body_upload_file_v1_ingestion_uploads_post
     BriefingBody:
       properties:
         report_date:
@@ -353,6 +2417,83 @@ components:
       required:
       - prompt
       title: ChatBody
+    CommandBody:
+      properties:
+        command:
+          type: string
+          maxLength: 4000
+          minLength: 1
+          title: Command
+        institution_id:
+          anyOf:
+          - type: string
+            maxLength: 128
+          - type: 'null'
+          title: Institution Id
+        department_id:
+          anyOf:
+          - type: string
+            maxLength: 128
+          - type: 'null'
+          title: Department Id
+        channel:
+          type: string
+          pattern: ^(text|voice)$
+          title: Channel
+          default: text
+        conversation_id:
+          anyOf:
+          - type: string
+            maxLength: 128
+          - type: 'null'
+          title: Conversation Id
+        approval_id:
+          anyOf:
+          - type: string
+            maxLength: 128
+          - type: 'null'
+          title: Approval Id
+        run_in_background:
+          type: boolean
+          title: Run In Background
+          default: false
+        include_data:
+          type: boolean
+          title: Include Data
+          default: true
+      type: object
+      required:
+      - command
+      title: CommandBody
+    DocumentSearchBody:
+      properties:
+        question:
+          type: string
+          maxLength: 1000
+          minLength: 1
+          title: Question
+        institution_id:
+          anyOf:
+          - type: string
+            maxLength: 128
+          - type: 'null'
+          title: Institution Id
+        top_k:
+          type: integer
+          maximum: 10.0
+          minimum: 1.0
+          title: Top K
+          default: 5
+        category:
+          anyOf:
+          - type: string
+            maxLength: 40
+          - type: 'null'
+          title: Category
+      type: object
+      required:
+      - question
+      title: DocumentSearchBody
     HTTPValidationError:
       properties:
         detail:
@@ -362,6 +2503,178 @@ components:
           title: Detail
       type: object
       title: HTTPValidationError
+    InstitutionBody:
+      properties:
+        name:
+          type: string
+          maxLength: 200
+          minLength: 2
+          title: Name
+        location:
+          type: string
+          maxLength: 120
+          title: Location
+          default: ''
+        timezone:
+          type: string
+          maxLength: 60
+          title: Timezone
+          default: Asia/Kolkata
+        email_domains:
+          items:
+            type: string
+          type: array
+          maxItems: 20
+          title: Email Domains
+        settings:
+          additionalProperties: true
+          type: object
+          title: Settings
+      type: object
+      required:
+      - name
+      title: InstitutionBody
+    InvestigateBody:
+      properties:
+        question:
+          anyOf:
+          - type: string
+            maxLength: 300
+          - type: 'null'
+          title: Question
+        window_days:
+          type: integer
+          maximum: 365.0
+          minimum: 1.0
+          title: Window Days
+          default: 7
+        topics:
+          anyOf:
+          - items:
+              type: string
+            type: array
+            maxItems: 10
+          - type: 'null'
+          title: Topics
+        max_results:
+          type: integer
+          maximum: 30.0
+          minimum: 1.0
+          title: Max Results
+          default: 10
+        institution_id:
+          anyOf:
+          - type: string
+            maxLength: 128
+          - type: 'null'
+          title: Institution Id
+      type: object
+      title: InvestigateBody
+    MappingDecisionBody:
+      properties:
+        mapping:
+          additionalProperties:
+            anyOf:
+            - type: string
+            - type: 'null'
+          type: object
+          title: Mapping
+          description: Source header -> canonical field (null to leave unmapped)
+        entity:
+          anyOf:
+          - type: string
+            maxLength: 40
+          - type: 'null'
+          title: Entity
+        remember:
+          type: boolean
+          title: Remember
+          default: true
+      type: object
+      title: MappingDecisionBody
+    ProfileBody:
+      properties:
+        name:
+          type: string
+          maxLength: 200
+          minLength: 2
+          title: Name
+        location:
+          type: string
+          maxLength: 120
+          title: Location
+          default: ''
+        aliases:
+          items:
+            type: string
+          type: array
+          maxItems: 50
+          title: Aliases
+        official_domains:
+          items:
+            type: string
+          type: array
+          maxItems: 20
+          title: Official Domains
+        programs:
+          items:
+            type: string
+          type: array
+          maxItems: 50
+          title: Programs
+        social_accounts:
+          items:
+            type: string
+          type: array
+          maxItems: 20
+          title: Social Accounts
+        keywords:
+          items:
+            type: string
+          type: array
+          maxItems: 20
+          title: Keywords
+        exclusions:
+          items:
+            type: string
+          type: array
+          maxItems: 20
+          title: Exclusions
+        monitoring_enabled:
+          type: boolean
+          title: Monitoring Enabled
+          default: false
+        alert_recipients:
+          items:
+            type: string
+          type: array
+          maxItems: 20
+          title: Alert Recipients
+        institution_id:
+          anyOf:
+          - type: string
+            maxLength: 128
+          - type: 'null'
+          title: Institution Id
+      type: object
+      required:
+      - name
+      title: ProfileBody
+    ReviewDecisionBody:
+      properties:
+        decision:
+          type: string
+          pattern: ^(approved|rejected)$
+          title: Decision
+        note:
+          type: string
+          maxLength: 500
+          title: Note
+          default: ''
+      type: object
+      required:
+      - decision
+      title: ReviewDecisionBody
     ScopeBody:
       properties:
         college_id:
@@ -380,6 +2693,40 @@ components:
           title: Batch Id
       type: object
       title: ScopeBody
+    SheetImportBody:
+      properties:
+        sheet_url:
+          type: string
+          maxLength: 500
+          minLength: 10
+          title: Sheet Url
+        gid:
+          anyOf:
+          - type: string
+            maxLength: 20
+          - type: 'null'
+          title: Gid
+        entity:
+          anyOf:
+          - type: string
+            maxLength: 40
+          - type: 'null'
+          title: Entity
+        institution_id:
+          anyOf:
+          - type: string
+            maxLength: 128
+          - type: 'null'
+          title: Institution Id
+        auto_commit:
+          anyOf:
+          - type: boolean
+          - type: 'null'
+          title: Auto Commit
+      type: object
+      required:
+      - sheet_url
+      title: SheetImportBody
     ValidationError:
       properties:
         loc:

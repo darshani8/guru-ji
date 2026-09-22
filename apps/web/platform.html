@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#102a43">
+  <meta name="description" content="Guru Ji institutional intelligence platform console">
+  <title>Guru Ji — Platform console</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <main class="app platform">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark">GJ</div>
+        <div>
+          <div class="brand-name">Guru Ji</div>
+          <span class="brand-subtitle">Institutional intelligence platform</span>
+        </div>
+      </div>
+      <div class="topbar-end">
+        <a class="nav-link" href="/">Assistant</a>
+        <div id="api-status" class="status neutral" role="status" aria-live="polite">
+          <span class="status-dot"></span>
+          <span id="api-status-label">Connecting…</span>
+        </div>
+        <div id="account" class="account" hidden>
+          <span id="account-name" class="account-name"></span>
+          <button id="sign-out" type="button" class="account-button">Sign out</button>
+        </div>
+      </div>
+    </header>
+
+    <section id="sign-in-gate" class="sign-in-gate" hidden>
+      <h1 class="sign-in-title">Sign in to continue</h1>
+      <p id="sign-in-message" class="sign-in-message">This console is restricted to authorised accounts.</p>
+      <button id="sign-in" type="button" class="sign-in-button">Sign in</button>
+    </section>
+
+    <div id="platform-body" class="platform-body">
+      <nav class="platform-nav" aria-label="Platform sections">
+        <button data-panel="command" class="active">Command console</button>
+        <button data-panel="ingestion">Data ingestion</button>
+        <button data-panel="documents">Documents</button>
+        <button data-panel="intelligence">Internet intelligence</button>
+        <button data-panel="activity">Reports &amp; notifications</button>
+      </nav>
+
+      <section id="panel-command" class="platform-panel active">
+        <h2>Command console</h2>
+        <p class="lede">Commands run through the master agent: understand → plan → check permission → use tools → verify → report. Nothing reaches the database except through registered tools.</p>
+        <div class="card">
+          <div class="field-row">
+            <label style="flex:1">Command
+              <input id="command-input" type="text" maxlength="4000" placeholder="e.g. Find all MBA students below 75% attendance and send the report to the HOD">
+            </label>
+            <label>Run in background <select id="command-background"><option value="false">No</option><option value="true">Yes</option></select></label>
+            <button id="command-run" class="btn" type="button">Run</button>
+          </div>
+          <div id="command-result" class="result-box" hidden></div>
+          <div id="command-approval" hidden></div>
+        </div>
+        <div class="card">
+          <h3>Tools available to you</h3>
+          <div id="tool-list" class="muted">Loading…</div>
+        </div>
+      </section>
+
+      <section id="panel-ingestion" class="platform-panel">
+        <h2>Data ingestion</h2>
+        <p class="lede">Upload the files the institution already keeps (Excel, CSV, PDF, Word, scans, JSON). The platform extracts, maps to the canonical model, cleans, validates, deduplicates, and imports with full lineage. Uncertain mappings and duplicates wait for your review.</p>
+        <div class="card">
+          <h3>Upload a file</h3>
+          <div class="field-row">
+            <label>File <input id="upload-file" type="file"></label>
+            <label>Entity (optional) <select id="upload-entity"><option value="">Detect automatically</option></select></label>
+            <label>Sheet/table (optional) <input id="upload-sheet" type="text" placeholder="e.g. MBA_2026"></label>
+            <label>Auto-commit <select id="upload-autocommit"><option value="">Default</option><option value="true">Yes</option><option value="false">No, wait for review</option></select></label>
+            <button id="upload-run" class="btn" type="button">Upload &amp; process</button>
+          </div>
+          <div id="upload-result" class="result-box" hidden></div>
+        </div>
+        <div class="card">
+          <h3>Recent jobs</h3>
+          <button id="jobs-refresh" class="btn secondary" type="button">Refresh</button>
+          <div id="jobs-table" style="margin-top:10px"></div>
+        </div>
+        <div class="card" id="review-card" hidden>
+          <h3>Review</h3>
+          <div id="review-body"></div>
+        </div>
+      </section>
+
+      <section id="panel-documents" class="platform-panel">
+        <h2>Documents</h2>
+        <p class="lede">Policies, circulars, and handbooks are chunked, embedded, and searched with page-level citations. Only the relevant passages are shown to the model.</p>
+        <div class="card">
+          <h3>Upload a document</h3>
+          <div class="field-row">
+            <label>File <input id="doc-file" type="file"></label>
+            <label>Title <input id="doc-title" type="text" placeholder="Attendance policy 2026"></label>
+            <label>Classification <select id="doc-class"><option>internal</option><option>public</option><option>confidential</option><option>restricted</option></select></label>
+            <label>Category <input id="doc-category" type="text" value="policy"></label>
+            <button id="doc-upload" class="btn" type="button">Upload &amp; index</button>
+          </div>
+          <div id="doc-upload-result" class="result-box" hidden></div>
+        </div>
+        <div class="card">
+          <h3>Ask the documents</h3>
+          <div class="field-row">
+            <label style="flex:1">Question <input id="doc-question" type="text" maxlength="1000" placeholder="What is the attendance policy?"></label>
+            <button id="doc-search" class="btn" type="button">Search</button>
+          </div>
+          <div id="doc-search-result" class="result-box" hidden></div>
+        </div>
+        <div class="card">
+          <h3>Indexed documents</h3>
+          <button id="docs-refresh" class="btn secondary" type="button">Refresh</button>
+          <div id="docs-table" style="margin-top:10px"></div>
+        </div>
+      </section>
+
+      <section id="panel-intelligence" class="platform-panel">
+        <h2>Internet intelligence</h2>
+        <p class="lede">Public, legally accessible sources are searched with the institution profile, matched to this institution (not a namesake), filtered by relevance and time, and presented with source links. Web content stays untrusted data.</p>
+        <div class="card">
+          <h3>Institution profile</h3>
+          <div class="field-row">
+            <label>Name <input id="profile-name" type="text"></label>
+            <label>Location <input id="profile-location" type="text"></label>
+            <label>Aliases (comma separated) <input id="profile-aliases" type="text"></label>
+            <label>Official domains <input id="profile-domains" type="text" placeholder="example.edu.in"></label>
+            <label>Programs <input id="profile-programs" type="text" placeholder="MBA, BBA, BCA"></label>
+            <label>Exclusions (other places/namesakes) <input id="profile-exclusions" type="text" placeholder="Chennai, Hyderabad"></label>
+            <label>Monitoring <select id="profile-monitoring"><option value="false">Off</option><option value="true">On</option></select></label>
+            <label>Alert recipients (user ids) <input id="profile-alerts" type="text"></label>
+            <button id="profile-save" class="btn" type="button">Save profile</button>
+          </div>
+          <div id="profile-result" class="result-meta"></div>
+        </div>
+        <div class="card">
+          <h3>Investigate now</h3>
+          <div class="field-row">
+            <label style="flex:1">Question <input id="intel-question" type="text" placeholder="What happened about our college this week?"></label>
+            <label>Window (days) <input id="intel-days" type="number" min="1" max="365" value="7"></label>
+            <button id="intel-run" class="btn" type="button">Investigate</button>
+            <button id="intel-digest" class="btn secondary" type="button">Daily digest</button>
+          </div>
+          <div id="intel-result" class="result-box" hidden></div>
+        </div>
+      </section>
+
+      <section id="panel-activity" class="platform-panel">
+        <h2>Reports &amp; notifications</h2>
+        <p class="lede">Generated files are stored in object storage and downloadable here. Background work notifies you when it finishes.</p>
+        <div class="card">
+          <h3>Reports</h3>
+          <button id="reports-refresh" class="btn secondary" type="button">Refresh</button>
+          <div id="reports-table" style="margin-top:10px"></div>
+        </div>
+        <div class="card">
+          <h3>Notifications</h3>
+          <button id="notifications-refresh" class="btn secondary" type="button">Refresh</button>
+          <div id="notifications-table" style="margin-top:10px"></div>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/auth.js" defer></script>
+  <script src="/platform.js" defer></script>
+</body>
+</html>

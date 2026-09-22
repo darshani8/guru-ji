@@ -19,6 +19,8 @@ RUN uv sync --frozen --no-dev --no-install-project
 
 COPY apps ./apps
 COPY migrations ./migrations
+COPY scripts ./scripts
+RUN mkdir -p /app/data/objects && chown -R 10001:10001 /app/data
 
 RUN useradd --system --create-home --uid 10001 guruji
 USER guruji

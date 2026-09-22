@@ -1,6 +1,33 @@
 # Guru Ji
 
-Guru Ji is a federated, read-only institutional AI assistant reference implementation. It separates verified identity, policy, approved source connectors, semantic tools, bounded orchestration, evidence, streaming, and control-plane metadata.
+Guru Ji is an AI-powered institutional intelligence platform for educational institutions. Institutions hand over the data they already keep (Excel, CSV, PDF, Word, scans, Google Sheets, existing databases); the platform ingests, maps, cleans, validates, deduplicates, and loads it into a canonical, tenant-isolated database, then lets authorised users perform institutional work through text or voice commands. A master agent plans, checks permissions, calls registered tools through a policy gateway, verifies, and reports. An internet intelligence agent adds source-backed public information about the institution. The original federated read-only connector path remains available alongside.
+
+The implementation map for the platform is in [`docs/PLATFORM_BLUEPRINT.md`](docs/PLATFORM_BLUEPRINT.md).
+
+## Platform quick start
+
+    uv sync --extra dev
+    make run
+    # open http://localhost:8000/platform.html (demo role picker: student … institution_admin)
+
+Or from the command line against the running API:
+
+    # register the institution (institution_admin), then upload a student sheet (principal/staff)
+    curl -X PUT http://localhost:8000/v1/institutions/college_a -H 'Authorization: Bearer dev-token' -H 'X-Demo-Role: institution_admin' -H 'Content-Type: application/json' -d '{"name":"College A","location":"Bengaluru"}'
+    curl -X POST http://localhost:8000/v1/ingestion/uploads -H 'Authorization: Bearer dev-token' -H 'X-Demo-Role: principal' -F file=@students.xlsx -F entity=student
+    # then ask the agent to do work
+    curl -X POST http://localhost:8000/v1/agent/commands -H 'Authorization: Bearer dev-token' -H 'X-Demo-Role: principal' -H 'Content-Type: application/json' -d '{"command":"Find all MBA students below 75% attendance and send the report to the HOD"}'
+
+`make platform-smoke` runs that sequence end to end. Local defaults need no external services (SQLite, local object store, inline job queue, hashing embeddings, deterministic planner, outbox email). See `.env.example` for PostgreSQL, S3, SQS, OCR, SMTP/SES, embeddings, model planner, and the Tavily-backed internet intelligence provider.
+
+## Platform surface
+
+- `POST /v1/ingestion/uploads`, `/v1/ingestion/sheets`, job inspection, mapping approval, duplicate review, commit, import reports.
+- `GET /v1/data/*` unified, minimised data access (students, attendance, fees, exams, faculty, programs, events, admissions).
+- `POST /v1/agent/commands` master agent (text or voice transcripts), `/v1/agent/tools`, approvals for high-risk actions, background jobs, run history.
+- `POST /v1/documents` and `/v1/documents/search` document intelligence with page-level citations.
+- `PUT /v1/intelligence/profile`, `POST /v1/intelligence/investigate`, mentions, digest, monitoring runs.
+- `GET /v1/reports/{id}/download`, notifications, email outbox, institutions.
 
 ## Current state
 
@@ -29,7 +56,7 @@ With Python 3.12+ and project dependencies synchronized:
     make hygiene
     make lint
 
-The current export’s full suite contains 102 passing tests. The CI-equivalent undefined-name/import lint check passes. `make smoke` validates a running API; `make postgres-smoke` validates a configured PostgreSQL service; and `docker compose -f infra/docker/compose.dev.yml up --build` exercises the reference multi-service stack when Docker is available.
+The full suite contains 200+ passing tests covering the connector path and the data platform. The CI-equivalent undefined-name/import lint check passes. `make smoke` validates a running API; `make postgres-smoke` validates a configured PostgreSQL service; and `docker compose -f infra/docker/compose.dev.yml up --build` exercises the reference multi-service stack when Docker is available.
 
 ## Local configuration
 

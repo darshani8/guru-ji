@@ -1,0 +1,22 @@
+apiVersion: api.cerbos.dev/v1
+resourcePolicy:
+  version: "guru-cerbos-v1"
+  resource: "platform_tool"
+  rules:
+    - actions: ["*"]
+      effect: EFFECT_DENY
+      roles: ["*"]
+    # Read tools: any active member whose verified capabilities include the tool's permission
+    # and whose scope covers the requested institution. The API passes the required capability
+    # as the resource attribute so one policy covers every registered tool.
+    - actions: ["retrieve", "execute", "high_risk"]
+      effect: EFFECT_ALLOW
+      roles: ["platform_super_admin", "institution_admin", "main_admin", "principal", "hod", "faculty", "staff", "student", "system"]
+      condition:
+        match:
+          all:
+            of:
+              - expr: request.principal.attr.revoked == false
+              - expr: request.principal.attr.capabilities.exists(capability, capability == request.resource.attr.required_capability)
+              - expr: request.principal.attr.institution_scopes.exists(scope, scope.college_id == request.resource.attr.institution_scope.college_id && (scope.department_id == null || scope.department_id == request.resource.attr.institution_scope.department_id) && (scope.batch_id == null || scope.batch_id == request.resource.attr.institution_scope.batch_id))
+              - expr: request.principal.attr.consent_verified == true || request.resource.attr.institution_scope.batch_id == null
