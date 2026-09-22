@@ -7,7 +7,6 @@ PostgreSQL, a row-level-security policy bound to ``app.institution_id``.
 
 from __future__ import annotations
 
-from collections.abc import Collection
 
 from ..normalization.canonical import CANONICAL_ENTITIES, CanonicalEntity, FieldType
 
@@ -311,24 +310,23 @@ def portable_statements() -> tuple[str, ...]:
     return tuple(statements)
 
 
-def postgres_row_level_security(already_enforced: Collection[str] = ()) -> tuple[str, ...]:
-    """Idempotent RLS statements; the connection role must not bypass RLS.
+def postgres_row_level_security() -> tuple[str, ...]:
+    """Idempotent RLS statements for the rendered migration file.
 
-    ``already_enforced`` names the tables whose row-level security is already
-    enabled and forced. Their ``ALTER TABLE`` is left out: it takes an ACCESS
-    EXCLUSIVE lock even when it changes nothing, and at start-up the previous
-    release is still serving requests on those tables.
+    The store does not run these at start-up: every ``ALTER TABLE`` takes an
+    ACCESS EXCLUSIVE lock even when it changes nothing, so the store emits only
+    what the catalog shows missing (``persistence.schema_tools``). This form is
+    for applying the schema by hand with psql.
     """
 
     statements: list[str] = []
     for table in TENANT_TABLES:
         policy = f"{table}_tenant_isolation"
-        if table not in already_enforced:
-            statements.append(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
-            statements.append(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
+        statements.append(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
+        statements.append(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
         statements.append(
             "DO $$ BEGIN "
-            f"IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE tablename = '{table}' AND policyname = '{policy}') THEN "
+            f"IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = '{table}' AND policyname = '{policy}') THEN "
             f"CREATE POLICY {policy} ON {table} "
             "USING (institution_id = current_setting('app.institution_id', true)) "
             "WITH CHECK (institution_id = current_setting('app.institution_id', true)); "
