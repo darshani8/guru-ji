@@ -185,8 +185,13 @@ class PostgresBackend(SqlBackend):
         self._connection = self._open_connection()
 
     # -- connection management --------------------------------------------------
+    # A TCP connect that gets no answer (a dropped SYN, an unroutable address
+    # family tried first) must fail within seconds, not after the kernel's
+    # two-minute retry budget: start-up is silent until the store is ready.
+    CONNECT_TIMEOUT_SECONDS = 15
+
     def _open_connection(self) -> Any:
-        return self._psycopg.connect(self._database_url, row_factory=self._dict_row)
+        return self._psycopg.connect(self._database_url, row_factory=self._dict_row, connect_timeout=self.CONNECT_TIMEOUT_SECONDS)
 
     @staticmethod
     def _is_broken(connection: Any) -> bool:

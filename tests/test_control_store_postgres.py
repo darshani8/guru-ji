@@ -130,7 +130,8 @@ class _FakePsycopg(types.ModuleType):
         self.rows.dict_row = object()
         self.migrated = False
 
-    def connect(self, url: str, row_factory: object = None, autocommit: bool = False) -> _Connection:
+    def connect(self, url: str, row_factory: object = None, autocommit: bool = False, **options: object) -> _Connection:
+        self.connect_options = dict(options)
         connection = _Connection(autocommit)
         if self.migrated:
             connection.tables = {"schema_migrations", "audit_events", "source_health", "briefing_runs", "answer_envelopes", "model_attempts", "control_outbox"}
@@ -162,6 +163,7 @@ class PostgresControlStoreStartUpTests(unittest.TestCase):
         store = PostgresControlStore("postgresql://fake/db")
         connection = self.fake.connections[0]
         self.assertTrue(connection.autocommit, "reads must not leave the connection idle in transaction")
+        self.assertEqual(self.fake.connect_options.get("connect_timeout"), 15, "a silent TCP connect must fail within seconds")
         self.assertEqual(self._ddl(connection), [], "ALTER TABLE / CREATE INDEX lock the table even when they change nothing")
         self.assertEqual(connection.statements[0][0], "SET LOCAL lock_timeout = '15s'", "a blocked start-up fails loudly instead of hanging")
         self.assertEqual((connection.transactions, connection.commits, connection.rollbacks), (1, 1, 0))
@@ -173,8 +175,8 @@ class PostgresControlStoreStartUpTests(unittest.TestCase):
         self.fake.migrated = True
         original_connect = self.fake.connect
 
-        def connect(url: str, row_factory: object = None, autocommit: bool = False) -> _Connection:
-            connection = original_connect(url, row_factory, autocommit)
+        def connect(url: str, row_factory: object = None, autocommit: bool = False, **options: object) -> _Connection:
+            connection = original_connect(url, row_factory, autocommit, **options)
             connection.columns.discard(("source_health", "last_success_at"))
             connection.indexes.discard("idx_control_outbox_pending")
             return connection

@@ -534,14 +534,16 @@ class PostgresControlStore:
         # is its own transaction, so a read never leaves the connection idle
         # in transaction holding table locks. Before this, a running instance
         # blocked the next release's start-up DDL until the deploy timed out.
-        self._connection = psycopg.connect(database_url, row_factory=dict_row, autocommit=True)
+        self._connection = psycopg.connect(database_url, row_factory=dict_row, autocommit=True, connect_timeout=self.CONNECT_TIMEOUT_SECONDS)
         self._closed = False
         self._migrate()
 
     # How long start-up may wait for a table lock before failing loudly. A
     # hang here is invisible (no log line, health check never answers), an
-    # error is not.
+    # error is not. The connect timeout bounds a TCP connect that gets no
+    # answer the same way.
     MIGRATION_LOCK_TIMEOUT = "15s"
+    CONNECT_TIMEOUT_SECONDS = 15
 
     # Columns added after their table first shipped and the indexes, each run
     # only when the catalog shows it missing: ``ADD COLUMN IF NOT EXISTS`` and
