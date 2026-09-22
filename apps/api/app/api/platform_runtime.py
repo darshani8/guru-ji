@@ -103,10 +103,11 @@ def _embeddings(settings: AppSettings) -> EmbeddingProvider:
 
 def _job_queue(settings: AppSettings, store: InstitutionDataStore) -> JobQueue:
     # The worker shares the request path's store (one connection guarded by a
-    # process-wide lock). That is acceptable because request handlers call the
-    # store off the event loop and the store commits large imports in chunks, so
-    # the lock is only ever held briefly and readiness/list calls interleave with
-    # a running import instead of waiting for it to finish.
+    # process-wide lock). Request handlers call the store off the event loop,
+    # so an import holds the lock for its (atomic) transaction without ever
+    # blocking the loop: readiness and job listings wait for that transaction
+    # instead of stalling the API. Production runs the SQS worker in its own
+    # process with its own connection, where nothing waits.
     if settings.job_queue == "thread":
         return ThreadJobQueue(store)
     if settings.job_queue == "sqs":

@@ -63,8 +63,16 @@ def _bool_param(item: CanonicalField, value: Any) -> Any:
     like ``upsert_records`` and ``update_record_fields`` do on write.
     """
 
-    if item.field_type is FieldType.BOOLEAN and isinstance(value, (bool, int)):
+    if item.field_type is not FieldType.BOOLEAN:
+        return value
+    if isinstance(value, (bool, int)):
         return 1 if value else 0
+    if isinstance(value, str):
+        text = value.strip().lower()
+        if text in {"1", "true", "yes", "y", "t"}:
+            return 1
+        if text in {"0", "false", "no", "n", "f"}:
+            return 0
     return value
 
 
@@ -243,22 +251,23 @@ class InstitutionDataStore:
                 stamp, stamp,
             ])
             pending.append((key, previous, values))
-        # Each chunk is its own transaction: it either lands whole or not at
-        # all, and the backend lock is released between chunks. The summary
-        # only counts chunks that committed, so an error mid-import leaves it
-        # (and the exception) describing exactly what reached the table.
-        for chunk in _chunks(pending, WRITE_CHUNK_ROWS):
-            with self._tenant(institution_id):
+        # One transaction for the whole write, sent in bounded batches: the
+        # import lands whole or not at all, so a failure can never leave rows
+        # attributed to a job whose report says nothing was imported. Request
+        # handlers call the store off the event loop, so holding the backend
+        # lock for the import delays other store calls, never the API loop.
+        with self._tenant(institution_id):
+            for chunk in _chunks(pending, WRITE_CHUNK_ROWS):
                 self.backend.executemany(sql, [values for _, _, values in chunk])
-            for key, previous, _ in chunk:
-                if previous is None:
-                    summary.inserted += 1
-                    if len(summary.inserted_keys) < 50:
-                        summary.inserted_keys.append(key)
-                else:
-                    summary.updated += 1
-                    if len(summary.updated_keys) < 50:
-                        summary.updated_keys.append(key)
+        for key, previous, _ in pending:
+            if previous is None:
+                summary.inserted += 1
+                if len(summary.inserted_keys) < 50:
+                    summary.inserted_keys.append(key)
+            else:
+                summary.updated += 1
+                if len(summary.updated_keys) < 50:
+                    summary.updated_keys.append(key)
         return summary
 
     def existing_keys(self, institution_id: str, entity_name: str, keys: Sequence[str]) -> dict[str, dict[str, Any]]:
@@ -327,9 +336,9 @@ class InstitutionDataStore:
             if key.endswith("__gte") or key.endswith("__lte") or key.endswith("__lt") or key.endswith("__gt"):
                 column, _, op = key.rpartition("__")
                 _column(column)
-                entity.field(column)
+                item = entity.field(column)
                 clauses.append(f"{column} {({'gte': '>=', 'lte': '<=', 'lt': '<', 'gt': '>'})[op]} ?")
-                params.append(value)
+                params.append(_bool_param(item, value))
                 continue
             column = _column(key)
             item = entity.field(column)
@@ -635,15 +644,12 @@ class InstitutionDataStore:
         return [self._job_row(row) for row in rows]
 
     def replace_job_records(self, institution_id: str, job_id: str, records: Iterable[Mapping[str, Any]]) -> int:
-        """Replace a job's staged rows, writing them in bounded transactions.
+        """Replace a job's staged rows atomically, inserting in bounded batches.
 
-        The delete and each chunk of ``WRITE_CHUNK_ROWS`` inserts commit
-        separately so the backend lock is released between chunks; the
-        returned count is the number of rows that reached the table.
+        The delete and the inserts share one transaction, so a reader never
+        sees a half-staged job and a failure leaves the previous rows intact.
         """
 
-        with self._tenant(institution_id):
-            self.backend.execute("DELETE FROM ingestion_records WHERE institution_id = ? AND job_id = ?", (institution_id, job_id))
         count = 0
         rows = (
             (
@@ -653,8 +659,9 @@ class InstitutionDataStore:
             )
             for item in records
         )
-        for chunk in _chunks(rows, WRITE_CHUNK_ROWS):
-            with self._tenant(institution_id):
+        with self._tenant(institution_id):
+            self.backend.execute("DELETE FROM ingestion_records WHERE institution_id = ? AND job_id = ?", (institution_id, job_id))
+            for chunk in _chunks(rows, WRITE_CHUNK_ROWS):
                 count += self.backend.executemany(
                     "INSERT INTO ingestion_records(record_id, job_id, institution_id, row_number, locator, raw_json, normalized_json, status, action, record_key, issues_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     chunk,

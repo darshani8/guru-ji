@@ -22,6 +22,11 @@ class SqlBackend:
         self._lock = threading.RLock()
         self._closed = False
         self._transaction_depth = 0
+        # Statements run so far in the current outermost transaction, and its
+        # tenant; the PostgreSQL backend uses both to decide whether a dropped
+        # connection can be reopened and the statement retried safely.
+        self._transaction_statements = 0
+        self._transaction_tenant: str | None = None
 
     @property
     def in_transaction(self) -> bool:
@@ -69,6 +74,9 @@ class SqlBackend:
 
         with self._lock:
             self._transaction_depth += 1
+            if self._transaction_depth == 1:
+                self._transaction_statements = 0
+                self._transaction_tenant = tenant_id
             try:
                 if tenant_id is not None:
                     self.set_tenant(tenant_id)
@@ -152,9 +160,11 @@ class PostgresBackend(SqlBackend):
 
     A statement that fails because the connection broke (server restart,
     ``pg_terminate_backend``, idle timeouts) is retried once on a fresh
-    connection when it ran outside an explicit transaction. Inside a
-    transaction the connection is reopened and the error is re-raised so the
-    caller's transaction fails cleanly instead of half-applying.
+    connection when nothing else has run in the current transaction: outside
+    an explicit transaction, or on the first statement of one (the tenant
+    setting is re-applied first). Once a transaction has executed a statement
+    the connection is reopened and the error is re-raised so the caller's
+    transaction fails cleanly instead of half-applying.
     """
 
     dialect = "postgresql"
@@ -200,27 +210,58 @@ class PostgresBackend(SqlBackend):
             self._connection = self._open_connection()
         return self._connection
 
-    def _run(self, operation: Any) -> Any:
+    def _run(self, operation: Any, *, counts: bool = True) -> Any:
         """Run ``operation(connection)`` with reconnect-and-retry on a dropped connection."""
 
         with self._lock:
             connection = self._ensure_connection()
             try:
-                return operation(connection)
+                result = operation(connection)
             except (self._psycopg.OperationalError, self._psycopg.InterfaceError):
                 if not self._is_broken(connection):
-                    raise  # a genuine statement failure (cancel, serialization, ...) on a live connection
+                    # A genuine statement failure (cancel, timeout, ...) on a live connection.
+                    self._rollback_outside_transaction(connection)
+                    raise
                 self._discard_connection()
-                if self.in_transaction:
-                    # The server already aborted the transaction; reopen so the
-                    # next transaction works, and let this one fail cleanly.
+                if self.in_transaction and self._transaction_statements > 0:
+                    # The server already aborted a transaction that had done
+                    # work; reopen so the next transaction works, and let this
+                    # one fail cleanly rather than replaying part of it.
                     try:
                         self._connection = self._open_connection()
                     except (self._psycopg.OperationalError, self._psycopg.InterfaceError):
                         pass  # still down: the next statement reopens it
                     raise
                 connection = self._ensure_connection()
-                return operation(connection)
+                if counts and self.in_transaction and self._transaction_tenant is not None:
+                    # A real statement inside a tenant transaction: re-pin the
+                    # tenant on the fresh connection before replaying it.
+                    self._apply_tenant(connection, self._transaction_tenant)
+                result = operation(connection)
+            except Exception:
+                # A failed statement (bad SQL, constraint, division by zero)
+                # leaves the driver's implicit transaction aborted; outside an
+                # explicit transaction nobody else would roll it back.
+                self._rollback_outside_transaction(connection)
+                raise
+            if counts and self.in_transaction:
+                self._transaction_statements += 1
+            return result
+
+    def _rollback_outside_transaction(self, connection: Any) -> None:
+        if self.in_transaction or self._is_broken(connection):
+            return
+        try:
+            connection.rollback()
+        except Exception:  # noqa: BLE001 - the connection is unusable; drop it
+            self._discard_connection()
+
+    @staticmethod
+    def _apply_tenant(connection: Any, tenant_id: str) -> None:
+        # Row-level security policies read app.institution_id; SET LOCAL binds it
+        # to the current transaction only, so no tenant leaks into the next one.
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT set_config('app.institution_id', %s, true)", (tenant_id,))
 
     def _adapt(self, sql: str) -> str:
         return sql.replace("?", "%s")
@@ -272,13 +313,9 @@ class PostgresBackend(SqlBackend):
         return self._run(operation)
 
     def set_tenant(self, tenant_id: str) -> None:
-        # Row-level security policies read app.institution_id; SET LOCAL binds it
-        # to the current transaction only, so no tenant leaks into the next one.
-        def operation(connection: Any) -> None:
-            with connection.cursor() as cursor:
-                cursor.execute("SELECT set_config('app.institution_id', %s, true)", (tenant_id,))
-
-        self._run(operation)
+        # Idempotent, so it does not count as work done in the transaction: a
+        # retry on a fresh connection re-applies it before the real statement.
+        self._run(lambda connection: self._apply_tenant(connection, tenant_id), counts=False)
 
     def commit(self) -> None:
         self._run(lambda connection: connection.commit())

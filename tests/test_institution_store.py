@@ -115,6 +115,10 @@ class InstitutionStoreTests(unittest.TestCase):
         _, params = self.store._where(entity, {"is_hod__in": [True, False]})
         self.assertEqual(params, [1, 0])
         self.assertTrue(all(type(value) is int for value in params))
+        # Text spellings of a boolean and range operators bind as integers too, never through LOWER().
+        clause, params = self.store._where(entity, {"is_hod": "true", "is_hod__gte": False})
+        self.assertEqual(params, [1, 0])
+        self.assertNotIn("LOWER(is_hod)", clause)
         # Non-boolean fields keep their values.
         _, params = self.store._where(canonical_entity("student"), {"semester": 3, "semester__in": [1, 2]})
         self.assertEqual(params, [3, 1, 2])
@@ -126,7 +130,7 @@ class InstitutionStoreTests(unittest.TestCase):
         self.assertEqual([row["faculty_id"] for row in self.store.query_records("college_a", "faculty", {"is_hod__in": [False]})], ["F2"])
         self.assertEqual(self.store.count_records("college_a", "faculty", {"is_hod": False}), 1)
 
-    def test_bulk_writes_commit_in_bounded_chunks_and_keep_lineage(self):
+    def test_bulk_writes_are_atomic_and_keep_lineage(self):
         commits: list[int] = []
         original_commit = self.store.backend.commit
 
@@ -138,8 +142,8 @@ class InstitutionStoreTests(unittest.TestCase):
         total = WRITE_CHUNK_ROWS * 2 + 7
         summary = self.store.upsert_records("college_a", _students(total))
         self.assertEqual((summary.inserted, summary.updated, summary.unchanged), (total, 0, 0))
-        # Three lookup transactions plus three write transactions, never one transaction for the whole import.
-        self.assertEqual(len(commits), 6)
+        # Three lookup transactions plus one write transaction: the import lands whole or not at all.
+        self.assertEqual(len(commits), 4)
         self.assertEqual(self.store.count_records("college_a", "student"), total)
         last = self.store.get_record("college_a", "student", f"mba00{total}")
         self.assertEqual(last["lineage"]["source_locator"], f"sheet=MBA;row={total + 1}")
@@ -147,12 +151,12 @@ class InstitutionStoreTests(unittest.TestCase):
         commits.clear()
         staged = [{"row_number": i, "locator": f"row={i}", "raw": {"n": i}, "status": "parsed"} for i in range(1, WRITE_CHUNK_ROWS * 2 + 2)]
         self.assertEqual(self.store.replace_job_records("college_a", "job-1", iter(staged)), len(staged))
-        self.assertEqual(len(commits), 4)  # delete + three insert chunks
+        self.assertEqual(len(commits), 1)  # delete and all insert batches in one transaction
         self.assertEqual(len(self.store.job_records("college_a", "job-1", limit=5000)), len(staged))
         self.assertEqual(self.store.replace_job_records("college_a", "job-1", []), 0)
         self.assertEqual(self.store.job_records("college_a", "job-1"), [])
 
-    def test_bulk_write_failure_keeps_committed_chunks_only(self):
+    def test_bulk_write_failure_leaves_nothing_behind(self):
         calls = {"n": 0}
         original = self.store.backend.executemany
 
@@ -165,10 +169,20 @@ class InstitutionStoreTests(unittest.TestCase):
         self.store.backend.executemany = failing_executemany  # type: ignore[method-assign]
         with self.assertRaises(RuntimeError):
             self.store.upsert_records("college_a", _students(WRITE_CHUNK_ROWS + 5))
-        # The first chunk landed whole, the failed chunk not at all, and the store still works.
-        self.assertEqual(self.store.count_records("college_a", "student"), WRITE_CHUNK_ROWS)
+        # The first batch was rolled back with the failed one, so no row is
+        # attributed to an import that reported nothing, and the store still works.
+        self.assertEqual(self.store.count_records("college_a", "student"), 0)
         self.assertFalse(self.store.backend.in_transaction)
-        self.assertEqual(self.store.upsert_records("college_a", _students(1)).unchanged, 1)
+        self.assertEqual(self.store.upsert_records("college_a", _students(1)).inserted, 1)
+        calls["n"] = 0
+        staged = [{"row_number": i, "locator": f"row={i}", "raw": {"n": i}, "status": "parsed"} for i in range(1, WRITE_CHUNK_ROWS + 3)]
+        self.store.backend.executemany = original  # type: ignore[method-assign]
+        self.assertEqual(self.store.replace_job_records("college_a", "job-1", iter(staged)), len(staged))
+        self.store.backend.executemany = failing_executemany  # type: ignore[method-assign]
+        with self.assertRaises(RuntimeError):
+            self.store.replace_job_records("college_a", "job-1", iter(staged[:3] * 400))
+        # A failed replacement keeps the previously staged rows intact.
+        self.assertEqual(len(self.store.job_records("college_a", "job-1", limit=5000)), len(staged))
 
     def test_claim_background_job_claims_exactly_one_queued_job(self):
         self.store.enqueue_background_job("college_a", job_id="bg-a", job_type="ingest", payload={"n": 1})
@@ -231,6 +245,9 @@ class _FakeCursor:
         if self.connection.cancel_on_next:
             self.connection.cancel_on_next = False
             raise module.OperationalError("canceling statement due to statement timeout")
+        if self.connection.fail_on_next:
+            self.connection.fail_on_next = False
+            raise module.DatabaseError("division by zero")
         self.connection.statements.append((sql, tuple(params)))
 
     def execute(self, sql, params=()):
@@ -256,6 +273,7 @@ class _FakeConnection:
         self.rollbacks = 0
         self.kill_on_next = False
         self.cancel_on_next = False
+        self.fail_on_next = False
 
     def cursor(self):
         return _FakeCursor(self)
@@ -279,6 +297,7 @@ class _FakePsycopg(types.ModuleType):
         super().__init__("psycopg")
         self.OperationalError = type("OperationalError", (Exception,), {})
         self.InterfaceError = type("InterfaceError", (Exception,), {})
+        self.DatabaseError = type("DatabaseError", (Exception,), {})
         self.connections: list[_FakeConnection] = []
         self.refuse = False
         self.rows = types.ModuleType("psycopg.rows")
@@ -333,12 +352,54 @@ class PostgresBackendReconnectTests(unittest.TestCase):
         self.assertEqual(len(self.fake.connections), 2)
         self.assertEqual(self.fake.connections[1].commits, 1)
 
+    def test_drop_before_any_statement_in_a_tenant_transaction_is_retried(self):
+        first = self.fake.connections[0]
+        first.kill_on_next = True  # the idle connection was dropped; set_config is the first statement to notice
+        with self.backend.transaction(tenant_id="college_a"):
+            self.backend.execute("INSERT INTO t VALUES (1)")
+        self.assertEqual(len(self.fake.connections), 2)
+        second = self.fake.connections[1]
+        self.assertEqual([sql for sql, _ in second.statements], ["SELECT set_config('app.institution_id', %s, true)", "INSERT INTO t VALUES (1)"])
+        self.assertEqual(second.commits, 1)
+        self.assertFalse(self.backend.in_transaction)
+
+    def test_drop_on_the_first_statement_reapplies_the_tenant_and_retries(self):
+        first = self.fake.connections[0]
+        with self.backend.transaction(tenant_id="college_a"):
+            first.kill_on_next = True
+            self.backend.execute("INSERT INTO t VALUES (1)")
+            self.backend.execute("INSERT INTO t VALUES (2)")
+        second = self.fake.connections[1]
+        self.assertEqual(
+            [sql for sql, _ in second.statements],
+            ["SELECT set_config('app.institution_id', %s, true)", "INSERT INTO t VALUES (1)", "INSERT INTO t VALUES (2)"],
+        )
+        self.assertEqual(second.statements[0][1], ("college_a",))
+        self.assertEqual(second.commits, 1)
+
+    def test_failed_statement_outside_transaction_is_rolled_back(self):
+        first = self.fake.connections[0]
+        first.fail_on_next = True
+        with self.assertRaises(self.fake.DatabaseError):
+            self.backend.fetchall("SELECT 1/0")
+        self.assertEqual(first.rollbacks, 1, "the aborted implicit transaction is rolled back so the next statement works")
+        self.assertFalse(first.closed)
+        self.assertTrue(self.backend.ping())
+        self.assertEqual(len(self.fake.connections), 1)
+        # Inside an explicit transaction the block's own rollback handles it.
+        first.fail_on_next = True
+        with self.assertRaises(self.fake.DatabaseError):
+            with self.backend.transaction(tenant_id="college_a"):
+                self.backend.execute("INSERT INTO t VALUES (1)")
+        self.assertEqual(first.rollbacks, 2)
+
     def test_failure_inside_transaction_reraises_and_next_transaction_works(self):
         first = self.fake.connections[0]
-        first.kill_on_next = True
         with self.assertRaises(self.fake.OperationalError):
             with self.backend.transaction(tenant_id="college_a"):
                 self.backend.execute("INSERT INTO t VALUES (1)")
+                first.kill_on_next = True  # dropped after work was done: nothing may be replayed
+                self.backend.execute("INSERT INTO t VALUES (2)")
         self.assertFalse(self.backend.in_transaction)
         self.assertEqual(len(self.fake.connections), 2, "the connection was reopened for the next caller")
         second = self.fake.connections[1]
@@ -354,7 +415,7 @@ class PostgresBackendReconnectTests(unittest.TestCase):
         self.fake.refuse = True
         with self.assertRaises(self.fake.OperationalError):
             with self.backend.transaction():
-                self.backend.execute("INSERT INTO t VALUES (1)")
+                self.backend.execute("INSERT INTO t VALUES (1)")  # reconnect attempt is refused
         self.assertFalse(self.backend.in_transaction)
         self.fake.refuse = False
         self.assertEqual(self.backend.fetchall("SELECT 1"), [{"one": 1}])
