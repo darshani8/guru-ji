@@ -40,6 +40,20 @@ class WebAssetTests(unittest.TestCase):
         self.assertNotRegex(js, re.compile(r'href="\$\{escapeHtml\((report|item)\.download_path\)\}'))
         self.assertIn("downloadReport(", js)
 
+    def test_voice_socket_follows_the_page_scheme_and_host(self):
+        # Behind a TLS-terminating load balancer the server sees plain HTTP and
+        # advertises ws://, which the browser refuses to open from an HTTPS page.
+        js = (ASSISTANT / "app.js").read_text(encoding="utf-8")
+        self.assertNotIn("new WebSocket(data.websocket_url)", js)
+        self.assertIn("new WebSocket(voiceSocketUrl(data.websocket_url))", js)
+        self.assertIn("window.location.protocol === 'https:' ? 'wss:' : 'ws:'", js)
+
+    def test_repeated_voice_phrase_is_not_dropped_after_recognition_restarts(self):
+        # Result indexes restart at 0 on every recognition run, so the
+        # duplicate-result keys must not outlive the run that produced them.
+        js = (ASSISTANT / "app.js").read_text(encoding="utf-8")
+        self.assertRegex(js, r"recognition\.onstart = \(\) => \{[^}]*state\.finalResultKeys\.clear\(\);")
+
 
 class AppSeparationTests(unittest.TestCase):
     """The assistant is for clients and the console is for developers: neither
