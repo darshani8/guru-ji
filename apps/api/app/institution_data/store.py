@@ -896,6 +896,52 @@ class InstitutionDataStore:
                         claimed.append(job)
         return claimed
 
+    def claim_background_job(self, job_id: str) -> dict[str, Any] | None:
+        """Claim exactly one queued job (used by message-driven queues such as SQS).
+
+        Returns the job when this call moved it from ``queued`` to ``running``;
+        ``None`` when it does not exist or was already claimed or finished.
+        """
+
+        with self.backend.transaction():
+            updated = self.backend.execute(
+                "UPDATE background_jobs SET status = 'running', started_at = ?, attempts = attempts + 1 WHERE job_id = ? AND status = 'queued'",
+                (now_iso(), job_id),
+            )
+        return self.get_background_job(job_id) if updated else None
+
+    def requeue_stale_background_jobs(self, *, older_than_seconds: int, max_attempts: int = 3) -> list[dict[str, Any]]:
+        """Return interrupted ``running`` jobs to ``queued`` so a worker restart resumes them.
+
+        A job whose claim is older than ``older_than_seconds`` and that has not
+        exhausted ``max_attempts`` goes back to ``queued``; older exhausted jobs
+        are marked ``failed`` so nothing loops forever.
+        """
+
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=max(1, int(older_than_seconds)))).isoformat()
+        requeued: list[dict[str, Any]] = []
+        with self.backend.transaction():
+            rows = self.backend.fetchall(
+                "SELECT job_id, attempts FROM background_jobs WHERE status = 'running' AND COALESCE(started_at, created_at) < ? ORDER BY created_at LIMIT 500",
+                (cutoff,),
+            )
+            for row in rows:
+                if int(row["attempts"] or 0) >= max_attempts:
+                    self.backend.execute(
+                        "UPDATE background_jobs SET status = 'failed', finished_at = ?, error = ? WHERE job_id = ? AND status = 'running'",
+                        (now_iso(), "worker did not finish the job after repeated attempts", row["job_id"]),
+                    )
+                    continue
+                updated = self.backend.execute(
+                    "UPDATE background_jobs SET status = 'queued', started_at = NULL WHERE job_id = ? AND status = 'running'",
+                    (row["job_id"],),
+                )
+                if updated:
+                    job = self.get_background_job(row["job_id"])
+                    if job:
+                        requeued.append(job)
+        return requeued
+
     def finish_background_job(self, job_id: str, *, status: str, result: Mapping[str, Any] | None = None, error: str | None = None) -> None:
         if status not in {"succeeded", "failed"}:
             raise ValueError("background job status must be succeeded or failed")

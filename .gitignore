@@ -9,3 +9,4 @@ __pycache__/
 data/*.db
 data/*.db-*
 data/objects/
+apps/api/data/
