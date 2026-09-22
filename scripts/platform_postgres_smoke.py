@@ -2,8 +2,9 @@
 
 Run with CONTROL_DATABASE_URL (or INSTITUTION_DATABASE_URL) pointing at a
 disposable PostgreSQL database. It verifies the placeholder rewrite, upserts,
-rollups, ingestion state tables, the intelligence store, and that row-level
-security hides rows from a connection that has not set a tenant.
+rollups (including an exact money sum and a boolean filter), ingestion state
+tables, the intelligence store, and that row-level security hides rows from a
+connection that has not set a tenant.
 """
 
 from __future__ import annotations
@@ -40,6 +41,19 @@ def main() -> None:
         store.upsert_records(institution, [CanonicalRecord("exam", {"student_id": "S1", "course_code": "C1", "exam_name": "IA1", "marks_obtained": 30, "max_marks": 50, "result_status": "pass"})])
         assert store.attendance_rollup(institution, program="MBA")[0]["attendance_percent"] == 50.0
         assert store.fee_rollup(institution)[0]["balance"] == 600.0
+        # Money columns must be DOUBLE PRECISION: twenty rows of 87654.32 sum exactly (float4 drifts by half a rupee).
+        store.upsert_records(institution, [CanonicalRecord("fee", {"student_id": "S2", "fee_type": f"Instalment {i}", "amount_due": 87654.32, "amount_paid": 0}) for i in range(20)])
+        exact = [row for row in store.fee_rollup(institution) if row["student_id"] == "S2"][0]
+        assert exact["amount_due"] == round(87654.32 * 20, 2), exact
+        assert exact["rows_used"] == 20
+        # Boolean filters must bind as the 1/0 integers the column stores, not as PostgreSQL booleans.
+        store.upsert_records(institution, [
+            CanonicalRecord("faculty", {"faculty_id": "F1", "name": "Head", "department": "MBA", "is_hod": True}),
+            CanonicalRecord("faculty", {"faculty_id": "F2", "name": "Member", "department": "MBA", "is_hod": False}),
+        ])
+        assert [row["faculty_id"] for row in store.query_records(institution, "faculty", {"is_hod": True})] == ["F1"]
+        assert [row["faculty_id"] for row in store.query_records(institution, "faculty", {"is_hod__in": [False]})] == ["F2"]
+        assert store.count_records(institution, "faculty", {"is_hod": False}) == 1
         assert store.exam_rollup(institution, program="MBA")[0]["passed"] == 1
         store.create_job(institution, job_id=f"job-{uuid4().hex}", file_id=None, entity="student", requested_by="smoke")
         assert store.list_jobs(institution)
@@ -58,7 +72,7 @@ def main() -> None:
             connection.execute("SELECT set_config('app.institution_id', %s, true)", (institution,))
             visible = connection.execute("SELECT count(*) FROM students WHERE institution_id = %s", (institution,)).fetchone()[0]
             assert visible == 3
-        for entity in ("student", "attendance", "fee", "exam"):
+        for entity in ("student", "faculty", "attendance", "fee", "exam"):
             store.delete_by_job(institution, entity, "none")
         print("PLATFORM_POSTGRES_SMOKE_OK")
     finally:

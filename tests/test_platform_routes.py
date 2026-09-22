@@ -1,5 +1,8 @@
+import asyncio
 import importlib.util
+import threading
 import unittest
+from unittest import mock
 
 FASTAPI_AVAILABLE = importlib.util.find_spec("fastapi") is not None
 
@@ -114,6 +117,74 @@ class PlatformRouteTests(unittest.TestCase):
         self.assertGreater(len(big_csv), settings.max_request_bytes)
         response = self.client.post("/v1/ingestion/uploads", headers=self.principal, files={"file": ("big.csv", big_csv, "text/csv")}, data={"process": "false"})
         self.assertEqual(response.status_code, 200, response.text)
+
+    def test_json_document_routes_keep_the_tight_body_limit(self):
+        from app.config.settings import AppSettings
+
+        settings = AppSettings.from_env()
+        too_big = b"x" * (settings.max_request_bytes + 10)
+        for method, path in (("POST", "/v1/documents/search"), ("DELETE", "/v1/documents/some-document"), ("POST", "/v1/ingestion/uploads/extra")):
+            response = self.client.request(method, path, headers={**self.principal, "Content-Type": "application/json"}, content=too_big)
+            self.assertEqual(response.status_code, 413, f"{method} {path}: {response.text[:200]}")
+        big_document = b"Attendance policy paragraph. " * (settings.max_request_bytes // 20)
+        self.assertGreater(len(big_document), settings.max_request_bytes)
+        upload = self.client.post("/v1/documents", headers=self.principal, files={"file": ("big.txt", big_document, "text/plain")}, data={"title": "Big", "category": "policy"})
+        self.assertEqual(upload.status_code, 200, upload.text[:200])
+        self.client.delete(f"/v1/documents/{upload.json()['document_id']}", headers=self.principal)
+
+    def test_blocking_store_and_object_store_work_runs_off_the_event_loop(self):
+        platform = app.state.runtime.platform
+        loop_thread: list[int] = []
+        seen: dict[str, tuple[bool, int]] = {}
+
+        def record(name):
+            def _mark():
+                try:
+                    asyncio.get_running_loop()
+                    on_loop = True
+                except RuntimeError:
+                    on_loop = False
+                seen[name] = (on_loop, threading.get_ident())
+            return _mark
+
+        real_list_jobs = platform.store.list_jobs
+
+        def list_jobs_probe(*args, **kwargs):
+            loop_thread.append(threading.get_ident())
+            return real_list_jobs(*args, **kwargs)
+
+        def ping_probe():
+            record("ping")()
+            return True
+
+        # The services are slots dataclasses, so their probes are patched on the class and take ``self``.
+        def commit_probe(service, institution_id, job_id, *, committed_by):
+            record("commit")()
+            return {"job_id": job_id, "institution_id": institution_id, "status": "imported"}
+
+        async def apply_mapping_probe(service, institution_id, job_id, **kwargs):
+            record("apply_mapping")()
+            return {"job_id": job_id, "institution_id": institution_id, "status": "imported"}
+
+        def fetch_probe(service, principal, institution_id, report_id):
+            record("report_fetch")()
+            return {"object_key": f"{institution_id}/reports/{report_id}.csv", "format": "csv"}, b"a,b\n"
+
+        with mock.patch.object(platform.store, "list_jobs", list_jobs_probe), mock.patch.object(platform.store, "ping", ping_probe), \
+                mock.patch.object(type(platform.ingestion), "commit", commit_probe), mock.patch.object(type(platform.ingestion), "apply_mapping", apply_mapping_probe), \
+                mock.patch.object(type(platform.reports), "fetch", fetch_probe):
+            self.assertEqual(self.client.get("/v1/ingestion/jobs", headers=self.principal).status_code, 200)
+            self.assertEqual(self.client.get("/v1/health/ready").json()["status"], "ready")
+            self.assertEqual(self.client.post(f"/v1/ingestion/jobs/{self.job_id}/commit", headers=self.principal).status_code, 200)
+            self.assertEqual(self.client.post(f"/v1/ingestion/jobs/{self.job_id}/mapping", headers=self.principal, json={"mapping": {}, "entity": "student"}).status_code, 200)
+            self.assertEqual(self.client.get("/v1/reports/r1/download", headers=self.principal).status_code, 200)
+        self.assertEqual(len(loop_thread), 1)
+        for name in ("ping", "commit", "report_fetch"):
+            on_loop, ident = seen[name]
+            self.assertFalse(on_loop, f"{name} ran on the event loop")
+            self.assertNotEqual(ident, loop_thread[0], f"{name} ran on the event-loop thread")
+        # apply_mapping runs on its own loop inside a pool thread, never on the request loop's thread.
+        self.assertNotEqual(seen["apply_mapping"][1], loop_thread[0])
 
 
 if __name__ == "__main__":

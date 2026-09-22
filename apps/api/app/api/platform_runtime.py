@@ -102,6 +102,11 @@ def _embeddings(settings: AppSettings) -> EmbeddingProvider:
 
 
 def _job_queue(settings: AppSettings, store: InstitutionDataStore) -> JobQueue:
+    # The worker shares the request path's store (one connection guarded by a
+    # process-wide lock). That is acceptable because request handlers call the
+    # store off the event loop and the store commits large imports in chunks, so
+    # the lock is only ever held briefly and readiness/list calls interleave with
+    # a running import instead of waiting for it to finish.
     if settings.job_queue == "thread":
         return ThreadJobQueue(store)
     if settings.job_queue == "sqs":
@@ -141,6 +146,12 @@ def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: P
     jobs = _job_queue(settings, store)
     agent = MasterAgent(gateway, registry, data, store, control_store, planner=DeterministicPlanner(), model_planner=model_planner, model=model, model_max_tokens=settings.model_max_tokens, tracer=tracer, background=jobs)
     register_handlers(jobs, ingestion=ingestion, agent=agent, monitor=monitor, notifications=notifications)
+    # The thread queue only wakes on enqueue, so start it at boot rather than on
+    # the first upload, then hand back jobs a previous process left ``running``.
+    start = getattr(jobs, "start", None)
+    if callable(start):
+        start()
+    jobs.recover_stale(older_than_seconds=settings.job_stale_seconds)
     return PlatformRuntime(
         store=store, intelligence_store=intelligence_store, objects=objects, parsers=parsers, ingestion=ingestion, data=data, reports=reports, email=email,
         notifications=notifications, documents=documents, registry=registry, gateway=gateway, agent=agent, jobs=jobs, intelligence=intelligence, monitor=monitor,

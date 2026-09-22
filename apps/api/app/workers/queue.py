@@ -50,6 +50,25 @@ class JobQueue:
     def status(self, job_id: str) -> dict[str, Any] | None:
         return self.store.get_background_job(job_id)
 
+    def recover_stale(self, *, older_than_seconds: int, max_attempts: int = 3) -> list[dict[str, Any]]:
+        """Return jobs interrupted by a restart to the queue and dispatch them again.
+
+        A job still ``running`` after ``older_than_seconds`` has no live worker
+        (a process restart or crash left it behind), so it goes back to
+        ``queued`` and is re-dispatched the same way a fresh enqueue is. A job
+        that cannot be re-dispatched is marked failed rather than left queued
+        forever, so the failure is visible in its record.
+        """
+
+        requeued = self.store.requeue_stale_background_jobs(older_than_seconds=older_than_seconds, max_attempts=max_attempts)
+        for job in requeued:
+            job_id = str(job["job_id"])
+            try:
+                self._after_enqueue(job_id)
+            except Exception as exc:  # noqa: BLE001 - the job record captures the failure
+                self.store.finish_background_job(job_id, status="failed", error=f"could not re-dispatch after restart: {exc}"[:500])
+        return requeued
+
     async def run_job(self, job: Mapping[str, Any]) -> dict[str, Any]:
         handler = self._handlers.get(str(job["job_type"]))
         if handler is None:
@@ -106,10 +125,14 @@ class ThreadJobQueue(JobQueue):
         self._thread: threading.Thread | None = None
 
     def start(self) -> None:
-        if self._thread is not None:
-            return
-        self._thread = threading.Thread(target=self._loop, name="guru-jobs", daemon=True)
-        self._thread.start()
+        """Start the polling thread; safe to call repeatedly (idempotent)."""
+
+        with self._lock:
+            if self._thread is not None and self._thread.is_alive():
+                return
+            self._stop.clear()
+            self._thread = threading.Thread(target=self._loop, name="guru-jobs", daemon=True)
+            self._thread.start()
 
     def stop(self) -> None:
         self._stop.set()
@@ -148,7 +171,14 @@ class SqsJobQueue(JobQueue):
         self._client = client
 
     def _after_enqueue(self, job_id: str) -> None:
-        self._client.send_message(QueueUrl=self.queue_url, MessageBody=json.dumps({"job_id": job_id}))
+        try:
+            self._client.send_message(QueueUrl=self.queue_url, MessageBody=json.dumps({"job_id": job_id}))
+        except Exception as exc:  # noqa: BLE001 - any transport/permission error means nobody will run the job
+            # The row was already inserted as ``queued``; without a message no
+            # worker will ever pick it up, so record the failure instead of
+            # leaving a job that looks pending forever.
+            self.store.finish_background_job(job_id, status="failed", error=f"could not publish to SQS: {exc}"[:500])
+            raise RuntimeError(f"background job {job_id} could not be published to the job queue") from exc
 
     async def consume_once(self, *, wait_seconds: int = 10, max_messages: int = 5) -> int:
         response = self._client.receive_message(QueueUrl=self.queue_url, MaxNumberOfMessages=max_messages, WaitTimeSeconds=wait_seconds)
@@ -159,12 +189,12 @@ class SqsJobQueue(JobQueue):
                 job_id = str(body.get("job_id", ""))
             except ValueError:
                 job_id = ""
-            job = self.store.get_background_job(job_id) if job_id else None
-            if job and job["status"] == "queued":
-                claimed = [item for item in self.store.claim_background_jobs(50) if item["job_id"] == job_id]
-                if claimed:
-                    await self.run_job(claimed[0])
-                    handled += 1
+            # Claim only the job this message names: other queued jobs belong to
+            # their own messages (possibly on another worker) and must stay queued.
+            job = self.store.claim_background_job(job_id) if job_id else None
+            if job is not None:
+                await self.run_job(job)
+                handled += 1
             self._client.delete_message(QueueUrl=self.queue_url, ReceiptHandle=message["ReceiptHandle"])
         return handled
 

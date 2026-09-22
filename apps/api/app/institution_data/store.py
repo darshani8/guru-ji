@@ -9,17 +9,20 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
-from ..normalization.canonical import CANONICAL_ENTITIES, CanonicalEntity, FieldType, entity as canonical_entity
+from ..normalization.canonical import CANONICAL_ENTITIES, CanonicalEntity, CanonicalField, FieldType, entity as canonical_entity
 from ..persistence.sql_backend import SqlBackend, open_backend
 from .models import CanonicalRecord, ImportSummary
-from .schema import SCHEMA_VERSION, portable_statements, postgres_row_level_security
+from .schema import SCHEMA_VERSION, portable_statements, postgres_numeric_columns, postgres_row_level_security
 
 MAX_QUERY_ROWS = 5_000
+# Rows written per transaction by bulk imports; the backend lock is released
+# between chunks so request handlers are never blocked for a whole import.
+WRITE_CHUNK_ROWS = 500
 _SAFE_IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 
 
@@ -52,6 +55,30 @@ def _column(name: str) -> str:
     return name
 
 
+def _bool_param(item: CanonicalField, value: Any) -> Any:
+    """Bind BOOLEAN fields as the 1/0 integers they are stored as.
+
+    psycopg binds a Python ``bool`` with the boolean OID, which PostgreSQL
+    refuses to compare with an INTEGER column, so filters must convert exactly
+    like ``upsert_records`` and ``update_record_fields`` do on write.
+    """
+
+    if item.field_type is FieldType.BOOLEAN and isinstance(value, (bool, int)):
+        return 1 if value else 0
+    return value
+
+
+def _chunks(items: Iterable[Any], size: int) -> Iterator[list[Any]]:
+    batch: list[Any] = []
+    for element in items:
+        batch.append(element)
+        if len(batch) >= size:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
 class InstitutionDataStore:
     backend_name: str
 
@@ -65,11 +92,33 @@ class InstitutionDataStore:
         self.backend.executescript(portable_statements())
         if self.backend.dialect == "postgresql":
             self.backend.executescript(postgres_row_level_security())
+            self._upgrade_postgres_numeric_columns()
         with self.backend.transaction():
             self.backend.execute(
                 "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?) ON CONFLICT (version) DO NOTHING",
                 (SCHEMA_VERSION, now_iso()),
             )
+
+    def _upgrade_postgres_numeric_columns(self) -> None:
+        """Widen NUMBER/PERCENT columns created as REAL (float4) to DOUBLE PRECISION.
+
+        Tables created by an earlier schema store money and percentages as
+        4-byte floats, so ``SUM`` drifts by rupees. ``CREATE TABLE IF NOT
+        EXISTS`` cannot fix an existing table, so this alters the columns that
+        ``information_schema`` still reports as ``real``; afterwards it finds
+        none and is a no-op.
+        """
+
+        wanted = postgres_numeric_columns()
+        rows = self.backend.fetchall(
+            "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = current_schema() AND data_type = 'real'"
+        )
+        stale = [(row["table_name"], row["column_name"]) for row in rows if (row["table_name"], row["column_name"]) in wanted]
+        if not stale:
+            return
+        with self.backend.transaction():
+            for table, column in stale:
+                self.backend.execute(f"ALTER TABLE {_column(table)} ALTER COLUMN {_column(column)} TYPE DOUBLE PRECISION")
 
     def ping(self) -> bool:
         return self.backend.ping()
@@ -145,55 +194,63 @@ class InstitutionDataStore:
         summary = ImportSummary(entity=entity.name)
         keys = [item.record_key for item in records]
         existing: dict[str, str] = {}
-        with self._tenant(institution_id):
-            for offset in range(0, len(keys), 500):
-                chunk = keys[offset:offset + 500]
-                placeholders = ",".join("?" for _ in chunk)
+        for chunk in _chunks(keys, WRITE_CHUNK_ROWS):
+            placeholders = ",".join("?" for _ in chunk)
+            with self._tenant(institution_id):
                 rows = self.backend.fetchall(
                     f"SELECT record_key, content_hash FROM {entity.table} WHERE institution_id = ? AND record_key IN ({placeholders})",
                     (institution_id, *chunk),
                 )
-                existing.update({row["record_key"]: row["content_hash"] for row in rows})
-            stamp = now_iso()
-            columns = ["row_id", "institution_id", "record_key", *entity.field_names(), "attributes_json", "normalizations_json", "issues_json", "content_hash", "source_file_id", "source_file_name", "source_locator", "ingestion_job_id", "imported_at", "updated_at"]
-            update_columns = [name for name in columns if name not in {"row_id", "institution_id", "record_key", "imported_at"}]
-            sql = (
-                f"INSERT INTO {entity.table} ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)}) "
-                f"ON CONFLICT (institution_id, record_key) DO UPDATE SET " + ", ".join(f"{name} = EXCLUDED.{name}" for name in update_columns)
-            )
-            seen: set[str] = set()
-            for record in records:
-                key = record.record_key
-                if not key.strip("|"):
-                    summary.skipped += 1
-                    summary.skipped_reasons["missing_natural_key"] = summary.skipped_reasons.get("missing_natural_key", 0) + 1
-                    continue
-                if skip_blocking and record.has_blocking_issues():
-                    summary.skipped += 1
-                    summary.skipped_reasons["blocking_issues"] = summary.skipped_reasons.get("blocking_issues", 0) + 1
-                    continue
-                if key in seen:
-                    summary.skipped += 1
-                    summary.skipped_reasons["duplicate_in_batch"] = summary.skipped_reasons.get("duplicate_in_batch", 0) + 1
-                    continue
-                seen.add(key)
-                content_hash = record.content_hash
-                previous = existing.get(key)
-                if previous == content_hash:
-                    summary.unchanged += 1
-                    continue
-                values: list[Any] = [f"{entity.name}-{uuid4().hex}", institution_id, key]
-                for item in entity.fields:
-                    value = record.fields.get(item.name)
-                    if item.field_type is FieldType.BOOLEAN and value is not None:
-                        value = 1 if value else 0
-                    values.append(value)
-                values.extend([
-                    _json(record.attributes), _json(list(record.normalizations)), _json(list(record.issues)), content_hash,
-                    record.lineage.source_file_id, record.lineage.source_file_name, record.lineage.source_locator, record.lineage.ingestion_job_id,
-                    stamp, stamp,
-                ])
-                self.backend.execute(sql, values)
+            existing.update({row["record_key"]: row["content_hash"] for row in rows})
+        stamp = now_iso()
+        columns = ["row_id", "institution_id", "record_key", *entity.field_names(), "attributes_json", "normalizations_json", "issues_json", "content_hash", "source_file_id", "source_file_name", "source_locator", "ingestion_job_id", "imported_at", "updated_at"]
+        update_columns = [name for name in columns if name not in {"row_id", "institution_id", "record_key", "imported_at"}]
+        sql = (
+            f"INSERT INTO {entity.table} ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)}) "
+            f"ON CONFLICT (institution_id, record_key) DO UPDATE SET " + ", ".join(f"{name} = EXCLUDED.{name}" for name in update_columns)
+        )
+        seen: set[str] = set()
+        pending: list[tuple[str, str | None, list[Any]]] = []
+        for record in records:
+            key = record.record_key
+            if not key.strip("|"):
+                summary.skipped += 1
+                summary.skipped_reasons["missing_natural_key"] = summary.skipped_reasons.get("missing_natural_key", 0) + 1
+                continue
+            if skip_blocking and record.has_blocking_issues():
+                summary.skipped += 1
+                summary.skipped_reasons["blocking_issues"] = summary.skipped_reasons.get("blocking_issues", 0) + 1
+                continue
+            if key in seen:
+                summary.skipped += 1
+                summary.skipped_reasons["duplicate_in_batch"] = summary.skipped_reasons.get("duplicate_in_batch", 0) + 1
+                continue
+            seen.add(key)
+            content_hash = record.content_hash
+            previous = existing.get(key)
+            if previous == content_hash:
+                summary.unchanged += 1
+                continue
+            values: list[Any] = [f"{entity.name}-{uuid4().hex}", institution_id, key]
+            for item in entity.fields:
+                value = record.fields.get(item.name)
+                if item.field_type is FieldType.BOOLEAN and value is not None:
+                    value = 1 if value else 0
+                values.append(value)
+            values.extend([
+                _json(record.attributes), _json(list(record.normalizations)), _json(list(record.issues)), content_hash,
+                record.lineage.source_file_id, record.lineage.source_file_name, record.lineage.source_locator, record.lineage.ingestion_job_id,
+                stamp, stamp,
+            ])
+            pending.append((key, previous, values))
+        # Each chunk is its own transaction: it either lands whole or not at
+        # all, and the backend lock is released between chunks. The summary
+        # only counts chunks that committed, so an error mid-import leaves it
+        # (and the exception) describing exactly what reached the table.
+        for chunk in _chunks(pending, WRITE_CHUNK_ROWS):
+            with self._tenant(institution_id):
+                self.backend.executemany(sql, [values for _, _, values in chunk])
+            for key, previous, _ in chunk:
                 if previous is None:
                     summary.inserted += 1
                     if len(summary.inserted_keys) < 50:
@@ -259,13 +316,13 @@ class InstitutionDataStore:
                 continue
             if key.endswith("__in"):
                 column = _column(key.removesuffix("__in"))
-                entity.field(column)
+                item = entity.field(column)
                 values = list(value) if isinstance(value, (list, tuple, set)) else [value]
                 if not values:
                     clauses.append("1 = 0")
                     continue
                 clauses.append(f"{column} IN ({','.join('?' for _ in values)})")
-                params.extend(values)
+                params.extend(_bool_param(item, element) for element in values)
                 continue
             if key.endswith("__gte") or key.endswith("__lte") or key.endswith("__lt") or key.endswith("__gt"):
                 column, _, op = key.rpartition("__")
@@ -275,7 +332,8 @@ class InstitutionDataStore:
                 params.append(value)
                 continue
             column = _column(key)
-            entity.field(column)
+            item = entity.field(column)
+            value = _bool_param(item, value)
             if isinstance(value, str):
                 clauses.append(f"LOWER({column}) = ?")
                 params.append(value.lower())
@@ -577,19 +635,30 @@ class InstitutionDataStore:
         return [self._job_row(row) for row in rows]
 
     def replace_job_records(self, institution_id: str, job_id: str, records: Iterable[Mapping[str, Any]]) -> int:
+        """Replace a job's staged rows, writing them in bounded transactions.
+
+        The delete and each chunk of ``WRITE_CHUNK_ROWS`` inserts commit
+        separately so the backend lock is released between chunks; the
+        returned count is the number of rows that reached the table.
+        """
+
         with self._tenant(institution_id):
             self.backend.execute("DELETE FROM ingestion_records WHERE institution_id = ? AND job_id = ?", (institution_id, job_id))
-            count = self.backend.executemany(
-                "INSERT INTO ingestion_records(record_id, job_id, institution_id, row_number, locator, raw_json, normalized_json, status, action, record_key, issues_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (
-                    (
-                        f"rec-{uuid4().hex}", job_id, institution_id, int(item["row_number"]), str(item["locator"]),
-                        _json(item.get("raw", {})), _json(item.get("normalized", {})), str(item.get("status", "pending")),
-                        str(item.get("action", "pending")), item.get("record_key"), _json(list(item.get("issues", []))),
-                    )
-                    for item in records
-                ),
+        count = 0
+        rows = (
+            (
+                f"rec-{uuid4().hex}", job_id, institution_id, int(item["row_number"]), str(item["locator"]),
+                _json(item.get("raw", {})), _json(item.get("normalized", {})), str(item.get("status", "pending")),
+                str(item.get("action", "pending")), item.get("record_key"), _json(list(item.get("issues", []))),
             )
+            for item in records
+        )
+        for chunk in _chunks(rows, WRITE_CHUNK_ROWS):
+            with self._tenant(institution_id):
+                count += self.backend.executemany(
+                    "INSERT INTO ingestion_records(record_id, job_id, institution_id, row_number, locator, raw_json, normalized_json, status, action, record_key, issues_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    chunk,
+                )
         return count
 
     def job_records(self, institution_id: str, job_id: str, *, limit: int = 1000, offset: int = 0, status: str | None = None) -> list[dict[str, Any]]:
@@ -959,4 +1028,4 @@ class InstitutionDataStore:
         return rows
 
 
-__all__ = ["InstitutionDataStore", "MAX_QUERY_ROWS", "now_iso"]
+__all__ = ["InstitutionDataStore", "MAX_QUERY_ROWS", "WRITE_CHUNK_ROWS", "now_iso"]

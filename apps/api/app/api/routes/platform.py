@@ -7,6 +7,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from ...actions.files import FORMAT_CONTENT_TYPES
 from ...domain.principals import Capability, InstitutionScope
@@ -72,7 +73,8 @@ async def download_report(report_id: str, request: Request, institution_id: str 
     principal = require_principal(request)
     target = resolve_institution(principal, institution_id)
     try:
-        record, content = platform.reports.fetch(principal, target, report_id)
+        # The object-store read (S3 in production) blocks; keep it off the event loop.
+        record, content = await run_in_threadpool(platform.reports.fetch, principal, target, report_id)
     except (PermissionError, KeyError) as exc:
         raise translate(exc) from exc
     file_name = str(record["object_key"]).rsplit("/", 1)[-1]

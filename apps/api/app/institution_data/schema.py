@@ -20,8 +20,8 @@ LINEAGE_COLUMNS = (
 
 _TYPE_MAP = {
     FieldType.INTEGER: "INTEGER",
-    FieldType.NUMBER: "REAL",
-    FieldType.PERCENT: "REAL",
+    FieldType.NUMBER: "DOUBLE PRECISION",
+    FieldType.PERCENT: "DOUBLE PRECISION",
     FieldType.BOOLEAN: "INTEGER",
 }
 
@@ -326,6 +326,21 @@ def postgres_row_level_security() -> tuple[str, ...]:
     return tuple(statements)
 
 
+def postgres_numeric_columns() -> frozenset[tuple[str, str]]:
+    """(table, column) pairs that must be DOUBLE PRECISION on PostgreSQL.
+
+    Earlier schemas created these as REAL (float4), which makes ``SUM`` over
+    money and percentages drift; the store widens any that are still ``real``.
+    """
+
+    return frozenset(
+        (entity.table, item.name)
+        for entity in CANONICAL_ENTITIES.values()
+        for item in entity.fields
+        if item.field_type in (FieldType.NUMBER, FieldType.PERCENT)
+    )
+
+
 def render_sql_migration() -> str:
     lines = [f"-- Guru Ji institution data schema {SCHEMA_VERSION}", "-- Generated from app.normalization.canonical; edit the model, not this file."]
     for statement in portable_statements():
@@ -343,6 +358,7 @@ __all__ = [
     "column_type",
     "entity_table_ddl",
     "portable_statements",
+    "postgres_numeric_columns",
     "postgres_row_level_security",
     "render_sql_migration",
 ]

@@ -14,8 +14,11 @@ ENV PYTHONPATH=/app/apps/api \
 # Runtime dependencies resolve from uv.lock rather than a hand-copied list, so the
 # image gets exactly what CI tested and cannot drift when a bound is widened.
 # Copied ahead of the sources so the dependency layer caches across code changes.
+# The aws extra (boto3) is required by the S3 object store, the SQS queue, SES
+# and Textract that production validation mandates for the data platform; the
+# ingest extra adds PDF and legacy .xls parsing for uploads.
 COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --frozen --no-dev --no-install-project
+RUN uv sync --frozen --no-dev --no-install-project --extra aws --extra ingest
 
 COPY apps ./apps
 COPY migrations ./migrations

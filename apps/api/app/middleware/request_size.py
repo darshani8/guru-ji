@@ -16,20 +16,23 @@ class RequestSizeLimitMiddleware:
     the application, so oversized input is never passed to route parsing.
     """
 
-    def __init__(self, app, max_bytes: int, *, upload_max_bytes: int | None = None, upload_prefixes: tuple[str, ...] = ()) -> None:
+    def __init__(self, app, max_bytes: int, *, upload_max_bytes: int | None = None, upload_routes: tuple[tuple[str, str], ...] = ()) -> None:
         if max_bytes <= 0:
             raise ValueError("max_bytes must be positive")
         if upload_max_bytes is not None and upload_max_bytes <= 0:
             raise ValueError("upload_max_bytes must be positive")
         self.app = app
         self.max_bytes = max_bytes
-        # File-upload routes get their own, larger bound; everything else keeps the tight default.
+        # File-upload routes get their own, larger bound; everything else keeps the
+        # tight default. Routes are (METHOD, path) pairs matched exactly, never by
+        # prefix, so sibling JSON routes such as POST /v1/documents/search do not
+        # inherit the upload allowance.
         self.upload_max_bytes = upload_max_bytes or max_bytes
-        self.upload_prefixes = tuple(upload_prefixes)
+        self.upload_routes = frozenset((method.upper(), path) for method, path in upload_routes)
 
     def _limit_for(self, scope) -> int:
-        path = scope.get("path", "")
-        if self.upload_prefixes and any(path.startswith(prefix) for prefix in self.upload_prefixes):
+        route = (str(scope.get("method", "")).upper(), str(scope.get("path", "")).rstrip("/") or "/")
+        if route in self.upload_routes:
             return max(self.max_bytes, self.upload_max_bytes)
         return self.max_bytes
 

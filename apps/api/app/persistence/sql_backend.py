@@ -148,6 +148,15 @@ class SqliteBackend(SqlBackend):
 
 
 class PostgresBackend(SqlBackend):
+    """One psycopg connection that is reopened when the server drops it.
+
+    A statement that fails because the connection broke (server restart,
+    ``pg_terminate_backend``, idle timeouts) is retried once on a fresh
+    connection when it ran outside an explicit transaction. Inside a
+    transaction the connection is reopened and the error is re-raised so the
+    caller's transaction fails cleanly instead of half-applying.
+    """
+
     dialect = "postgresql"
 
     def __init__(self, database_url: str) -> None:
@@ -159,59 +168,149 @@ class PostgresBackend(SqlBackend):
             from psycopg.rows import dict_row
         except ImportError as exc:  # pragma: no cover - exercised only without psycopg
             raise RuntimeError("PostgreSQL support requires the psycopg[binary] dependency") from exc
-        self._connection = psycopg.connect(database_url, row_factory=dict_row)
+        self._psycopg = psycopg
+        self._dict_row = dict_row
+        self._database_url = database_url
+        self._connection: Any = None
+        self._connection = self._open_connection()
+
+    # -- connection management --------------------------------------------------
+    def _open_connection(self) -> Any:
+        return self._psycopg.connect(self._database_url, row_factory=self._dict_row)
+
+    @staticmethod
+    def _is_broken(connection: Any) -> bool:
+        return connection is None or bool(getattr(connection, "closed", False)) or bool(getattr(connection, "broken", False))
+
+    def _discard_connection(self) -> None:
+        connection, self._connection = self._connection, None
+        if connection is not None:
+            try:
+                connection.close()
+            except Exception:  # noqa: BLE001 - a dead socket may refuse to close cleanly
+                pass
+
+    def _ensure_connection(self) -> Any:
+        """Return a usable connection, reopening it when the previous one broke."""
+
+        if self._closed:
+            raise self._psycopg.InterfaceError("the backend has been closed")
+        if self._is_broken(self._connection):
+            self._discard_connection()
+            self._connection = self._open_connection()
+        return self._connection
+
+    def _run(self, operation: Any) -> Any:
+        """Run ``operation(connection)`` with reconnect-and-retry on a dropped connection."""
+
+        with self._lock:
+            connection = self._ensure_connection()
+            try:
+                return operation(connection)
+            except (self._psycopg.OperationalError, self._psycopg.InterfaceError):
+                if not self._is_broken(connection):
+                    raise  # a genuine statement failure (cancel, serialization, ...) on a live connection
+                self._discard_connection()
+                if self.in_transaction:
+                    # The server already aborted the transaction; reopen so the
+                    # next transaction works, and let this one fail cleanly.
+                    try:
+                        self._connection = self._open_connection()
+                    except (self._psycopg.OperationalError, self._psycopg.InterfaceError):
+                        pass  # still down: the next statement reopens it
+                    raise
+                connection = self._ensure_connection()
+                return operation(connection)
 
     def _adapt(self, sql: str) -> str:
         return sql.replace("?", "%s")
 
+    def _autocommit_if_outside_transaction(self, connection: Any) -> None:
+        # A statement outside an explicit transaction must not leave the
+        # connection idle-in-transaction (and holding a tenant setting).
+        if not self.in_transaction:
+            connection.commit()
+
     def execute(self, sql: str, params: Sequence[Any] = ()) -> int:
-        with self._lock, self._connection.cursor() as cursor:
-            cursor.execute(self._adapt(sql), tuple(params))
-            return cursor.rowcount if cursor.rowcount is not None else 0
+        statement = self._adapt(sql)
+        values = tuple(params)
+
+        def operation(connection: Any) -> int:
+            with connection.cursor() as cursor:
+                cursor.execute(statement, values)
+                affected = cursor.rowcount if cursor.rowcount is not None else 0
+            self._autocommit_if_outside_transaction(connection)
+            return affected
+
+        return self._run(operation)
 
     def executemany(self, sql: str, rows: Iterable[Sequence[Any]]) -> int:
         materialized = [tuple(row) for row in rows]
         if not materialized:
             return 0
-        with self._lock, self._connection.cursor() as cursor:
-            cursor.executemany(self._adapt(sql), materialized)
+        statement = self._adapt(sql)
+
+        def operation(connection: Any) -> int:
+            with connection.cursor() as cursor:
+                cursor.executemany(statement, materialized)
+            self._autocommit_if_outside_transaction(connection)
             return len(materialized)
 
+        return self._run(operation)
+
     def fetchall(self, sql: str, params: Sequence[Any] = ()) -> list[dict[str, Any]]:
-        with self._lock:
-            with self._connection.cursor() as cursor:
-                cursor.execute(self._adapt(sql), tuple(params))
+        statement = self._adapt(sql)
+        values = tuple(params)
+
+        def operation(connection: Any) -> list[dict[str, Any]]:
+            with connection.cursor() as cursor:
+                cursor.execute(statement, values)
                 rows = [dict(row) for row in cursor.fetchall()]
-            if not self.in_transaction:
-                # A read outside an explicit transaction must not leave the
-                # connection idle-in-transaction (and holding a tenant setting).
-                self._connection.commit()
+            self._autocommit_if_outside_transaction(connection)
             return rows
+
+        return self._run(operation)
 
     def set_tenant(self, tenant_id: str) -> None:
         # Row-level security policies read app.institution_id; SET LOCAL binds it
         # to the current transaction only, so no tenant leaks into the next one.
-        with self._lock, self._connection.cursor() as cursor:
-            cursor.execute("SELECT set_config('app.institution_id', %s, true)", (tenant_id,))
+        def operation(connection: Any) -> None:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT set_config('app.institution_id', %s, true)", (tenant_id,))
+
+        self._run(operation)
 
     def commit(self) -> None:
-        with self._lock:
-            self._connection.commit()
+        self._run(lambda connection: connection.commit())
 
     def rollback(self) -> None:
         with self._lock:
-            self._connection.rollback()
+            connection = self._connection
+            if self._is_broken(connection):
+                # The server already discarded the transaction with the connection.
+                self._discard_connection()
+                return
+            try:
+                connection.rollback()
+            except (self._psycopg.OperationalError, self._psycopg.InterfaceError):
+                self._discard_connection()
 
     def ping(self) -> bool:
-        with self._lock, self._connection.cursor() as cursor:
-            cursor.execute("SELECT 1")
-            cursor.fetchone()
-        return True
+        def operation(connection: Any) -> bool:
+            with connection.cursor() as cursor:
+                cursor.execute("SELECT 1")
+                cursor.fetchone()
+            # Readiness probes run outside a transaction; commit so the probe
+            # never leaves the connection idle-in-transaction.
+            self._autocommit_if_outside_transaction(connection)
+            return True
+
+        return bool(self._run(operation))
 
     def close(self) -> None:
         with self._lock:
             if not self._closed:
-                self._connection.close()
+                self._discard_connection()
                 self._closed = True
 
 

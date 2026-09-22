@@ -66,12 +66,12 @@ Roles come from verified OIDC claims, a trusted LMS edge, or development demo he
 
 ## Configuration
 
-See `.env.example`. Local defaults need no external service: SQLite, local/in-memory object store, inline queue, hashing embeddings, deterministic planner, outbox email, OCR disabled. Production validation requires PostgreSQL for `INSTITUTION_DATABASE_URL`, S3 object storage, a thread or SQS queue, and TLS for SMTP.
+See `.env.example`. Local defaults need no external service: SQLite, local/in-memory object store, inline queue, hashing embeddings, deterministic planner, outbox email, OCR disabled. In production the platform is opt-in (`GURU_PLATFORM_ENABLED` defaults to false there); once enabled, validation requires PostgreSQL for `INSTITUTION_DATABASE_URL`, S3 object storage, a thread or SQS queue, and TLS for SMTP. The API image installs the `aws` and `ingest` extras so S3, SQS, SES, Textract and PDF/.xls parsing are available.
 
 ## Operations
 
 - `make run` starts the API; `/platform.html` is the platform console; `/` is the assistant.
-- `make worker` drains background jobs (required for `GURU_JOB_QUEUE=sqs`; optional alongside the thread queue).
+- `make worker` drains background jobs (required for `GURU_JOB_QUEUE=sqs`; optional alongside the thread queue). The thread queue starts with the API process; at boot every process returns jobs left `running` for longer than `GURU_JOB_STALE_SECONDS` (default 900) to the queue and dispatches them again, so an interrupted import resumes after a restart.
 - `make monitor` runs one monitoring pass for every institution with monitoring enabled (schedule with cron/EventBridge).
 - `make platform-smoke` exercises upload → import → command → report against a running development API.
 - `make platform-postgres-smoke` (with `CONTROL_DATABASE_URL` pointing at a disposable PostgreSQL database) verifies the canonical store, ingestion state, the intelligence store, and that row-level security hides rows without a tenant context. Set `GURU_SMOKE_INSTITUTION` to run `platform_smoke.py` against a persistent database with a fresh institution.

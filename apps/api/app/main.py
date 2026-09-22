@@ -51,7 +51,7 @@ app.add_middleware(RequestIdMiddleware)
 app.add_middleware(SecurityHeadersMiddleware, production=settings.environment == "production", auth_origins=settings.oidc_browser_origins)
 app.add_middleware(RequestTimeoutMiddleware, timeout_seconds=settings.request_timeout_seconds)
 app.add_middleware(RateLimitMiddleware, max_requests=settings.rate_limit_requests, window_seconds=settings.rate_limit_window_seconds)
-app.add_middleware(RequestSizeLimitMiddleware, max_bytes=settings.max_request_bytes, upload_max_bytes=settings.max_upload_bytes + 65_536, upload_prefixes=("/v1/ingestion/uploads", "/v1/documents"))
+app.add_middleware(RequestSizeLimitMiddleware, max_bytes=settings.max_request_bytes, upload_max_bytes=settings.max_upload_bytes + 65_536, upload_routes=(("POST", "/v1/ingestion/uploads"), ("POST", "/v1/documents")))
 if settings.allowed_origins:
     app.add_middleware(CORSMiddleware, allow_origins=list(settings.allowed_origins), allow_credentials=True, allow_methods=["GET", "POST", "DELETE", "OPTIONS"], allow_headers=["*"])
 app.include_router(health_router)

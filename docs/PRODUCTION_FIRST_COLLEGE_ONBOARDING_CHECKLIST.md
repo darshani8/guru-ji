@@ -141,6 +141,16 @@ GURU_INSTITUTION_CONNECTORS=[
 ]
 
 FIRST_COLLEGE_CONNECTOR_TOKEN=<injected-at-runtime-by-secret-manager>
+
+# Institutional data platform (ingestion, canonical data, agents). Off in
+# production unless enabled here; when enabled, every line below is required
+# and startup validation fails without them.
+GURU_PLATFORM_ENABLED=true
+INSTITUTION_DATABASE_URL=postgresql://<user>:<password>@<approved-private-host>/<database>
+GURU_OBJECT_STORE=s3
+GURU_S3_BUCKET=<approved-bucket>
+GURU_JOB_QUEUE=sqs
+GURU_SQS_QUEUE_URL=https://sqs.<region>.amazonaws.com/<account>/<queue>
 ```
 
 - [ ] The real `source_id`, `institution_id`, display name, HTTPS endpoint, and secret reference are approved before release.
@@ -153,6 +163,7 @@ FIRST_COLLEGE_CONNECTOR_TOKEN=<injected-at-runtime-by-secret-manager>
 - [ ] OIDC is configured; the development bearer token is replaced; allowed browser origins are exact and non-wildcard.
 - [ ] The configured model provider is approved and non-deterministic for production; provider credentials remain server-side.
 - [ ] Configuration validation passes before deployment and startup fails rather than widening scope or enabling demo data.
+- [ ] If the data platform is enabled (`GURU_PLATFORM_ENABLED=true`), `INSTITUTION_DATABASE_URL` is PostgreSQL, `GURU_OBJECT_STORE=s3` with `GURU_S3_BUCKET`, and `GURU_JOB_QUEUE` is `thread` or `sqs` (with `GURU_SQS_QUEUE_URL` and a running `make worker` for `sqs`); the workload role holds the S3 and SQS permissions. Leave it unset (off) to deploy the assistant alone.
 
 ## 6. Run the repository and artifact gates
 

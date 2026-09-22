@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
+from starlette.concurrency import run_in_threadpool
 
 
 router = APIRouter(prefix="/v1/health", tags=["health"])
@@ -15,9 +16,11 @@ async def liveness(request: Request) -> dict[str, str]:
 @router.get("/ready", summary="Check whether the local runtime is ready")
 async def readiness(request: Request) -> dict[str, object]:
     runtime = request.app.state.runtime
-    database_ok = runtime.store.ping()
+    # Pings take the store lock; run them off the event loop so a long worker
+    # transaction delays this probe instead of stalling every other request.
+    database_ok = await run_in_threadpool(runtime.store.ping)
     platform = runtime.platform
-    platform_ok = platform.store.ping() if platform is not None else True
+    platform_ok = await run_in_threadpool(platform.store.ping) if platform is not None else True
     status = "ready" if database_ok and platform_ok else "not_ready"
     payload: dict[str, object] = {"service": runtime.settings.app_name, "status": status, "version": runtime.settings.version, "sources": len(runtime.sources.all()), "tools": len(runtime.tools.all()), "database": runtime.store.backend_name, "database_ok": database_ok}
     payload["platform"] = (

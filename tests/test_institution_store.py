@@ -1,7 +1,16 @@
+import sys
+import types
 import unittest
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 from app.institution_data.models import CanonicalRecord, RecordLineage
-from app.institution_data.store import InstitutionDataStore
+from app.institution_data.schema import column_type, postgres_numeric_columns, render_sql_migration
+from app.institution_data.store import WRITE_CHUNK_ROWS, InstitutionDataStore
+from app.normalization.canonical import FieldType, entity as canonical_entity
+from app.persistence.sql_backend import PostgresBackend, SqlBackend, SqliteBackend
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _students(n: int, program: str = "MBA"):
@@ -94,6 +103,351 @@ class InstitutionStoreTests(unittest.TestCase):
         self.assertEqual(self.store.claim_background_jobs(), [])
         self.store.finish_background_job("bg-1", status="succeeded", result={"ok": True})
         self.assertEqual(self.store.get_background_job("bg-1")["result"], {"ok": True})
+
+    def test_boolean_filters_bind_as_integers(self):
+        # PostgreSQL refuses ``integer = boolean``; filters must bind 1/0 exactly like writes do.
+        entity = canonical_entity("faculty")
+        _, params = self.store._where(entity, {"is_hod": True})
+        self.assertEqual(params, [1])
+        _, params = self.store._where(entity, {"is_hod": False})
+        self.assertEqual(params, [0])
+        self.assertTrue(all(type(value) is int for value in params))
+        _, params = self.store._where(entity, {"is_hod__in": [True, False]})
+        self.assertEqual(params, [1, 0])
+        self.assertTrue(all(type(value) is int for value in params))
+        # Non-boolean fields keep their values.
+        _, params = self.store._where(canonical_entity("student"), {"semester": 3, "semester__in": [1, 2]})
+        self.assertEqual(params, [3, 1, 2])
+        self.store.upsert_records("college_a", [
+            CanonicalRecord("faculty", {"faculty_id": "F1", "name": "Head", "department": "MBA", "is_hod": True}),
+            CanonicalRecord("faculty", {"faculty_id": "F2", "name": "Member", "department": "MBA", "is_hod": False}),
+        ])
+        self.assertEqual([row["faculty_id"] for row in self.store.query_records("college_a", "faculty", {"is_hod": True})], ["F1"])
+        self.assertEqual([row["faculty_id"] for row in self.store.query_records("college_a", "faculty", {"is_hod__in": [False]})], ["F2"])
+        self.assertEqual(self.store.count_records("college_a", "faculty", {"is_hod": False}), 1)
+
+    def test_bulk_writes_commit_in_bounded_chunks_and_keep_lineage(self):
+        commits: list[int] = []
+        original_commit = self.store.backend.commit
+
+        def counting_commit() -> None:
+            commits.append(1)
+            original_commit()
+
+        self.store.backend.commit = counting_commit  # type: ignore[method-assign]
+        total = WRITE_CHUNK_ROWS * 2 + 7
+        summary = self.store.upsert_records("college_a", _students(total))
+        self.assertEqual((summary.inserted, summary.updated, summary.unchanged), (total, 0, 0))
+        # Three lookup transactions plus three write transactions, never one transaction for the whole import.
+        self.assertEqual(len(commits), 6)
+        self.assertEqual(self.store.count_records("college_a", "student"), total)
+        last = self.store.get_record("college_a", "student", f"mba00{total}")
+        self.assertEqual(last["lineage"]["source_locator"], f"sheet=MBA;row={total + 1}")
+        self.assertEqual(last["lineage"]["source_file_name"], "students.xlsx")
+        commits.clear()
+        staged = [{"row_number": i, "locator": f"row={i}", "raw": {"n": i}, "status": "parsed"} for i in range(1, WRITE_CHUNK_ROWS * 2 + 2)]
+        self.assertEqual(self.store.replace_job_records("college_a", "job-1", iter(staged)), len(staged))
+        self.assertEqual(len(commits), 4)  # delete + three insert chunks
+        self.assertEqual(len(self.store.job_records("college_a", "job-1", limit=5000)), len(staged))
+        self.assertEqual(self.store.replace_job_records("college_a", "job-1", []), 0)
+        self.assertEqual(self.store.job_records("college_a", "job-1"), [])
+
+    def test_bulk_write_failure_keeps_committed_chunks_only(self):
+        calls = {"n": 0}
+        original = self.store.backend.executemany
+
+        def failing_executemany(sql, rows):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("disk full")
+            return original(sql, rows)
+
+        self.store.backend.executemany = failing_executemany  # type: ignore[method-assign]
+        with self.assertRaises(RuntimeError):
+            self.store.upsert_records("college_a", _students(WRITE_CHUNK_ROWS + 5))
+        # The first chunk landed whole, the failed chunk not at all, and the store still works.
+        self.assertEqual(self.store.count_records("college_a", "student"), WRITE_CHUNK_ROWS)
+        self.assertFalse(self.store.backend.in_transaction)
+        self.assertEqual(self.store.upsert_records("college_a", _students(1)).unchanged, 1)
+
+    def test_claim_background_job_claims_exactly_one_queued_job(self):
+        self.store.enqueue_background_job("college_a", job_id="bg-a", job_type="ingest", payload={"n": 1})
+        self.store.enqueue_background_job("college_a", job_id="bg-b", job_type="ingest", payload={"n": 2})
+        job = self.store.claim_background_job("bg-b")
+        self.assertEqual((job["job_id"], job["status"], job["attempts"]), ("bg-b", "running", 1))
+        self.assertIsNotNone(job["started_at"])
+        self.assertEqual(job["payload"], {"n": 2})
+        # The other job is untouched and still claimable by the polling path.
+        self.assertEqual(self.store.get_background_job("bg-a")["status"], "queued")
+        self.assertIsNone(self.store.claim_background_job("bg-b"), "a running job cannot be claimed twice")
+        self.assertIsNone(self.store.claim_background_job("bg-missing"))
+        self.store.finish_background_job("bg-b", status="succeeded")
+        self.assertIsNone(self.store.claim_background_job("bg-b"), "a finished job cannot be claimed")
+        self.assertEqual([item["job_id"] for item in self.store.claim_background_jobs()], ["bg-a"])
+
+    def test_requeue_stale_background_jobs(self):
+        old = (datetime.now(timezone.utc) - timedelta(seconds=600)).isoformat()
+        for job_id in ("bg-stale", "bg-fresh", "bg-exhausted", "bg-no-start"):
+            self.store.enqueue_background_job("college_a", job_id=job_id, job_type="ingest", payload={})
+        for job_id in ("bg-stale", "bg-fresh", "bg-exhausted", "bg-no-start"):
+            self.assertIsNotNone(self.store.claim_background_job(job_id))
+        with self.store.backend.transaction():
+            self.store.backend.execute("UPDATE background_jobs SET started_at = ? WHERE job_id IN (?, ?)", (old, "bg-stale", "bg-exhausted"))
+            self.store.backend.execute("UPDATE background_jobs SET attempts = 3 WHERE job_id = ?", ("bg-exhausted",))
+            self.store.backend.execute("UPDATE background_jobs SET started_at = NULL, created_at = ? WHERE job_id = ?", (old, "bg-no-start"))
+        self.assertEqual(self.store.requeue_stale_background_jobs(older_than_seconds=3600), [], "claims younger than the window are live")
+        requeued = self.store.requeue_stale_background_jobs(older_than_seconds=60, max_attempts=3)
+        self.assertEqual(sorted(item["job_id"] for item in requeued), ["bg-no-start", "bg-stale"])
+        stale = self.store.get_background_job("bg-stale")
+        self.assertEqual((stale["status"], stale["started_at"], stale["attempts"]), ("queued", None, 1))
+        self.assertEqual(self.store.get_background_job("bg-fresh")["status"], "running", "a live claim is left alone")
+        exhausted = self.store.get_background_job("bg-exhausted")
+        self.assertEqual(exhausted["status"], "failed")
+        self.assertIn("repeated attempts", exhausted["error"])
+        self.assertIsNotNone(exhausted["finished_at"])
+        self.assertEqual(self.store.requeue_stale_background_jobs(older_than_seconds=60), [], "requeueing is idempotent")
+        self.assertEqual(self.store.claim_background_job("bg-stale")["attempts"], 2)
+
+
+class _FakeCursor:
+    def __init__(self, connection):
+        self.connection = connection
+        self.rowcount = 1
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def _check(self, sql, params):
+        module = self.connection.module
+        if self.connection.closed:
+            raise module.OperationalError("the connection is closed")
+        if self.connection.kill_on_next:
+            self.connection.kill_on_next = False
+            self.connection.closed = True
+            raise module.OperationalError("terminating connection due to administrator command")
+        if self.connection.cancel_on_next:
+            self.connection.cancel_on_next = False
+            raise module.OperationalError("canceling statement due to statement timeout")
+        self.connection.statements.append((sql, tuple(params)))
+
+    def execute(self, sql, params=()):
+        self._check(sql, params)
+
+    def executemany(self, sql, rows):
+        self._check(sql, ("many", len(rows)))
+
+    def fetchall(self):
+        return [{"one": 1}]
+
+    def fetchone(self):
+        return {"one": 1}
+
+
+class _FakeConnection:
+    def __init__(self, module):
+        self.module = module
+        self.closed = False
+        self.broken = False
+        self.statements: list = []
+        self.commits = 0
+        self.rollbacks = 0
+        self.kill_on_next = False
+        self.cancel_on_next = False
+
+    def cursor(self):
+        return _FakeCursor(self)
+
+    def commit(self):
+        if self.closed:
+            raise self.module.OperationalError("the connection is closed")
+        self.commits += 1
+
+    def rollback(self):
+        if self.closed:
+            raise self.module.OperationalError("the connection is closed")
+        self.rollbacks += 1
+
+    def close(self):
+        self.closed = True
+
+
+class _FakePsycopg(types.ModuleType):
+    def __init__(self):
+        super().__init__("psycopg")
+        self.OperationalError = type("OperationalError", (Exception,), {})
+        self.InterfaceError = type("InterfaceError", (Exception,), {})
+        self.connections: list[_FakeConnection] = []
+        self.refuse = False
+        self.rows = types.ModuleType("psycopg.rows")
+        self.rows.dict_row = object()
+
+    def connect(self, url, row_factory=None):
+        if self.refuse:
+            raise self.OperationalError("connection refused")
+        connection = _FakeConnection(self)
+        self.connections.append(connection)
+        return connection
+
+
+class PostgresBackendReconnectTests(unittest.TestCase):
+    """Exercise the reconnect logic with a fake driver so no server is needed."""
+
+    def setUp(self):
+        self.fake = _FakePsycopg()
+        self._saved = {name: sys.modules.get(name) for name in ("psycopg", "psycopg.rows")}
+        sys.modules["psycopg"] = self.fake
+        sys.modules["psycopg.rows"] = self.fake.rows
+        self.backend = PostgresBackend("postgresql://fake/db")
+
+    def tearDown(self):
+        for name, module in self._saved.items():
+            if module is None:
+                sys.modules.pop(name, None)
+            else:
+                sys.modules[name] = module
+
+    def test_statement_outside_transaction_reconnects_and_retries_once(self):
+        first = self.fake.connections[0]
+        first.kill_on_next = True
+        self.assertEqual(self.backend.fetchall("SELECT 1"), [{"one": 1}])
+        self.assertEqual(len(self.fake.connections), 2)
+        second = self.fake.connections[1]
+        self.assertEqual(second.statements, [("SELECT 1", ())])
+        self.assertEqual(second.commits, 1, "a read outside a transaction commits so nothing stays idle-in-transaction")
+        self.assertTrue(first.closed)
+        # An already-closed connection is detected before use, without an error round trip.
+        second.closed = True
+        self.assertEqual(self.backend.execute("DELETE FROM t WHERE id = ?", (1,)), 1)
+        self.assertEqual(len(self.fake.connections), 3)
+        self.assertEqual(self.fake.connections[2].statements, [("DELETE FROM t WHERE id = %s", (1,))])
+        self.assertEqual(self.fake.connections[2].commits, 1)
+
+    def test_ping_commits_and_recovers(self):
+        self.assertTrue(self.backend.ping())
+        self.assertEqual(self.fake.connections[0].commits, 1)
+        self.fake.connections[0].kill_on_next = True
+        self.assertTrue(self.backend.ping())
+        self.assertEqual(len(self.fake.connections), 2)
+        self.assertEqual(self.fake.connections[1].commits, 1)
+
+    def test_failure_inside_transaction_reraises_and_next_transaction_works(self):
+        first = self.fake.connections[0]
+        first.kill_on_next = True
+        with self.assertRaises(self.fake.OperationalError):
+            with self.backend.transaction(tenant_id="college_a"):
+                self.backend.execute("INSERT INTO t VALUES (1)")
+        self.assertFalse(self.backend.in_transaction)
+        self.assertEqual(len(self.fake.connections), 2, "the connection was reopened for the next caller")
+        second = self.fake.connections[1]
+        self.assertEqual(second.statements, [], "the failed statement was not replayed on the new connection")
+        with self.backend.transaction(tenant_id="college_a"):
+            self.backend.execute("INSERT INTO t VALUES (2)")
+        self.assertEqual([sql for sql, _ in second.statements], ["SELECT set_config('app.institution_id', %s, true)", "INSERT INTO t VALUES (2)"])
+        self.assertEqual(second.commits, 1)
+
+    def test_transaction_failure_while_server_is_down_still_fails_cleanly(self):
+        first = self.fake.connections[0]
+        first.kill_on_next = True
+        self.fake.refuse = True
+        with self.assertRaises(self.fake.OperationalError):
+            with self.backend.transaction():
+                self.backend.execute("INSERT INTO t VALUES (1)")
+        self.assertFalse(self.backend.in_transaction)
+        self.fake.refuse = False
+        self.assertEqual(self.backend.fetchall("SELECT 1"), [{"one": 1}])
+
+    def test_error_on_live_connection_is_not_retried(self):
+        first = self.fake.connections[0]
+        first.cancel_on_next = True
+        with self.assertRaises(self.fake.OperationalError):
+            self.backend.fetchall("SELECT pg_sleep(100)")
+        self.assertEqual(len(self.fake.connections), 1)
+        self.assertFalse(first.closed)
+
+    def test_close_is_final(self):
+        self.backend.close()
+        self.assertTrue(self.fake.connections[0].closed)
+        with self.assertRaises(self.fake.InterfaceError):
+            self.backend.ping()
+        self.assertEqual(len(self.fake.connections), 1)
+
+
+class _RecordingBackend(SqlBackend):
+    """Pretends to be PostgreSQL and records DDL so the numeric upgrade can be checked without a server."""
+
+    dialect = "postgresql"
+
+    def __init__(self, real_columns):
+        super().__init__()
+        self.real_columns = list(real_columns)
+        self.statements: list[str] = []
+
+    def execute(self, sql, params=()):
+        self.statements.append(" ".join(sql.split()))
+        return 0
+
+    def fetchall(self, sql, params=()):
+        assert "information_schema.columns" in sql and "data_type = 'real'" in sql
+        return [{"table_name": table, "column_name": column} for table, column in self.real_columns]
+
+    def commit(self):
+        return None
+
+    def rollback(self):
+        return None
+
+
+class SchemaNumericTypeTests(unittest.TestCase):
+    def test_number_and_percent_fields_are_double_precision(self):
+        self.assertEqual(column_type(FieldType.NUMBER), "DOUBLE PRECISION")
+        self.assertEqual(column_type(FieldType.PERCENT), "DOUBLE PRECISION")
+        self.assertEqual(column_type(FieldType.BOOLEAN), "INTEGER")
+        wanted = postgres_numeric_columns()
+        self.assertIn(("fees", "amount_due"), wanted)
+        self.assertIn(("fees", "balance"), wanted)
+        self.assertIn(("attendance", "attendance_percent"), wanted)
+        self.assertNotIn(("faculty", "is_hod"), wanted)
+        self.assertNotIn(("students", "semester"), wanted)
+        self.assertNotIn("REAL", render_sql_migration())
+
+    def test_checked_in_migration_matches_generator(self):
+        checked_in = (REPO_ROOT / "migrations" / "002_institution_data.sql").read_text(encoding="utf-8")
+        self.assertEqual(checked_in, render_sql_migration(), "regenerate migrations/002_institution_data.sql with render_sql_migration()")
+
+    def test_sqlite_accepts_double_precision_and_sums_exactly(self):
+        store = InstitutionDataStore(":memory:")
+        store.upsert_records("college_a", [CanonicalRecord("fee", {"student_id": "S1", "fee_type": f"T{i}", "amount_due": 87654.32, "amount_paid": 0}) for i in range(20)])
+        self.assertEqual(store.fee_rollup("college_a")[0]["amount_due"], round(87654.32 * 20, 2))
+
+    def test_postgres_upgrade_alters_only_stale_real_columns_and_is_idempotent(self):
+        backend = _RecordingBackend([("fees", "amount_due"), ("fees", "balance"), ("internet_documents", "match_score"), ("faculty", "is_hod")])
+        store = InstitutionDataStore.__new__(InstitutionDataStore)
+        store.backend = backend
+        store._upgrade_postgres_numeric_columns()
+        self.assertEqual(backend.statements, [
+            "ALTER TABLE fees ALTER COLUMN amount_due TYPE DOUBLE PRECISION",
+            "ALTER TABLE fees ALTER COLUMN balance TYPE DOUBLE PRECISION",
+        ])
+        backend.real_columns = []
+        backend.statements.clear()
+        store._upgrade_postgres_numeric_columns()
+        self.assertEqual(backend.statements, [], "nothing is altered once every column is already DOUBLE PRECISION")
+
+    def test_sqlite_store_never_runs_the_postgres_upgrade(self):
+        backend = SqliteBackend(":memory:")
+        calls: list[str] = []
+        original = backend.fetchall
+
+        def spy(sql, params=()):
+            calls.append(sql)
+            return original(sql, params)
+
+        backend.fetchall = spy  # type: ignore[method-assign]
+        InstitutionDataStore(backend=backend)
+        self.assertFalse(any("information_schema" in sql for sql in calls))
 
 
 if __name__ == "__main__":

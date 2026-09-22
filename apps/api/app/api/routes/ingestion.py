@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from ...domain.principals import Capability
 from ...ingestion.models import ParserError
@@ -34,6 +36,15 @@ class SheetImportBody(BaseModel):
     entity: str | None = Field(default=None, max_length=40)
     institution_id: str | None = Field(default=None, max_length=128)
     auto_commit: bool | None = None
+
+
+# Parsing, normalisation, commits, object-store writes and queue publishes are
+# synchronous and can take seconds; they run in the thread pool so the event
+# loop keeps serving other requests (and the request timeout can still fire).
+
+
+def _enqueue_processing(platform: Any, target: str, job_id: str, requested_by: str) -> str:
+    return platform.jobs.enqueue(target, "ingestion.process", {"institution_id": target, "job_id": job_id, "requested_by": requested_by})
 
 
 def _entity_or_422(entity: str | None) -> str | None:
@@ -77,12 +88,12 @@ async def upload_file(
     if auto_commit is not None:
         options["auto_commit"] = auto_commit
     try:
-        job = platform.ingestion.upload(target, principal.principal_id, file_name=file.filename or "upload.bin", content=content, content_type=file.content_type or "application/octet-stream", entity_hint=entity, options=options)
+        job = await run_in_threadpool(platform.ingestion.upload, target, principal.principal_id, file_name=file.filename or "upload.bin", content=content, content_type=file.content_type or "application/octet-stream", entity_hint=entity, options=options)
     except (IngestionError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if process:
-        job_id = platform.jobs.enqueue(target, "ingestion.process", {"institution_id": target, "job_id": job["job_id"], "requested_by": principal.principal_id})
-        job = platform.store.get_job(target, job["job_id"]) or job
+        job_id = await run_in_threadpool(_enqueue_processing, platform, target, job["job_id"], principal.principal_id)
+        job = await run_in_threadpool(platform.store.get_job, target, job["job_id"]) or job
         job["background_job_id"] = job_id
     return {"job": _public_job(job)}
 
@@ -96,13 +107,13 @@ async def import_sheet(body: SheetImportBody, request: Request) -> dict[str, Any
     if platform.sheets is None:
         raise HTTPException(status_code=503, detail="Google Sheets import is not configured")
     try:
-        result = platform.sheets.fetch(body.sheet_url, gid=body.gid)
+        result = await run_in_threadpool(platform.sheets.fetch, body.sheet_url, gid=body.gid)
         options = {"auto_commit": body.auto_commit} if body.auto_commit is not None else {}
-        job = platform.ingestion.create_job_from_parse_result(target, principal.principal_id, result, source_kind="google_sheets", entity_hint=body.entity, options=options)
+        job = await run_in_threadpool(platform.ingestion.create_job_from_parse_result, target, principal.principal_id, result, source_kind="google_sheets", entity_hint=body.entity, options=options)
     except (ParserError, IngestionError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    platform.jobs.enqueue(target, "ingestion.process", {"institution_id": target, "job_id": job["job_id"], "requested_by": principal.principal_id})
-    return {"job": _public_job(platform.store.get_job(target, job["job_id"]) or job)}
+    await run_in_threadpool(_enqueue_processing, platform, target, job["job_id"], principal.principal_id)
+    return {"job": _public_job(await run_in_threadpool(platform.store.get_job, target, job["job_id"]) or job)}
 
 
 def _public_job(job: dict[str, Any]) -> dict[str, Any]:
@@ -146,8 +157,13 @@ async def decide_mapping(job_id: str, body: MappingDecisionBody, request: Reques
     principal = require_principal(request, Capability.DATA_REVIEW)
     target = resolve_institution(principal, institution_id)
     _entity_or_422(body.entity)
+    def apply_mapping() -> dict[str, Any]:
+        # apply_mapping normalises and (with auto-commit) imports every staged row;
+        # it awaits nothing, so it runs to completion on its own loop in the pool.
+        return asyncio.run(platform.ingestion.apply_mapping(target, job_id, mapping=body.mapping, entity=body.entity, approved_by=principal.principal_id, remember=body.remember))
+
     try:
-        job = await platform.ingestion.apply_mapping(target, job_id, mapping=body.mapping, entity=body.entity, approved_by=principal.principal_id, remember=body.remember)
+        job = await run_in_threadpool(apply_mapping)
     except (IngestionError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except KeyError as exc:
@@ -161,7 +177,7 @@ async def commit_job(job_id: str, request: Request, institution_id: str | None =
     principal = require_principal(request, Capability.DATA_REVIEW)
     target = resolve_institution(principal, institution_id)
     try:
-        job = platform.ingestion.commit(target, job_id, committed_by=principal.principal_id)
+        job = await run_in_threadpool(platform.ingestion.commit, target, job_id, committed_by=principal.principal_id)
     except (IngestionError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except KeyError as exc:

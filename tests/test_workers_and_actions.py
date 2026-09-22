@@ -1,16 +1,57 @@
 import asyncio
 import io
+import json
 import time
 import unittest
 import zipfile
+from datetime import datetime, timedelta, timezone
 
 from app.actions.email import EmailService, OutgoingEmail, SmtpEmailSender
 from app.actions.files import render_csv, render_pdf, render_table_pdf, render_xlsx
+from app.api.platform_runtime import build_platform
+from app.config.settings import AppSettings
 from app.domain.principals import PrincipalType
 from app.ingestion.parsers.excel_parser import parse_xlsx
+from app.institution_data.store import InstitutionDataStore
+from app.observability.tracing import TraceRecorder
+from app.persistence.database import InMemoryControlStore
+from app.policy.pdp import LocalPolicyDecisionPoint
+from app.storage.object_store import InMemoryObjectStore
 from app.workers.handlers import principal_from_snapshot
-from app.workers.queue import InlineJobQueue, ThreadJobQueue
+from app.workers.queue import InlineJobQueue, JobQueue, SqsJobQueue, ThreadJobQueue
 from platform_fixtures import PlatformFixture, principal
+
+
+class FakeSqsClient:
+    """Minimal stand-in for boto3's SQS client: messages are delivered only when asked."""
+
+    def __init__(self, *, fail_sends: bool = False) -> None:
+        self.sent: list[dict] = []
+        self.deleted: list[str] = []
+        self.deliver: list[dict] = []
+        self.fail_sends = fail_sends
+
+    def send_message(self, QueueUrl, MessageBody):
+        if self.fail_sends:
+            raise RuntimeError("AccessDenied: sqs:SendMessage")
+        self.sent.append(json.loads(MessageBody))
+
+    def receive_message(self, QueueUrl, MaxNumberOfMessages, WaitTimeSeconds):
+        batch, self.deliver = self.deliver[:MaxNumberOfMessages], self.deliver[MaxNumberOfMessages:]
+        return {"Messages": [{"Body": json.dumps(item), "ReceiptHandle": f"rh-{index}"} for index, item in enumerate(batch)]}
+
+    def delete_message(self, QueueUrl, ReceiptHandle):
+        self.deleted.append(ReceiptHandle)
+
+
+def _age_running_job(store: InstitutionDataStore, job_id: str, seconds: int) -> None:
+    started = (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
+    with store.backend.transaction():
+        store.backend.execute("UPDATE background_jobs SET started_at = ? WHERE job_id = ?", (started, job_id))
+
+
+async def _ok(payload):
+    return {"ok": True, **payload}
 
 
 class FileRendererTests(unittest.TestCase):
@@ -100,6 +141,124 @@ class EmailAndQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.fx.store.get_job("college_a", job["job_id"])["status"], "imported")
         inbox = self.fx.store.list_notifications("college_a", "staff-1")
         self.assertIn("Inserted 1", inbox[0]["body"])
+
+    async def test_sqs_consumer_claims_only_the_job_named_by_the_message(self):
+        client = FakeSqsClient()
+        queue = SqsJobQueue(self.fx.store, "https://sqs.example.test/q", client=client)
+        queue.register("t.ok", _ok)
+        job_ids = [queue.enqueue("college_a", "t.ok", {"n": i}) for i in range(3)]
+        self.assertEqual([item["job_id"] for item in client.sent], job_ids)
+        client.deliver = [{"job_id": job_ids[1]}]
+        self.assertEqual(await queue.consume_once(wait_seconds=0), 1)
+        self.assertEqual(queue.status(job_ids[1])["status"], "succeeded")
+        self.assertEqual([queue.status(job_ids[0])["status"], queue.status(job_ids[2])["status"]], ["queued", "queued"])
+        self.assertEqual(client.deleted, ["rh-0"])
+        # A redelivered or unknown message is acknowledged without touching other jobs.
+        client.deliver = [{"job_id": job_ids[1]}, {"job_id": "bg-missing"}, {"nope": True}]
+        self.assertEqual(await queue.consume_once(wait_seconds=0), 0)
+        self.assertEqual([queue.status(job_ids[0])["status"], queue.status(job_ids[2])["status"]], ["queued", "queued"])
+        self.assertEqual(len(client.deleted), 4)
+
+    def test_sqs_publish_failure_marks_the_job_failed_instead_of_leaving_it_queued(self):
+        queue = SqsJobQueue(self.fx.store, "https://sqs.example.test/q", client=FakeSqsClient(fail_sends=True))
+        queue.register("t.ok", _ok)
+        with self.assertRaisesRegex(RuntimeError, "could not be published to the job queue"):
+            queue.enqueue("college_a", "t.ok", {})
+        job = self.fx.store.list_background_jobs("college_a")[0]
+        self.assertEqual(job["status"], "failed")
+        self.assertIn("could not publish to SQS", job["error"])
+        self.assertIn("AccessDenied", job["error"])
+
+    def test_recover_stale_requeues_and_redispatches_interrupted_jobs(self):
+        recorder = JobQueue(self.fx.store)  # records only; nothing dispatches
+        recorder.register("t.ok", _ok)
+        interrupted = recorder.enqueue("college_a", "t.ok", {"n": 1})
+        fresh = recorder.enqueue("college_a", "t.ok", {"n": 2})
+        exhausted = recorder.enqueue("college_a", "t.ok", {"n": 3})
+        for job_id in (interrupted, fresh, exhausted):
+            self.assertIsNotNone(self.fx.store.claim_background_job(job_id))
+        _age_running_job(self.fx.store, interrupted, 3600)
+        _age_running_job(self.fx.store, exhausted, 3600)
+        with self.fx.store.backend.transaction():
+            self.fx.store.backend.execute("UPDATE background_jobs SET attempts = 3 WHERE job_id = ?", (exhausted,))
+        # Inline: the requeued job runs immediately, the young claim is left alone.
+        inline = InlineJobQueue(self.fx.store)
+        inline.register("t.ok", _ok)
+        requeued = inline.recover_stale(older_than_seconds=900, max_attempts=3)
+        self.assertEqual([job["job_id"] for job in requeued], [interrupted])
+        self.assertEqual(inline.status(interrupted)["status"], "succeeded")
+        self.assertEqual(inline.status(fresh)["status"], "running")
+        self.assertEqual(inline.status(exhausted)["status"], "failed")
+        # SQS: the message must be published again, since the worker only wakes on messages.
+        stale_sqs = recorder.enqueue("college_a", "t.ok", {"n": 4})
+        self.fx.store.claim_background_job(stale_sqs)
+        _age_running_job(self.fx.store, stale_sqs, 3600)
+        client = FakeSqsClient()
+        sqs = SqsJobQueue(self.fx.store, "https://sqs.example.test/q", client=client)
+        sqs.register("t.ok", _ok)
+        self.assertEqual([job["job_id"] for job in sqs.recover_stale(older_than_seconds=900)], [stale_sqs])
+        self.assertEqual(client.sent, [{"job_id": stale_sqs}])
+        self.assertEqual(sqs.status(stale_sqs)["status"], "queued")
+        # A re-dispatch that fails is recorded on the job instead of raising out of boot.
+        broken = recorder.enqueue("college_a", "t.ok", {"n": 5})
+        self.fx.store.claim_background_job(broken)
+        _age_running_job(self.fx.store, broken, 3600)
+        failing = SqsJobQueue(self.fx.store, "https://sqs.example.test/q", client=FakeSqsClient(fail_sends=True))
+        failing.register("t.ok", _ok)
+        failing.recover_stale(older_than_seconds=900)
+        self.assertEqual(failing.status(broken)["status"], "failed")
+
+    async def test_thread_queue_start_is_idempotent_and_wakes_for_recovered_jobs(self):
+        queue = ThreadJobQueue(self.fx.store, poll_seconds=0.05)
+        queue.register("t.ok", _ok)
+        job_id = queue.enqueue("college_a", "t.ok", {})
+        queue.stop()
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and queue.status(job_id)["status"] != "succeeded":
+            await asyncio.sleep(0.05)
+        # Leave a claim behind the way a killed process would, then boot again.
+        stale = JobQueue(self.fx.store)
+        stale.register("t.ok", _ok)
+        interrupted = stale.enqueue("college_a", "t.ok", {"n": 9})
+        self.fx.store.claim_background_job(interrupted)
+        _age_running_job(self.fx.store, interrupted, 3600)
+        queue.start()
+        queue.start()
+        first_thread = queue._thread
+        self.assertTrue(first_thread.is_alive())
+        queue.recover_stale(older_than_seconds=900)
+        self.assertIs(queue._thread, first_thread)
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and queue.status(interrupted)["status"] != "succeeded":
+            await asyncio.sleep(0.05)
+        queue.stop()
+        self.assertEqual(queue.status(interrupted)["status"], "succeeded")
+
+    async def test_build_platform_starts_the_thread_queue_and_resumes_interrupted_jobs(self):
+        store = InstitutionDataStore(":memory:")
+        store.upsert_institution("college_a", "ABC College")
+        pending = JobQueue(store)
+        pending.register("intelligence.monitor", _ok)
+        interrupted = pending.enqueue("college_a", "intelligence.monitor", {"institution_id": "college_a"})
+        store.claim_background_job(interrupted)
+        _age_running_job(store, interrupted, 3600)
+        young = pending.enqueue("college_a", "intelligence.monitor", {"institution_id": "college_a"})
+        store.claim_background_job(young)
+        settings = AppSettings(control_database_url=":memory:", object_store_backend="memory", job_queue="thread", job_stale_seconds=60)
+        runtime = build_platform(settings, control_store=InMemoryControlStore(), pdp=LocalPolicyDecisionPoint(), tracer=TraceRecorder(), model=None, institution_store=store, objects=InMemoryObjectStore())
+        try:
+            self.assertIsInstance(runtime.jobs, ThreadJobQueue)
+            self.assertTrue(runtime.jobs._thread is not None and runtime.jobs._thread.is_alive(), "thread queue must start at boot, not on first enqueue")
+            deadline = time.monotonic() + 3
+            while time.monotonic() < deadline and runtime.jobs.status(interrupted)["status"] in {"queued", "running"}:
+                await asyncio.sleep(0.05)
+            # No monitor is configured, so the handler is absent and the job finishes as failed;
+            # what matters is that the stale claim was picked up again at boot.
+            self.assertEqual(runtime.jobs.status(interrupted)["status"], "failed")
+            self.assertEqual(runtime.jobs.status(interrupted)["error"], "no handler registered")
+            self.assertEqual(runtime.jobs.status(young)["status"], "running")
+        finally:
+            runtime.close()
 
     def test_principal_snapshot_round_trip(self):
         original = principal(PrincipalType.HOD)

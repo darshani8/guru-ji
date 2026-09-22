@@ -108,7 +108,10 @@ class AppSettings:
     openfga_url: str | None = None
     livekit_url: str | None = None
     # Institutional data platform (ingestion, canonical database, agents, intelligence).
-    platform_enabled: bool = True
+    # ``None`` means "not configured": on for development, off for production,
+    # where a deployment opts in with GURU_PLATFORM_ENABLED=true once PostgreSQL,
+    # S3 and a queue are configured. ``__post_init__`` resolves it to a bool.
+    platform_enabled: bool | None = None
     institution_database_url: str | None = field(default=None, repr=False)
     object_store_backend: str = "local"
     object_store_path: str = "./data/objects"
@@ -117,6 +120,9 @@ class AppSettings:
     s3_prefix: str = ""
     job_queue: str = "inline"
     sqs_queue_url: str | None = None
+    # A background job still ``running`` after this many seconds is treated as
+    # interrupted (worker restart) and returned to the queue at boot.
+    job_stale_seconds: int = 900
     max_upload_bytes: int = 25_000_000
     ingestion_max_rows: int = 50_000
     ingestion_auto_commit: bool = True
@@ -142,6 +148,10 @@ class AppSettings:
     agent_planner: str = "deterministic"
     approval_ttl_seconds: int = 900
     voice_agent_mode: str = "assistant"
+
+    def __post_init__(self) -> None:
+        if self.platform_enabled is None:
+            object.__setattr__(self, "platform_enabled", self.environment != "production")
 
     @classmethod
     def from_env(cls) -> "AppSettings":
@@ -212,7 +222,7 @@ class AppSettings:
             agent_gateway_url=os.getenv("GURU_AGENT_GATEWAY_URL") or None,
             openfga_url=os.getenv("GURU_OPENFGA_URL") or None,
             livekit_url=os.getenv("GURU_LIVEKIT_URL") or None,
-            platform_enabled=_bool_env("GURU_PLATFORM_ENABLED", True),
+            platform_enabled=None if os.getenv("GURU_PLATFORM_ENABLED") is None else _bool_env("GURU_PLATFORM_ENABLED", False),
             institution_database_url=os.getenv("INSTITUTION_DATABASE_URL") or None,
             object_store_backend=(os.getenv("GURU_OBJECT_STORE") or default_object_store).strip().lower(),
             object_store_path=os.getenv("GURU_OBJECT_STORE_PATH", "./data/objects").strip(),
@@ -221,6 +231,7 @@ class AppSettings:
             s3_prefix=os.getenv("GURU_S3_PREFIX", "").strip(),
             job_queue=os.getenv("GURU_JOB_QUEUE", "inline").strip().lower(),
             sqs_queue_url=os.getenv("GURU_SQS_QUEUE_URL") or None,
+            job_stale_seconds=int(os.getenv("GURU_JOB_STALE_SECONDS", "900")),
             max_upload_bytes=int(os.getenv("GURU_MAX_UPLOAD_BYTES", "25000000")),
             ingestion_max_rows=int(os.getenv("GURU_INGESTION_MAX_ROWS", "50000")),
             ingestion_auto_commit=_bool_env("GURU_INGESTION_AUTO_COMMIT", True),
@@ -440,6 +451,8 @@ class AppSettings:
             raise ValueError("GURU_JOB_QUEUE must be inline, thread, or sqs")
         if self.job_queue == "sqs" and not self.sqs_queue_url:
             raise ValueError("GURU_SQS_QUEUE_URL is required when GURU_JOB_QUEUE=sqs")
+        if self.job_stale_seconds <= 0:
+            raise ValueError("GURU_JOB_STALE_SECONDS must be positive")
         if self.max_upload_bytes <= 0 or self.ingestion_max_rows <= 0:
             raise ValueError("upload and ingestion limits must be positive")
         if not 0.5 <= self.mapping_confidence_threshold <= 1.0:
