@@ -264,6 +264,20 @@ class MapRouteTests(unittest.TestCase):
             student = {**headers, "X-Demo-Principal": "map-student", "X-Demo-Role": "student"}
             self.assertEqual(client.get("/v1/intelligence/map/assets", headers=student).status_code, 403)
             self.assertIn("intelligence.map.seed", {event.event_type for event in app.state.runtime.store.recent_audit(limit=50)})
+            no_profile = client.post("/v1/intelligence/map/sync-profile", headers=headers, json={})
+            self.assertEqual(no_profile.status_code, 422, "the profile must exist first")
+            client.put("/v1/intelligence/profile", headers=headers, json={"name": "Map College", "location": "Bengaluru", "official_domains": ["map-college.example"]})
+            synced = client.post("/v1/intelligence/map/sync-profile", headers=headers, json={})
+            self.assertEqual(synced.status_code, 200, synced.text)
+            self.assertEqual(len(synced.json()["domains_added"]), 1)
+            self.assertEqual(client.post("/v1/intelligence/map/harvest", headers=headers, json={}).status_code, 422, "no fetcher configured")
+            regraded = client.post("/v1/intelligence/map/regrade", headers=headers, json={})
+            self.assertEqual(regraded.status_code, 200)
+            exported = client.get("/v1/intelligence/map/export", headers=headers)
+            self.assertEqual(exported.status_code, 200)
+            self.assertIn("text/tab-separated-values", exported.headers["content-type"])
+            self.assertIn("map-college.example", exported.text)
+            self.assertEqual(client.post("/v1/intelligence/map/regrade", headers={**headers, "X-Demo-Role": "faculty"}, json={}).status_code, 403)
 
 
 if __name__ == "__main__":

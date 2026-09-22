@@ -2293,6 +2293,116 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/sync-profile:
+    post:
+      tags:
+      - intelligence-map
+      summary: Bring the intelligence profile's configured official domains into the
+        map
+      operationId: sync_profile_v1_intelligence_map_sync_profile_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MapInstitutionBody'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Sync Profile V1 Intelligence Map Sync Profile Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/harvest:
+    post:
+      tags:
+      - intelligence-map
+      summary: Read official sites for the accounts they declare
+      operationId: harvest_v1_intelligence_map_harvest_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HarvestBody'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Harvest V1 Intelligence Map Harvest Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/regrade:
+    post:
+      tags:
+      - intelligence-map
+      summary: Recompute every grade from the evidence log
+      operationId: regrade_v1_intelligence_map_regrade_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MapInstitutionBody'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Regrade V1 Intelligence Map Regrade Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/export:
+    get:
+      tags:
+      - intelligence-map
+      summary: The map as a tab-separated table in the manual sweep's format
+      operationId: export_v1_intelligence_map_export_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            text/plain:
+              schema:
+                type: string
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /v1/institutions:
     get:
       tags:
@@ -2766,6 +2876,24 @@ components:
           title: Detail
       type: object
       title: HTTPValidationError
+    HarvestBody:
+      properties:
+        asset_ids:
+          anyOf:
+          - items:
+              type: string
+            type: array
+            maxItems: 10
+          - type: 'null'
+          title: Asset Ids
+        institution_id:
+          anyOf:
+          - type: string
+            maxLength: 128
+          - type: 'null'
+          title: Institution Id
+      type: object
+      title: HarvestBody
     InstitutionBody:
       properties:
         name:
@@ -2833,6 +2961,16 @@ components:
           title: Institution Id
       type: object
       title: InvestigateBody
+    MapInstitutionBody:
+      properties:
+        institution_id:
+          anyOf:
+          - type: string
+            maxLength: 128
+          - type: 'null'
+          title: Institution Id
+      type: object
+      title: MapInstitutionBody
     MappingDecisionBody:
       properties:
         mapping:

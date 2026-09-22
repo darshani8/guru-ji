@@ -174,7 +174,10 @@ def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: P
     database_url = settings.resolved_institution_database_url()
     store = institution_store or InstitutionDataStore(database_url)
     intelligence_store = IntelligenceStore(backend=store.backend)
-    intelligence_map = MapService(MapStore(backend=store.backend, suppression_key=(settings.intelligence_suppression_key or "guru-ji-development-only").encode("utf-8"))) if settings.intelligence_map_enabled else None
+    intelligence_map: MapService | None = None
+    if settings.intelligence_map_enabled:
+        map_fetcher = PublicPageFetcher(timeout_seconds=settings.web_extract_timeout_seconds, max_response_bytes=settings.web_extract_max_bytes, user_agent=crawler_user_agent(settings.intelligence_crawler_contact)) if settings.intelligence_fetch_pages else None
+        intelligence_map = MapService(MapStore(backend=store.backend, suppression_key=(settings.intelligence_suppression_key or "guru-ji-development-only").encode("utf-8")), fetcher=map_fetcher)
     objects = objects or _object_store(settings)
     parsers = ParserRegistry(ocr_engine=_ocr_engine(settings), max_bytes=settings.max_upload_bytes)
     mapping = MappingEngine(threshold=settings.mapping_confidence_threshold, model=model)

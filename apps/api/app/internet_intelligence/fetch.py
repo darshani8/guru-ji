@@ -34,6 +34,14 @@ USER_AGENT = "GuruJi-InstitutionIntelligence/1.0 (+https://example.invalid/robot
 # outage no longer shuts a site out for the life of the process.
 ROBOTS_TTL_SECONDS = 86_400.0
 ROBOTS_FAILURE_TTL_SECONDS = 900.0
+HTML_TYPES = frozenset({"html", "text"})
+_CONTENT_FAMILIES = {
+    "html": ("text/html", "application/xhtml+xml"), "text": ("text/plain",), "feed": ("application/rss+xml", "application/atom+xml", "application/xml", "text/xml"),
+    "xml": ("application/xml", "text/xml"), "json": ("application/json", "application/ld+json", "application/sparql-results+json", "text/json"), "pdf": ("application/pdf",),
+}
+_LOGIN_PATH = re.compile(r"/(?:accounts/)?log[-_]?in\b|/authwall|/signin\b|/checkpoint\b", re.IGNORECASE)
+
+
 DEFAULT_SNIPPET_ONLY_DOMAINS = ("facebook.com", "instagram.com", "twitter.com", "x.com", "linkedin.com", "youtube.com", "threads.net", "reddit.com", "quora.com")
 MAX_REDIRECTS = 3
 ROBOTS_MAX_BYTES = 200_000
@@ -243,50 +251,141 @@ class PublicPageFetcher:
             return False
         return parser.can_fetch(self.user_agent, url)
 
-    async def fetch(self, url: str) -> FetchedPage | None:
+    async def retrieve(
+        self, url: str, *, accept: frozenset[str] = HTML_TYPES, etag: str | None = None, last_modified: str | None = None, max_bytes: int | None = None, check_domain: bool = True,
+    ) -> Retrieval:
+        """Fetch one URL and say exactly what happened.
+
+        The same vetted, pinned, robots-aware path as ``fetch``, but the
+        outcome is reported instead of collapsed into None: robots refusal,
+        a block (403/429/999), a login wall, not found, a server error, a
+        timeout, a disallowed content type, or ``not_modified`` when the
+        validators from the last fetch still hold. ``accept`` names the
+        content families wanted (html, text, feed, xml, json, pdf).
+        """
+
         warnings: list[str] = []
         current = url
+        limit = max_bytes or self.max_response_bytes
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds, transport=self.transport, follow_redirects=False) as client:
                 for _hop in range(self.max_redirects + 1):
-                    target = await self._vet(current)
-                    if target is None or not await self._robots_allows(client, target):
-                        return None
-                    headers = {**target.headers, "Accept": "text/html,application/xhtml+xml"}
+                    if check_domain and not self.allowed_domain(current):
+                        return Retrieval(url=current, outcome="snippet_only")
+                    target = await self._vet(current, check_domain=False)
+                    if target is None:
+                        return Retrieval(url=current, outcome="not_public")
+                    if not await self._robots_allows(client, target):
+                        return Retrieval(url=current, outcome="robots")
+                    headers = {**target.headers, "Accept": _accept_header(accept)}
+                    if etag:
+                        headers["If-None-Match"] = etag
+                    if last_modified:
+                        headers["If-Modified-Since"] = last_modified
                     async with client.stream("GET", target.pinned_url, headers=headers, extensions=target.extensions) as response:
                         if response.status_code in _REDIRECT_STATUSES:
                             location = response.headers.get("location")
                             if not location:
-                                return None
-                            current = urljoin(current, location)
+                                return Retrieval(url=current, outcome="error", http_status=response.status_code)
+                            following = urljoin(current, location)
+                            if _LOGIN_PATH.search(urlparse(following).path):
+                                return Retrieval(url=following, outcome="login_wall", http_status=response.status_code)
+                            current = following
                             continue
-                        if response.status_code != 200:
-                            return None
+                        status = response.status_code
+                        if status == 304:
+                            return Retrieval(url=current, outcome="not_modified", http_status=304, etag=response.headers.get("etag") or etag, last_modified=response.headers.get("last-modified") or last_modified)
+                        if status != 200:
+                            return Retrieval(url=current, outcome=_outcome_for(status), http_status=status)
                         content_type = response.headers.get("content-type", "").lower()
-                        if "html" not in content_type and "text/plain" not in content_type:
-                            return None
-                        raw = await read_bounded(response, self.max_response_bytes)
+                        if not _content_allowed(content_type, accept):
+                            return Retrieval(url=current, outcome="content_type", http_status=status, content_type=content_type)
+                        raw = await read_bounded(response, limit)
+                        response_etag, response_modified = response.headers.get("etag"), response.headers.get("last-modified")
                     break
                 else:
-                    return None  # still redirecting after max_redirects hops
-        except (httpx.HTTPError, WebPayloadTooLarge, ValueError):
-            return None
+                    return Retrieval(url=current, outcome="redirect_loop")
+        except WebPayloadTooLarge:
+            return Retrieval(url=current, outcome="too_large")
+        except httpx.TimeoutException:
+            return Retrieval(url=current, outcome="timeout")
+        except (httpx.HTTPError, ValueError):
+            return Retrieval(url=current, outcome="error")
         if current != url:
             warnings.append("redirected")
-        html = raw.decode("utf-8", errors="replace")
+        if _LOGIN_PATH.search(urlparse(current).path):
+            return Retrieval(url=current, outcome="login_wall", http_status=200)
+        return Retrieval(url=current, outcome="ok", http_status=200, content_type=content_type, body=raw, etag=response_etag, last_modified=response_modified, warnings=tuple(warnings))
+
+    async def fetch(self, url: str) -> FetchedPage | None:
+        retrieval = await self.retrieve(url, accept=frozenset({"html", "text"}))
+        if retrieval.outcome != "ok":
+            return None
+        html = retrieval.body.decode("utf-8", errors="replace")
         parser = _VisibleTextParser()
         try:
             parser.feed(html)
         except Exception:  # noqa: BLE001 - tolerate broken markup
             return None
-        published = None
-        for pattern in (_META_DATE, _TIME_TAG):
-            match = pattern.search(html)
-            if match:
-                published = parse_published(match.group(1))
-                if published:
-                    break
-        return FetchedPage(url=current, title=parser.title[:300], text=parser.text[:40_000], published_at=published, warnings=tuple(warnings))
+        return FetchedPage(url=retrieval.url, title=parser.title[:300], text=parser.text[:40_000], published_at=published_from_html(html), warnings=retrieval.warnings)
 
 
-__all__ = ["DEFAULT_SNIPPET_ONLY_DOMAINS", "MAX_REDIRECTS", "ROBOTS_FAILURE_TTL_SECONDS", "ROBOTS_MAX_BYTES", "ROBOTS_TTL_SECONDS", "FetchedPage", "PublicPageFetcher", "USER_AGENT", "crawler_user_agent", "is_public_address", "resolve_host"]
+def published_from_html(html: str) -> datetime | None:
+    for pattern in (_META_DATE, _TIME_TAG):
+        match = pattern.search(html)
+        if match:
+            published = parse_published(match.group(1))
+            if published:
+                return published
+    return None
+
+
+def _accept_header(accept: frozenset[str]) -> str:
+    types = [media for family in sorted(accept) for media in _CONTENT_FAMILIES.get(family, ())]
+    return ",".join(types) or "text/html"
+
+
+def _content_allowed(content_type: str, accept: frozenset[str]) -> bool:
+    if not content_type:
+        return False
+    media = content_type.split(";", 1)[0].strip()
+    if "html" in accept and "html" in media:
+        return True
+    return any(media == allowed for family in accept for allowed in _CONTENT_FAMILIES.get(family, ()))
+
+
+def _outcome_for(status: int) -> str:
+    if status in {401, 403, 429, 999}:
+        return "blocked"
+    if status == 404:
+        return "not_found"
+    if status == 410:
+        return "gone"
+    if status >= 500:
+        return "server_error"
+    return "error"
+
+
+@dataclass(frozen=True, slots=True)
+class Retrieval:
+    """What happened when a URL was fetched; ``body`` is set only when ``outcome`` is ok."""
+
+    url: str
+    outcome: str  # ok | not_modified | robots | blocked | login_wall | not_found | gone | server_error | timeout | content_type | too_large | not_public | snippet_only | redirect_loop | error
+    http_status: int | None = None
+    content_type: str = ""
+    body: bytes = b""
+    etag: str | None = None
+    last_modified: str | None = None
+    warnings: tuple[str, ...] = ()
+
+    @property
+    def ok(self) -> bool:
+        return self.outcome == "ok"
+
+    @property
+    def text(self) -> str:
+        return self.body.decode("utf-8", errors="replace")
+
+
+__all__ = ["HTML_TYPES", "Retrieval", "published_from_html", "DEFAULT_SNIPPET_ONLY_DOMAINS", "MAX_REDIRECTS", "ROBOTS_FAILURE_TTL_SECONDS", "ROBOTS_MAX_BYTES", "ROBOTS_TTL_SECONDS", "FetchedPage", "PublicPageFetcher", "USER_AGENT", "crawler_user_agent", "is_public_address", "resolve_host"]

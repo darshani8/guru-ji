@@ -6,6 +6,7 @@ from typing import Any
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
 
 from ...domain.audit import AuditEvent, AuditOutcome
@@ -23,6 +24,15 @@ class SeedBody(BaseModel):
     all_groups: bool = False
     approved_by: str | None = Field(default=None, max_length=200)
     holdout_percent: int = Field(default=20, ge=0, le=50)
+    institution_id: str | None = Field(default=None, max_length=128)
+
+
+class HarvestBody(BaseModel):
+    asset_ids: list[str] | None = Field(default=None, max_length=10)
+    institution_id: str | None = Field(default=None, max_length=128)
+
+
+class MapInstitutionBody(BaseModel):
     institution_id: str | None = Field(default=None, max_length=128)
 
 
@@ -107,6 +117,58 @@ async def seed(body: SeedBody, request: Request) -> dict[str, Any]:
         raise translate(exc) from exc
     audit_map_action(request, principal, "seed", metadata={"institution_id": target, "all_groups": body.all_groups, "approved_by": body.approved_by, "assets_created": int(result["summary"]["assets_created"])})
     return result
+
+
+@router.post("/sync-profile", summary="Bring the intelligence profile's configured official domains into the map")
+async def sync_profile(body: MapInstitutionBody, request: Request) -> dict[str, Any]:
+    service = map_service(request)
+    principal = require_principal(request, Capability.INTELLIGENCE_MANAGE)
+    target = resolve_institution(principal, body.institution_id)
+    profile = platform_from_request(request).intelligence_store.get_profile(target)
+    try:
+        result = service.sync_profile(principal, target, profile)
+    except (ValueError, PermissionError) as exc:
+        raise translate(exc) from exc
+    audit_map_action(request, principal, "sync_profile", metadata={"institution_id": target, "domains_added": len(result["domains_added"])})
+    return result
+
+
+@router.post("/harvest", summary="Read official sites for the accounts they declare")
+async def harvest(body: HarvestBody, request: Request) -> dict[str, Any]:
+    service = map_service(request)
+    principal = require_principal(request, Capability.INTELLIGENCE_MANAGE)
+    target = resolve_institution(principal, body.institution_id)
+    try:
+        result = await service.harvest(principal, target, asset_ids=body.asset_ids)
+    except (ValueError, PermissionError) as exc:
+        raise translate(exc) from exc
+    audit_map_action(request, principal, "harvest", metadata={"institution_id": target, "domains": int(result["domains"]), "new_assets": int(result["new_assets"])})
+    return result
+
+
+@router.post("/regrade", summary="Recompute every grade from the evidence log")
+async def regrade(body: MapInstitutionBody, request: Request) -> dict[str, Any]:
+    service = map_service(request)
+    principal = require_principal(request, Capability.INTELLIGENCE_MANAGE)
+    target = resolve_institution(principal, body.institution_id)
+    try:
+        result = service.regrade(principal, target)
+    except (ValueError, PermissionError) as exc:
+        raise translate(exc) from exc
+    audit_map_action(request, principal, "regrade", metadata={"institution_id": target, "changed": int(result["changed"])})
+    return result
+
+
+@router.get("/export", summary="The map as a tab-separated table in the manual sweep's format", response_class=PlainTextResponse)
+async def export(request: Request, institution_id: str | None = None) -> PlainTextResponse:
+    service = map_service(request)
+    principal = require_principal(request, Capability.INTELLIGENCE_READ)
+    target = resolve_institution(principal, institution_id)
+    try:
+        body = service.export(principal, target)
+    except (ValueError, PermissionError) as exc:
+        raise translate(exc) from exc
+    return PlainTextResponse(body, media_type="text/tab-separated-values; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="internet-map-{target}.tsv"'})
 
 
 __all__ = ["audit_map_action", "map_service", "router"]
