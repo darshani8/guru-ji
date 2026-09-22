@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import json
+from typing import Literal, cast
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
@@ -11,6 +11,17 @@ from pydantic import BaseModel, Field
 
 from ..dependencies import principal_from_request, runtime_from_request
 from ...domain.principals import InstitutionScope
+from ...domain.streaming import (
+    AnswerEvent,
+    CitationEvent,
+    DeltaEvent,
+    DoneEvent,
+    MessageEndEvent,
+    MessageStartEvent,
+    StreamSequenceValidator,
+    WarningEvent,
+    to_sse,
+)
 from ...domain.requests import ChatRequest, InteractionChannel
 
 
@@ -55,7 +66,7 @@ def _build_request(body: ChatBody, request: Request, principal) -> ChatRequest:
 
 def _require_principal(request: Request):
     principal = principal_from_request(request)
-    if not principal.authenticated:
+    if not principal.active:
         raise HTTPException(status_code=401, detail="authentication is required")
     return principal
 
@@ -64,14 +75,66 @@ async def _stream_answer(body: ChatBody, request: Request, principal) -> Streami
     runtime = runtime_from_request(request)
     domain_request = _build_request(body, request, principal)
     answer = await runtime.assistant.ask(domain_request, principal)
-    payload = json.dumps(answer.as_dict(), separators=(",", ":"), ensure_ascii=False)
+    answer_payload = answer.as_dict()
+    status = cast(
+        Literal["complete", "partial", "refused", "failed", "degraded"],
+        answer.status if answer.status in {"complete", "partial", "refused", "failed", "degraded"} else "failed",
+    )
 
     async def events():
-        # Keep the bounded answer envelope in one chunk. A future transport
-        # optimization may yield additional answer chunks before the final
-        # done event without changing the wire format; authorization, audit,
-        # and provenance remain completed before streaming begins.
-        yield f"event: answer\ndata: {payload}\n\nevent: done\ndata: {{}}\n\n"
+        validator = StreamSequenceValidator()
+        sequence = 0
+        chunks: list[str] = []
+
+        def emit(event):
+            nonlocal sequence
+            sequence += 1
+            return to_sse(validator.accept(event))
+
+        chunks.append(emit(MessageStartEvent(
+            request_id=answer.request_id,
+            conversation_id=body.conversation_id,
+            sequence=sequence + 1,
+        )))
+        for citation in answer.citations:
+            chunks.append(emit(CitationEvent(
+                request_id=answer.request_id,
+                conversation_id=body.conversation_id,
+                sequence=sequence + 1,
+                citation=dict(citation),
+            )))
+        for warning in answer.warnings:
+            chunks.append(emit(WarningEvent(
+                request_id=answer.request_id,
+                conversation_id=body.conversation_id,
+                sequence=sequence + 1,
+                warning=dict(warning),
+            )))
+        if answer.answer:
+            chunks.append(emit(DeltaEvent(
+                request_id=answer.request_id,
+                conversation_id=body.conversation_id,
+                sequence=sequence + 1,
+                text=answer.answer,
+            )))
+        chunks.append(emit(AnswerEvent(
+            request_id=answer.request_id,
+            conversation_id=body.conversation_id,
+            sequence=sequence + 1,
+            answer=answer_payload,
+        )))
+        chunks.append(emit(MessageEndEvent(
+            request_id=answer.request_id,
+            conversation_id=body.conversation_id,
+            sequence=sequence + 1,
+            status=status,
+        )))
+        chunks.append(emit(DoneEvent(
+            request_id=answer.request_id,
+            conversation_id=body.conversation_id,
+            sequence=sequence + 1,
+        )))
+        yield "".join(chunks)
 
     return StreamingResponse(
         events(),
@@ -93,13 +156,7 @@ async def chat(body: ChatBody, request: Request, stream: bool = False) -> dict[s
 
 @router.post("/stream")
 async def chat_stream(body: ChatBody, request: Request) -> StreamingResponse:
-    """Return the same policy-bound answer through a stable SSE envelope.
-
-    The current answer envelope is bounded, so it emits one complete answer
-    event followed by ``done``. The optional model provider is resolved before
-    streaming; future transport chunking must not bypass authorization, audit,
-    provenance, or the final response contract.
-    """
+    """Return the policy-bound answer through a validated SSE event sequence."""
 
     return await _stream_answer(body, request, _require_principal(request))
 

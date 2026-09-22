@@ -25,9 +25,14 @@ def _response(request: Request, status_code: int, code: str, message: str, *, de
 
 async def guruji_error_handler(request: Request, exc: GuruJiError) -> JSONResponse:
     error = exc.public_error
-    content = {"error": {"code": error.code.value, "message": error.message, "request_id": error.request_id}}
+    error_payload: dict[str, object] = {
+        "code": error.code.value,
+        "message": error.message,
+        "request_id": error.request_id,
+    }
     if error.retry_after_seconds is not None:
-        content["error"]["retry_after_seconds"] = error.retry_after_seconds
+        error_payload["retry_after_seconds"] = error.retry_after_seconds
+    content: dict[str, object] = {"error": error_payload}
     return JSONResponse(status_code=503, content=content)
 
 

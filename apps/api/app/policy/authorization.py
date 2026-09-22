@@ -12,8 +12,13 @@ class DenialReason(StrEnum):
     """Stable reasons that can be logged without exposing sensitive data."""
 
     UNAUTHENTICATED = "unauthenticated"
+    REVOKED = "revoked"
     MISSING_CAPABILITY = "missing_capability"
     OUT_OF_SCOPE = "out_of_scope"
+    PARENTAL_CONSENT_REQUIRED = "parental_consent_required"
+    UNKNOWN_ACTION = "unknown_action"
+    PDP_UNAVAILABLE = "pdp_unavailable"
+    STALE_POLICY = "stale_policy"
 
 
 @dataclass(frozen=True, slots=True)
@@ -43,14 +48,20 @@ def authorize(
     required_capability: Capability,
     requested_scope: InstitutionScope,
 ) -> AuthorizationDecision:
-    """Evaluate identity, capability, and scope without mutating authority."""
+    """Evaluate identity, capability, consent, and scope without mutation."""
 
     if not principal.authenticated or principal.principal_type is PrincipalType.ANONYMOUS:
         return AuthorizationDecision.deny(DenialReason.UNAUTHENTICATED)
-
+    if principal.revoked:
+        return AuthorizationDecision.deny(DenialReason.REVOKED)
     if not principal.has_capability(required_capability):
         return AuthorizationDecision.deny(DenialReason.MISSING_CAPABILITY)
-
+    if (
+        principal.principal_type is PrincipalType.STUDENT
+        and requested_scope.batch_id is not None
+        and not principal.consent_verified
+    ):
+        return AuthorizationDecision.deny(DenialReason.PARENTAL_CONSENT_REQUIRED)
     if not principal.can_access(requested_scope):
         return AuthorizationDecision.deny(DenialReason.OUT_OF_SCOPE)
 

@@ -1,34 +1,41 @@
 # Guru Ji
 
-Guru Ji is a federated, read-only institutional AI assistant reference implementation. It separates identity, policy, approved source connectors, semantic tools, bounded orchestration, citations, warnings, and audit metadata.
+Guru Ji is a federated, read-only institutional AI assistant reference implementation. It separates verified identity, policy, approved source connectors, semantic tools, bounded orchestration, evidence, streaming, and control-plane metadata.
 
 ## Current state
 
-This repository contains a complete local vertical slice rather than only architecture documents. Development uses deterministic College A demo data, while deployment can register a reviewed institution-local semantic connector over HTTPS. The application-owned control plane uses SQLite locally or PostgreSQL in deployment environments to persist audit metadata, source-health snapshots, and briefing envelopes. The SQLite migration in `migrations/001_control_plane.sql` and the PostgreSQL adapter use the same control-plane schema contract and initialize idempotently. An opt-in local Ollama provider can rewrite already-approved answers; the application preserves provenance and falls back to deterministic wording when the provider is unavailable or changes numeric facts.
+The repository now contains the complete all-phase reference implementation for the defined contracts:
 
-Included: explicit principals and College/Department/Batch scope, deny-by-default authorization, source and tool registries, data classification and redaction, query limits, a read-only connector boundary, bounded text orchestration, citations and partial/refused outcomes, explicit DENIED audit outcomes, development identity headers, durable local control-plane storage, a PostgreSQL deployment adapter, request-size/timeout/rate-limit guards, security headers, stable HTTP error envelopes, voice-session lifecycle, an opt-in public-web research route and chat path, a small browser client, CI/security workflows, tests, and local Docker/Make files.
+- P0 security and contracts: deny-by-default principals, capabilities, College/Department/Batch scope, verified OIDC/JWKS boundary, consent/revocation safeguards, redaction, request limits, rate limiting, security headers, and read-only SQL safety.
+- P1 institution boundary: an authenticated `apps/connector` service with health/readiness, approved semantic tools, server-to-server bearer authentication, scope/consent enforcement, effective-scope attestation, provenance, redaction markers, a local aggregate repository, and a PostgreSQL reporting-view adapter.
+- P2 policy: a strict Cerbos HTTP decision-point adapter and versioned Cerbos sidecar policy/configuration under `infra/cerbos/`; local policy remains available for isolated tests.
+- P3 control plane: SQLite and PostgreSQL stores for audit, source health, briefing history, answer-envelope hashes/counts, model attempts, retention pruning, and retry-safe outbox delivery.
+- P4 evidence/streaming: provenance-aware results and closed, versioned SSE events with contiguous ordering (`message_start`, citation/warning, delta, answer, `message_end`, `done`), plus closed WebSocket voice input.
+- P5 providers/operations: deterministic and Ollama adapters, optional LiteLLM streaming/usage adapter, redaction-safe trace export, provider capability declarations, and production configuration guards.
+- P6 edge/integration boundaries: trusted Open edX/Moodle identity adapters, fail-closed OpenFGA checker, allowlisted MCP/agent-gateway targets, and LiveKit/Pipecat-style voice event normalization without raw-audio persistence.
 
-Public-web research is an explicit `POST /v1/research/web` operation or an explicit chat phrase such as `search the web`. It is disabled by default and requires `ask:read_only`. When enabled with `GURU_WEB_SEARCH_PROVIDER=tavily`, the adapter sends only the bounded query, result limit, and configured official-domain allowlist to the provider. Page retrieval is separate, follows no redirects, enforces response/time limits, strips non-visible HTML, returns citations and retrieval timestamps, and marks all fetched text as untrusted data. Provider credentials and raw prompts are not persisted in audit records. Ordinary institutional chat never silently expands into web search.
+The College A deterministic connector remains available only for development/tests. The API also supports a deployment-managed `GURU_INSTITUTION_CONNECTORS` JSON registry so one universal read-only contract can route to multiple college connector services; each entry supplies its own source ID, institution ID, endpoint, approved tools, and secret-environment reference. The legacy single-connector variables remain supported. The reference compose stack adds PostgreSQL, Cerbos, and the authenticated connector service; it does not create or contact a real college system. The browser voice path receives final transcripts only, rejects binary audio frames, uses one-use tickets, and keeps bounded session/utterance limits.
 
-The current demo tools expose College-level aggregates only. Department- and Batch-scoped requests are deliberately refused until a connector declares narrower-scope support. Explicit source IDs are validated against the requested College before execution.
+The detailed ledger is in `docs/IMPLEMENTATION_STATUS.md`. The executable staging, production-canary, evidence, rollback, and sign-off sequence is in `docs/EXTERNAL_VALIDATION_PLAN.md`. These documents distinguish repository-complete implementation from production gates requiring real institutional contracts, credentials, deployments, and approvals.
 
-The implementation status document in `docs/IMPLEMENTATION_STATUS.md` records what is intentionally not enabled. The repository includes a JWKS-backed OIDC/JWT verification boundary, an institution-local semantic connector contract (`GET /v1/health` and `POST /v1/execute`), and an opt-in local Ollama wording adapter. It still needs the institution's real connector service, issuer configuration, model deployment, and deployment secrets. Live college databases, hosted-model credentials, WebRTC signaling, secrets management, and production observability require real contracts and approvals; this repository does not invent them. Production configuration rejects the development identity, deterministic demo data, and SQLite control-plane defaults.
+## Validation
 
-## Validate locally
+With Python 3.12+ and project dependencies synchronized:
 
-Use Python 3.12 or newer within the supported range.
-
-    make ci
-    make test
+    uv sync --extra dev
+    uv run pytest -q
     make compile
     make validate-openapi
     make hygiene
+    make lint
 
-With dependencies installed, run the API with:
+The current export’s full suite contains 102 passing tests. The CI-equivalent undefined-name/import lint check passes. `make smoke` validates a running API; `make postgres-smoke` validates a configured PostgreSQL service; and `docker compose -f infra/docker/compose.dev.yml up --build` exercises the reference multi-service stack when Docker is available.
 
-    make run
+## Local configuration
 
-The local development identity uses `Authorization: Bearer dev-token` and headers `X-Demo-Principal`, `X-Demo-Role`, and `X-Demo-College`. The mounted browser client is available from the API root. Request boundaries can be tuned with `GURU_MAX_REQUEST_BYTES`, `GURU_REQUEST_TIMEOUT_SECONDS`, `GURU_RATE_LIMIT_REQUESTS`, and `GURU_RATE_LIMIT_WINDOW_SECONDS`.
+Copy `.env.example` and keep `GURU_ENVIRONMENT=development` for the local deterministic path. The development identity uses `Authorization: Bearer dev-token` plus explicit demo headers. To exercise the remote connector path, disable `GURU_ENABLE_DEMO_DATA`, configure the connector URL/token, enable scope attestation, and use the service in `infra/docker/compose.dev.yml`. To exercise Cerbos, set `GURU_PDP_MODE=cerbos` and configure `GURU_CERBOS_URL`.
+
+LiteLLM, public-web search, edge adapters, OpenFGA, trace export, MCP/agent gateway, and LiveKit/Pipecat are explicit adapters. They are not enabled by default and require deployment-managed endpoints, credentials, network policy, evaluation, and operational approval. Production configuration rejects the development identity, deterministic demo data, SQLite control-plane defaults, missing OIDC, missing connector attestation, non-TLS connector/Cerbos URLs, deterministic model selection, and non-fail-closed audit settings.
 
 ## Example request
 
@@ -36,7 +43,8 @@ The local development identity uses `Authorization: Bearer dev-token` and header
       -H 'Authorization: Bearer dev-token' \
       -H 'X-Demo-Principal: student-1' \
       -H 'X-Demo-Role: student' \
+      -H 'X-Demo-College: college_a' \
       -H 'Content-Type: application/json' \
       -d '{"prompt":"What is the current attendance summary?","institution_scope":{"college_id":"college_a"}}'
 
-No production deployment or external institutional mutation is performed by this build workflow.
+No production deployment, external institutional mutation, hosted-model request, or credentialed real integration is claimed by this build workflow.

@@ -10,7 +10,7 @@ HEADERS = {
     "X-Demo-Principal": "smoke-script",
     "X-Demo-Role": "main_admin",
     "X-Demo-College": "college_a",
-    "X-Demo-Capabilities": "ask:read_only,source:view_metadata,access:manage",
+    "X-Demo-Capabilities": "ask:read_only,source:view_metadata,briefing:run,briefing:view_history,access:manage",
 }
 
 

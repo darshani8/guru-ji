@@ -13,7 +13,7 @@ router = APIRouter(prefix="/v1/audit", tags=["audit"])
 async def recent_audit(request: Request, limit: int = 50) -> dict[str, object]:
     runtime = runtime_from_request(request)
     principal = principal_from_request(request)
-    if not principal.authenticated or Capability.MANAGE_ACCESS not in principal.capabilities:
+    if not principal.active or Capability.MANAGE_ACCESS not in principal.capabilities:
         raise HTTPException(status_code=403, detail="access:manage capability is required")
     events = runtime.store.recent_audit(min(max(limit, 1), 100))
     return {"events": [

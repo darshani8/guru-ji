@@ -1,25 +1,26 @@
-.PHONY: test compile validate-openapi hygiene lint ci run db-init smoke
+.PHONY: test compile validate-openapi hygiene lint ci run db-init smoke postgres-smoke connector-smoke all-phases
 
 PYTHON ?= python
+PYTHONPATH_VALUE = apps/api:apps
 
 all: ci
 
 ci: test compile validate-openapi hygiene lint
 
 test:
-	CONTROL_DATABASE_URL=:memory: PYTHONPATH=apps/api $(PYTHON) -m unittest discover -s tests -p 'test_*.py' -v
+	CONTROL_DATABASE_URL=:memory: PYTHONPATH=$(PYTHONPATH_VALUE) $(PYTHON) -m unittest discover -s tests -p 'test_*.py' -v
 
 compile:
-	$(PYTHON) -m compileall -q apps/api tests scripts
+	$(PYTHON) -m compileall -q apps/api apps/connector tests scripts
 
 validate-openapi:
-	PYTHONPATH=apps/api $(PYTHON) scripts/validate_openapi.py
+	PYTHONPATH=$(PYTHONPATH_VALUE) $(PYTHON) scripts/validate_openapi.py
 
 hygiene:
 	$(PYTHON) scripts/repository_hygiene.py
 
 lint:
-	ruff check --select F apps/api tests scripts
+	ruff check --select F apps/api apps/connector tests scripts
 	ruff format --check scripts/validate_openapi.py scripts/repository_hygiene.py
 
 db-init:
@@ -29,4 +30,12 @@ run:
 	PYTHONPATH=apps/api uvicorn app.main:app --host 0.0.0.0 --port 8000
 
 smoke:
-	PYTHONPATH=apps/api $(PYTHON) scripts/live_smoke.py
+	PYTHONPATH=$(PYTHONPATH_VALUE) $(PYTHON) scripts/live_smoke.py
+
+postgres-smoke:
+	PYTHONPATH=$(PYTHONPATH_VALUE) $(PYTHON) scripts/postgres_smoke.py
+
+connector-smoke:
+	PYTHONPATH=$(PYTHONPATH_VALUE) $(PYTHON) -m pytest -q tests/test_all_phase_completion.py
+
+all-phases: ci connector-smoke

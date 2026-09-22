@@ -1,1223 +1,443 @@
 openapi: 3.1.0
 info:
-  title: BGS Federated Read-Only AI Agent API
+  title: guru-ji-api
+  description: Policy-bound, read-only institutional intelligence
   version: 0.1.0
-  summary: Unified read-only AI access to approved institutional sources
-  description: |
-    A vendor-neutral API for authorized chat, browser voice-session setup,
-    institutional source health, briefings, and audit access.
-
-    The API does not expose arbitrary database connections. Model planning and
-    source selection are validated by the application authorization layer before
-    any registered semantic tool is executed.
-  contact:
-    name: BGS AI Platform Team
-    email: ai-platform@example.invalid
-  license:
-    name: Internal use only
-servers:
-  - url: https://ai.example.invalid
-    description: Production placeholder; replace during deployment
-  - url: https://staging-ai.example.invalid
-    description: Staging placeholder
-  - url: http://localhost:8000
-    description: Local development
-security:
-  - bearerAuth: []
-tags:
-  - name: Health
-    description: Liveness and readiness checks
-  - name: Chat
-    description: Text questions and streamed answers
-  - name: Voice
-    description: Short-lived browser voice sessions
-  - name: Sources
-    description: Authorized source health information
-  - name: Briefings
-    description: Approved institutional daily briefings
-  - name: Research
-    description: Explicit, bounded public-web research over configured official domains
-  - name: Audit
-    description: Restricted audit-event access
 paths:
   /v1/health/live:
     get:
-      operationId: getLiveness
-      tags: [Health]
-      security: []
-      summary: Check whether the process is alive
+      tags:
+      - health
+      summary: Check whether the API process is running
+      operationId: liveness_v1_health_live_get
       responses:
         '200':
-          description: Process is alive
+          description: Successful Response
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/LivenessResponse'
-              examples:
-                alive:
-                  value:
-                    status: alive
-                    service: bgs-federated-ai
-                    version: 0.1.0
-        '503':
-          $ref: '#/components/responses/ServiceUnavailable'
-
+                additionalProperties:
+                  type: string
+                type: object
+                title: Response Liveness V1 Health Live Get
   /v1/health/ready:
     get:
-      operationId: getReadiness
-      tags: [Health]
-      security: []
-      summary: Check whether the service can accept work
-      description: |
-        Readiness may check the control database, configuration, and required
-        dependencies. It must not disclose institutional data or credentials.
+      tags:
+      - health
+      summary: Check whether the local runtime is ready
+      operationId: readiness_v1_health_ready_get
       responses:
         '200':
-          description: Service is ready
+          description: Successful Response
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/ReadinessResponse'
-        '503':
-          description: Service is not ready
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ReadinessResponse'
-
+                additionalProperties: true
+                type: object
+                title: Response Readiness V1 Health Ready Get
   /v1/chat:
     post:
-      operationId: createChatResponse
-      tags: [Chat]
-      summary: Ask an authorized read-only question
-      description: |
-        The same request supports a normal JSON response or an SSE stream.
-        Set `stream=true` or send `Accept: text/event-stream` for streaming.
-        The explicit `/v1/chat/stream` route is also available for clients that
-        prefer a dedicated streaming endpoint.
-
-        The application may use approved institutional semantic tools and/or
-        public web search according to authorization and data-policy rules.
-        Web content and source text are treated as untrusted data.
+      tags:
+      - chat
+      summary: Chat
+      operationId: chat_v1_chat_post
       parameters:
-        - $ref: '#/components/parameters/RequestIdHeader'
-        - name: stream
-          in: query
-          required: false
-          description: Return Server-Sent Events when true.
-          schema:
-            type: boolean
-            default: false
+      - name: stream
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: false
+          title: Stream
       requestBody:
         required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/ChatRequest'
-            examples:
-              institutionalOverview:
-                value:
-                  message: What happened today across Finance and the colleges?
-                  scope:
-                    institution_ids: [college_a, finance]
-                  response_preferences:
-                    include_citations: true
-                    concise: true
-              publicResearch:
-                value:
-                  message: What are the latest official guidelines for securing AI agents?
-                  scope:
-                    institution_ids: []
-                  response_preferences:
-                    include_citations: true
+              $ref: '#/components/schemas/ChatBody'
       responses:
         '200':
-          description: Completed JSON response or SSE stream, selected by the request Accept header or stream query parameter
-          headers:
-            X-Request-ID:
-              $ref: '#/components/headers/RequestId'
+          description: Successful Response
           content:
             application/json:
-              schema:
-                $ref: '#/components/schemas/ChatResponse'
-            text/event-stream:
-              schema:
-                type: string
-                description: One or more Server-Sent Event records.
-                examples:
-                  - |
-                    event: message_start
-                    data: {"request_id":"req_123","conversation_id":"conv_123"}
-
-                    event: citation
-                    data: {"citation_id":"cit_1","source_id":"college_a"}
-
-                    event: delta
-                    data: {"text":"Today, "}
-
-                    event: message_end
-                    data: {"response":"...","partial":false}
-        '206':
-          description: Completed response with partial source coverage
-          headers:
-            X-Request-ID:
-              $ref: '#/components/headers/RequestId'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ChatResponse'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '413':
-          $ref: '#/components/responses/PayloadTooLarge'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-        '500':
-          $ref: '#/components/responses/InternalError'
-        '503':
-          $ref: '#/components/responses/ServiceUnavailable'
-
-  /v1/research/web:
-    post:
-      operationId: runPublicWebResearch
-      tags: [Research]
-      summary: Search configured official public-web domains
-      description: |
-        Runs an explicit public-web research request for an authenticated
-        principal with `ask:read_only`. Search results are filtered against the
-        configured allowlist, page retrieval follows no redirects, and all
-        returned page text is untrusted data rather than executable instructions.
-        Provider credentials and raw prompts are not returned or persisted in the
-        audit metadata.
-      parameters:
-        - $ref: '#/components/parameters/RequestIdHeader'
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/PublicWebResearchRequest'
-      responses:
-        '200':
-          description: Bounded search results with citations and warnings
-          headers:
-            X-Request-ID:
-              $ref: '#/components/headers/RequestId'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/PublicWebResearchResponse'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
+              schema: {}
         '422':
-          $ref: '#/components/responses/BadRequest'
-        '503':
-          $ref: '#/components/responses/ServiceUnavailable'
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/chat/stream:
+    post:
+      tags:
+      - chat
+      summary: Chat Stream
+      description: 'Return the same policy-bound answer through a stable SSE envelope.
 
+
+        The current answer envelope is bounded, so it emits one complete answer
+
+        event followed by ``done``. The optional model provider is resolved before
+
+        streaming; future transport chunking must not bypass authorization, audit,
+
+        provenance, or the final response contract.'
+      operationId: chat_stream_v1_chat_stream_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChatBody'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema: {}
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/briefings/daily:
+    post:
+      tags:
+      - briefings
+      summary: Daily Briefing
+      operationId: daily_briefing_v1_briefings_daily_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BriefingBody'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Daily Briefing V1 Briefings Daily Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/briefings/recent:
+    get:
+      tags:
+      - briefings
+      summary: Recent Briefings
+      operationId: recent_briefings_v1_briefings_recent_get
+      parameters:
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 20
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Recent Briefings V1 Briefings Recent Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /v1/voice/sessions:
     post:
-      operationId: createVoiceSession
-      tags: [Voice]
-      summary: Create a short-lived browser voice session
-      description: |
-        Creates an ephemeral client credential for an approved realtime voice
-        provider or a local voice gateway. Permanent provider credentials are
-        never returned. The voice session uses the same policy and semantic
-        tools as chat.
-      parameters:
-        - $ref: '#/components/parameters/RequestIdHeader'
+      tags:
+      - voice
+      summary: Create Session
+      operationId: create_session_v1_voice_sessions_post
       requestBody:
-        required: true
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/VoiceSessionRequest'
+              anyOf:
+              - $ref: '#/components/schemas/VoiceSessionBody'
+              - type: 'null'
+              title: Body
       responses:
-        '201':
-          description: Voice session created
-          headers:
-            X-Request-ID:
-              $ref: '#/components/headers/RequestId'
+        '200':
+          description: Successful Response
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/VoiceSessionResponse'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-        '503':
-          $ref: '#/components/responses/ServiceUnavailable'
-
+                additionalProperties: true
+                type: object
+                title: Response Create Session V1 Voice Sessions Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /v1/voice/sessions/{session_id}:
     delete:
-      operationId: closeVoiceSession
-      tags: [Voice]
-      summary: Close an active voice session
+      tags:
+      - voice
+      summary: Close Session
+      operationId: close_session_v1_voice_sessions__session_id__delete
       parameters:
-        - $ref: '#/components/parameters/SessionId'
-        - $ref: '#/components/parameters/RequestIdHeader'
-      responses:
-        '204':
-          description: Voice session closed
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '404':
-          $ref: '#/components/responses/NotFound'
-        '409':
-          $ref: '#/components/responses/Conflict'
-
-  /v1/sources/health:
-    get:
-      operationId: listSourceHealth
-      tags: [Sources]
-      summary: List health for authorized sources
-      description: |
-        Returns only sources within the caller's permitted scope. It does not
-        disclose connection strings, credentials, private hostnames, or raw errors.
-      parameters:
-        - $ref: '#/components/parameters/InstitutionIds'
-        - $ref: '#/components/parameters/SourceIds'
-        - $ref: '#/components/parameters/RequestIdHeader'
-      responses:
-        '200':
-          description: Source health list
-          headers:
-            X-Request-ID:
-              $ref: '#/components/headers/RequestId'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SourceHealthListResponse'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '503':
-          $ref: '#/components/responses/ServiceUnavailable'
-
-  /v1/briefings/today:
-    get:
-      operationId: getTodayBriefing
-      tags: [Briefings]
-      summary: Get the latest authorized institutional briefing
-      parameters:
-        - $ref: '#/components/parameters/InstitutionIds'
-        - $ref: '#/components/parameters/RequestIdHeader'
-      responses:
-        '200':
-          description: Latest available briefing
-          headers:
-            X-Request-ID:
-              $ref: '#/components/headers/RequestId'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/BriefingResponse'
-        '404':
-          description: No briefing exists for the requested scope
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-
-  /v1/briefings/run:
-    post:
-      operationId: runBriefing
-      tags: [Briefings]
-      summary: Run an approved institutional briefing
-      description: |
-        This endpoint runs only the registered briefing workflow. It does not
-        permit arbitrary SQL or arbitrary source selection beyond the caller's scope.
-      parameters:
-        - $ref: '#/components/parameters/RequestIdHeader'
-      requestBody:
+      - name: session_id
+        in: path
         required: true
+        schema:
+          type: string
+          title: Session Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties:
+                  type: boolean
+                title: Response Close Session V1 Voice Sessions  Session Id  Delete
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/sources:
+    get:
+      tags:
+      - sources
+      summary: List Sources
+      operationId: list_sources_v1_sources_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response List Sources V1 Sources Get
+  /v1/research/web:
+    post:
+      tags:
+      - research
+      summary: Web Research
+      operationId: web_research_v1_research_web_post
+      requestBody:
         content:
           application/json:
             schema:
-              $ref: '#/components/schemas/BriefingRunRequest'
-      responses:
-        '202':
-          description: Briefing accepted for execution
-          headers:
-            X-Request-ID:
-              $ref: '#/components/headers/RequestId'
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/AcceptedJobResponse'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-        '409':
-          $ref: '#/components/responses/Conflict'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-
-  /v1/audit/events:
-    get:
-      operationId: listAuditEvents
-      tags: [Audit]
-      summary: List audit events available to the caller
-      description: |
-        Restricted endpoint. It returns event metadata, not secrets or complete
-        sensitive query results. A production implementation should apply field
-        redaction and an additional audit-of-audit policy.
-      parameters:
-        - $ref: '#/components/parameters/RequestIdHeader'
-        - name: from
-          in: query
-          required: false
-          schema:
-            type: string
-            format: date-time
-        - name: to
-          in: query
-          required: false
-          schema:
-            type: string
-            format: date-time
-        - name: principal_id
-          in: query
-          required: false
-          schema:
-            type: string
-            maxLength: 128
-        - name: event_type
-          in: query
-          required: false
-          schema:
-            type: string
-            maxLength: 128
-        - name: cursor
-          in: query
-          required: false
-          schema:
-            type: string
-            maxLength: 512
-        - name: page_size
-          in: query
-          required: false
-          schema:
-            type: integer
-            minimum: 1
-            maximum: 100
-            default: 50
+              $ref: '#/components/schemas/WebResearchBody'
+        required: true
       responses:
         '200':
-          description: Audit events
-          headers:
-            X-Request-ID:
-              $ref: '#/components/headers/RequestId'
+          description: Successful Response
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/AuditEventListResponse'
-        '400':
-          $ref: '#/components/responses/BadRequest'
-        '401':
-          $ref: '#/components/responses/Unauthorized'
-        '403':
-          $ref: '#/components/responses/Forbidden'
-
+                additionalProperties: true
+                type: object
+                title: Response Web Research V1 Research Web Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/audit/recent:
+    get:
+      tags:
+      - audit
+      summary: Recent Audit
+      operationId: recent_audit_v1_audit_recent_get
+      parameters:
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 50
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Recent Audit V1 Audit Recent Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
 components:
-  securitySchemes:
-    bearerAuth:
-      type: http
-      scheme: bearer
-      bearerFormat: JWT
-      description: |
-        OIDC/JWT access token issued by the institutional identity provider.
-        Required permissions are enforced by the application policy engine.
-
-  parameters:
-    RequestIdHeader:
-      name: X-Request-ID
-      in: header
-      required: false
-      description: Optional caller-supplied correlation ID. The server may replace invalid values.
-      schema:
-        type: string
-        pattern: '^[A-Za-z0-9._:-]{1,128}$'
-    SessionId:
-      name: session_id
-      in: path
-      required: true
-      schema:
-        type: string
-        minLength: 1
-        maxLength: 128
-    InstitutionIds:
-      name: institution_ids
-      in: query
-      required: false
-      description: Filter to institutions already authorized for the caller.
-      style: form
-      explode: false
-      schema:
-        type: array
-        maxItems: 50
-        items:
-          type: string
-          pattern: '^[a-z0-9][a-z0-9_-]{1,63}$'
-    SourceIds:
-      name: source_ids
-      in: query
-      required: false
-      description: Filter to sources already authorized for the caller.
-      style: form
-      explode: false
-      schema:
-        type: array
-        maxItems: 50
-        items:
-          type: string
-          pattern: '^[a-z0-9][a-z0-9_-]{1,63}$'
-
-  headers:
-    RequestId:
-      description: Server-generated correlation ID
-      schema:
-        type: string
-        maxLength: 128
-
-  responses:
-    BadRequest:
-      description: Request validation failed
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/ErrorResponse'
-    Unauthorized:
-      description: Missing or invalid authentication
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/ErrorResponse'
-    Forbidden:
-      description: Authenticated principal lacks the required scope
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/ErrorResponse'
-    NotFound:
-      description: Resource not found or not visible to the caller
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/ErrorResponse'
-    Conflict:
-      description: Request conflicts with current state
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/ErrorResponse'
-    PayloadTooLarge:
-      description: Request or response exceeds configured limits
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/ErrorResponse'
-    RateLimited:
-      description: Rate or usage limit exceeded
-      headers:
-        Retry-After:
-          schema:
-            type: integer
-            minimum: 1
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/ErrorResponse'
-    InternalError:
-      description: Unexpected internal error
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/ErrorResponse'
-    ServiceUnavailable:
-      description: Service or required dependency is unavailable
-      content:
-        application/json:
-          schema:
-            $ref: '#/components/schemas/ErrorResponse'
-
   schemas:
-    LivenessResponse:
-      type: object
-      additionalProperties: false
-      required: [status, service, version]
+    BriefingBody:
       properties:
-        status:
-          type: string
-          const: alive
-        service:
-          type: string
-        version:
-          type: string
-
-    ReadinessResponse:
-      type: object
-      additionalProperties: false
-      required: [status, service, checks]
-      properties:
-        status:
-          type: string
-          enum: [ready, not_ready]
-        service:
-          type: string
-        checks:
-          type: array
-          items:
-            $ref: '#/components/schemas/ReadinessCheck'
-
-    ReadinessCheck:
-      type: object
-      additionalProperties: false
-      required: [name, status]
-      properties:
-        name:
-          type: string
-        status:
-          type: string
-          enum: [ok, degraded, failed, skipped]
-        detail:
-          type: string
-          maxLength: 500
-
-    Scope:
-      type: object
-      additionalProperties: false
-      properties:
-        institution_ids:
-          type: array
-          maxItems: 50
-          items:
-            type: string
-            pattern: '^[a-z0-9][a-z0-9_-]{1,63}$'
-        source_ids:
-          type: array
-          maxItems: 50
-          items:
-            type: string
-            pattern: '^[a-z0-9][a-z0-9_-]{1,63}$'
-        department_ids:
-          type: array
-          maxItems: 100
-          items:
-            type: string
-            maxLength: 128
-        data_scope:
-          type: string
-          enum: [aggregate, operational, person_detail]
-          default: aggregate
-      description: |
-        Requested scope. The application may narrow it to the authenticated
-        principal's permitted scope. The client cannot widen its own access.
-
-    ResponsePreferences:
-      type: object
-      additionalProperties: false
-      properties:
-        include_citations:
-          type: boolean
-          default: true
-        concise:
-          type: boolean
-          default: false
-        language:
-          type: string
-          maxLength: 32
-          default: en-IN
-        max_answer_tokens:
-          type: integer
-          minimum: 64
-          maximum: 8000
-          default: 1600
-
-    ChatRequest:
-      type: object
-      additionalProperties: false
-      required: [message]
-      properties:
-        message:
-          type: string
-          minLength: 1
-          maxLength: 12000
-          description: User question or instruction. It is treated as untrusted input.
-        conversation_id:
-          type: string
-          minLength: 1
-          maxLength: 128
-        scope:
-          $ref: '#/components/schemas/Scope'
-        response_preferences:
-          $ref: '#/components/schemas/ResponsePreferences'
-        channel:
-          type: string
-          enum: [chat, briefing_followup]
-          default: chat
-
-    ChatResponse:
-      type: object
-      additionalProperties: false
-      required:
-        - request_id
-        - conversation_id
-        - answer
-        - partial
-        - citations
-        - warnings
-        - source_statuses
-      properties:
-        request_id:
-          type: string
-        conversation_id:
-          type: string
-        answer:
-          type: string
-        partial:
-          type: boolean
-          description: True when one or more requested sources failed or were stale.
-        citations:
-          type: array
-          items:
-            $ref: '#/components/schemas/Citation'
-        warnings:
-          type: array
-          items:
-            $ref: '#/components/schemas/Warning'
-        source_statuses:
-          type: array
-          items:
-            $ref: '#/components/schemas/SourceStatus'
-        tool_summary:
-          type: array
-          items:
-            $ref: '#/components/schemas/ToolSummary'
-        usage:
-          $ref: '#/components/schemas/UsageSummary'
-
-    PublicWebResearchRequest:
-      type: object
-      additionalProperties: false
-      required: [query]
-      properties:
-        query:
-          type: string
-          minLength: 1
-          maxLength: 500
-          description: Search question; the raw query is not persisted in audit metadata.
-        allowed_domains:
-          type: array
-          maxItems: 20
-          items:
-            type: string
-            pattern: '^[a-z0-9][a-z0-9.-]*[a-z0-9]$'
-          description: Optional subset of the server-configured official-domain allowlist.
-        max_results:
-          type: integer
-          minimum: 1
-          maximum: 10
-          default: 5
-
-    PublicWebResearchResponse:
-      type: object
-      additionalProperties: false
-      required: [request_id, status, query, provider, allowed_domains, searched_at, untrusted_content, results, warnings]
-      properties:
-        request_id:
-          type: string
-        status:
-          type: string
-          enum: [complete, partial]
-        query:
-          type: string
-          maxLength: 500
-        provider:
-          type: string
-        allowed_domains:
-          type: array
-          items:
-            type: string
-        searched_at:
-          type: string
-          format: date-time
-        untrusted_content:
-          type: boolean
-          const: true
-        results:
-          type: array
-          maxItems: 10
-          items:
-            $ref: '#/components/schemas/PublicWebResearchResult'
-        warnings:
-          type: array
-          items:
-            $ref: '#/components/schemas/WebResearchWarning'
-
-    PublicWebResearchResult:
-      type: object
-      additionalProperties: false
-      required: [url, title, excerpt, retrieved_at, extracted, untrusted, warnings]
-      properties:
-        url:
-          type: string
-          format: uri
-        title:
-          type: string
-          maxLength: 300
-        excerpt:
-          type: string
-          maxLength: 2000
-        retrieved_at:
-          type: string
-          format: date-time
-        extracted:
-          type: boolean
-        untrusted:
-          type: boolean
-          const: true
-        warnings:
-          type: array
-          items:
-            type: string
-
-    WebResearchWarning:
-      type: object
-      additionalProperties: false
-      required: [code, message]
-      properties:
-        code:
-          type: string
-        message:
-          type: string
-          maxLength: 500
-        source_id:
-          type: string
-          format: uri
-
-    Citation:
-      type: object
-      additionalProperties: false
-      required: [citation_id, source_type, source_id, retrieved_at]
-      properties:
-        citation_id:
-          type: string
-        source_type:
-          type: string
-          enum: [internal_database, internal_api, web]
-        source_id:
-          type: string
-        title:
-          type: string
-          maxLength: 500
-        url:
-          type: string
-          format: uri
-        retrieved_at:
-          type: string
-          format: date-time
-        data_period_from:
-          type: string
-          format: date-time
-        data_period_to:
-          type: string
-          format: date-time
-        excerpt:
-          type: string
-          maxLength: 2000
-          description: Redacted supporting excerpt when policy permits.
-
-    Warning:
-      type: object
-      additionalProperties: false
-      required: [code, message, severity]
-      properties:
-        code:
-          type: string
-          enum:
-            - source_unavailable
-            - source_timeout
-            - source_stale
-            - partial_result
-            - authorization_narrowed
-            - web_source_conflict
-            - data_redacted
-            - model_fallback
-            - answer_uncertain
-        message:
-          type: string
-          maxLength: 1000
-        severity:
-          type: string
-          enum: [info, warning, error]
-        source_id:
-          type: string
-
-    SourceStatus:
-      type: object
-      additionalProperties: false
-      required: [source_id, status]
-      properties:
-        source_id:
-          type: string
-        institution_id:
-          type: string
-        status:
-          type: string
-          enum: [success, partial, stale, unauthorized, unavailable, timeout, invalid_result]
-        retrieved_at:
-          type: string
-          format: date-time
-        latency_ms:
-          type: integer
-          minimum: 0
-        rows_used:
-          type: integer
-          minimum: 0
-        detail:
-          type: string
-          maxLength: 500
-
-    ToolSummary:
-      type: object
-      additionalProperties: false
-      required: [tool_name, status]
-      properties:
-        tool_name:
-          type: string
-        status:
-          type: string
-          enum: [executed, denied, skipped, failed]
-        source_ids:
-          type: array
-          items:
-            type: string
-        duration_ms:
-          type: integer
-          minimum: 0
-
-    UsageSummary:
-      type: object
-      additionalProperties: false
-      properties:
-        model_provider:
-          type: string
-        model_id:
-          type: string
-        input_tokens:
-          type: integer
-          minimum: 0
-        output_tokens:
-          type: integer
-          minimum: 0
-        search_credits:
-          type: number
-          minimum: 0
-        voice_seconds:
-          type: number
-          minimum: 0
-        estimated_cost_usd:
-          type: number
-          minimum: 0
-          description: Estimate only; billing reconciliation is authoritative.
-
-    VoiceSessionRequest:
-      type: object
-      additionalProperties: false
-      properties:
-        transport:
-          type: string
-          enum: [browser_webrtc, local_gateway]
-          default: browser_webrtc
-        conversation_id:
-          type: string
-          minLength: 1
-          maxLength: 128
-        scope:
-          $ref: '#/components/schemas/Scope'
-        language:
-          type: string
-          maxLength: 32
-          default: en-IN
-        audio_recording:
-          type: boolean
-          default: false
-          description: Recording is disabled unless separately authorized and configured.
-
-    VoiceSessionResponse:
-      type: object
-      additionalProperties: false
-      required:
-        - session_id
-        - transport
-        - expires_at
-        - instructions
-      properties:
-        session_id:
-          type: string
-        transport:
-          type: string
-          enum: [browser_webrtc, local_gateway]
-        expires_at:
-          type: string
-          format: date-time
-        client_secret:
-          type: string
-          writeOnly: true
-          description: Short-lived ephemeral credential only; never a permanent provider API key.
-        client_secret_expires_at:
-          type: string
-          format: date-time
-        realtime_url:
-          type: string
-          format: uri
-        local_gateway_url:
-          type: string
-          format: uri
-        instructions:
-          type: object
-          additionalProperties: false
-          required: [voice_enabled, audio_recording]
-          properties:
-            voice_enabled:
-              type: boolean
-            audio_recording:
-              type: boolean
-            max_duration_seconds:
-              type: integer
-              minimum: 1
-              maximum: 3600
-
-    SourceHealth:
-      type: object
-      additionalProperties: false
-      required: [source_id, institution_id, status, checked_at]
-      properties:
-        source_id:
-          type: string
-        institution_id:
-          type: string
-        display_name:
-          type: string
-        connector_type:
-          type: string
-        status:
-          type: string
-          enum: [healthy, degraded, unavailable, disabled, unknown]
-        checked_at:
-          type: string
-          format: date-time
-        last_success_at:
-          type: string
-          format: date-time
-        latency_ms:
-          type: integer
-          minimum: 0
-        freshness:
-          type: string
-          enum: [current, stale, unknown]
-        detail:
-          type: string
-          maxLength: 500
-
-    SourceHealthListResponse:
-      type: object
-      additionalProperties: false
-      required: [checked_at, sources]
-      properties:
-        checked_at:
-          type: string
-          format: date-time
-        sources:
-          type: array
-          items:
-            $ref: '#/components/schemas/SourceHealth'
-
-    BriefingRunRequest:
-      type: object
-      additionalProperties: false
-      required: [briefing_type]
-      properties:
-        briefing_type:
-          type: string
-          enum: [daily_institutional]
-        institution_ids:
-          type: array
-          maxItems: 50
-          items:
-            type: string
         report_date:
+          anyOf:
+          - type: string
+            format: date
+          - type: 'null'
+          title: Report Date
+        college_id:
           type: string
-          format: date
+          title: College Id
+          default: college_a
         include_web_context:
           type: boolean
+          title: Include Web Context
           default: false
-          description: Only permitted for approved briefing definitions.
-
-    BriefingResponse:
       type: object
-      additionalProperties: false
-      required:
-        - briefing_id
-        - briefing_type
-        - report_date
-        - generated_at
-        - answer
-        - partial
-        - source_statuses
+      title: BriefingBody
+    ChatBody:
       properties:
-        briefing_id:
+        prompt:
           type: string
-        briefing_type:
-          type: string
-        report_date:
-          type: string
-          format: date
-        generated_at:
-          type: string
-          format: date-time
-        answer:
-          type: string
-        partial:
-          type: boolean
-        citations:
-          type: array
-          items:
-            $ref: '#/components/schemas/Citation'
-        warnings:
-          type: array
-          items:
-            $ref: '#/components/schemas/Warning'
-        source_statuses:
-          type: array
-          items:
-            $ref: '#/components/schemas/SourceStatus'
-
-    AcceptedJobResponse:
-      type: object
-      additionalProperties: false
-      required: [job_id, status, created_at]
-      properties:
-        job_id:
-          type: string
-        status:
-          type: string
-          enum: [accepted]
-        created_at:
-          type: string
-          format: date-time
-
-    AuditEvent:
-      type: object
-      additionalProperties: false
-      required: [event_id, event_type, occurred_at, request_id]
-      properties:
-        event_id:
-          type: string
-        event_type:
-          type: string
-        occurred_at:
-          type: string
-          format: date-time
+          maxLength: 12000
+          minLength: 1
+          title: Prompt
         request_id:
-          type: string
-        principal_id:
-          type: string
-        endpoint:
-          type: string
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Request Id
         conversation_id:
-          type: string
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Conversation Id
         source_ids:
-          type: array
           items:
             type: string
-        tool_names:
           type: array
-          items:
-            type: string
-        outcome:
+          title: Source Ids
+        channel:
           type: string
-          enum: [success, partial, denied, failed]
-        redactions_applied:
-          type: array
-          items:
-            type: string
-        duration_ms:
-          type: integer
-          minimum: 0
-
-    AuditEventListResponse:
+          title: Channel
+          default: text
+        institution_scope:
+          $ref: '#/components/schemas/ScopeBody'
       type: object
-      additionalProperties: false
-      required: [events, has_more]
+      required:
+      - prompt
+      title: ChatBody
+    HTTPValidationError:
       properties:
-        events:
-          type: array
+        detail:
           items:
-            $ref: '#/components/schemas/AuditEvent'
-        next_cursor:
+            $ref: '#/components/schemas/ValidationError'
+          type: array
+          title: Detail
+      type: object
+      title: HTTPValidationError
+    ScopeBody:
+      properties:
+        college_id:
           type: string
-        has_more:
-          type: boolean
-
-    ErrorResponse:
+          title: College Id
+          default: college_a
+        department_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Department Id
+        batch_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Batch Id
       type: object
-      additionalProperties: false
-      required: [error]
+      title: ScopeBody
+    ValidationError:
       properties:
-        error:
+        loc:
+          items:
+            anyOf:
+            - type: string
+            - type: integer
+          type: array
+          title: Location
+        msg:
+          type: string
+          title: Message
+        type:
+          type: string
+          title: Error Type
+        input:
+          title: Input
+        ctx:
           type: object
-          additionalProperties: false
-          required: [code, message, request_id]
-          properties:
-            code:
+          title: Context
+      type: object
+      required:
+      - loc
+      - msg
+      - type
+      title: ValidationError
+    VoiceSessionBody:
+      properties:
+        college_id:
+          anyOf:
+          - type: string
+            maxLength: 128
+            minLength: 1
+          - type: 'null'
+          title: College Id
+        department_id:
+          anyOf:
+          - type: string
+            maxLength: 128
+            minLength: 1
+          - type: 'null'
+          title: Department Id
+        batch_id:
+          anyOf:
+          - type: string
+            maxLength: 128
+            minLength: 1
+          - type: 'null'
+          title: Batch Id
+      type: object
+      title: VoiceSessionBody
+    WebResearchBody:
+      properties:
+        query:
+          type: string
+          maxLength: 500
+          minLength: 1
+          title: Query
+        allowed_domains:
+          anyOf:
+          - items:
               type: string
-              enum:
-                - invalid_request
-                - authentication_required
-                - authentication_invalid
-                - authorization_denied
-                - source_not_allowed
-                - tool_not_allowed
-                - source_unavailable
-                - source_timeout
-                - rate_limited
-                - payload_too_large
-                - conflict
-                - not_found
-                - internal_error
-                - service_unavailable
-            message:
-              type: string
-              maxLength: 1000
-            request_id:
-              type: string
-            retry_after_seconds:
-              type: integer
-              minimum: 1
-            details:
-              type: object
-              additionalProperties: true
-              description: Non-sensitive machine-readable details.
+            type: array
+            maxItems: 20
+          - type: 'null'
+          title: Allowed Domains
+        max_results:
+          type: integer
+          maximum: 10.0
+          minimum: 1.0
+          title: Max Results
+          default: 5
+      type: object
+      required:
+      - query
+      title: WebResearchBody

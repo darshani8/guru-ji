@@ -8,12 +8,19 @@ from ..auth.oidc import JwtVerifier
 from ..auth.principal import principal_from_headers
 from ..config.settings import AppSettings
 from ..config.source_registry import SourceDefinition, SourceRegistry
+from ..connectors.base import ReadOnlyConnector
 from ..connectors.college_a.connector import CollegeADemoConnector
 from ..connectors.registry import ConnectorRegistry
 from ..connectors.remote_http import RemoteHttpConnector
+from ..integrations.edge import EdgeIdentityAdapter, MoodleAdapter, OpenEdxAdapter
+from ..observability.export import HttpJsonTraceExporter
+from ..observability.tracing import TraceRecorder
 from ..orchestration.assistant_service import AssistantService
 from ..persistence.database import InMemoryControlStore, PostgresControlStore, SqliteControlStore
+from ..policy.cerbos import CerbosPolicyDecisionPoint
+from ..policy.pdp import LocalPolicyDecisionPoint, PolicyDecisionPoint
 from ..policy.query_limits import QueryLimits
+from ..providers.litellm import LiteLLMProvider
 from ..providers.ollama import OllamaProvider
 from ..tools.college_tools import build_college_tools
 from ..tools.health_tools import build_health_tools
@@ -36,8 +43,11 @@ class Runtime:
     store: ControlStore
     assistant: AssistantService
     voice: VoiceSessionManager
+    pdp: PolicyDecisionPoint
+    tracer: TraceRecorder
     web_research: PublicWebResearchService | None = None
     auth_verifier: JwtVerifier | None = None
+    edge_identity: EdgeIdentityAdapter | None = None
 
 
 def _build_sources(settings: AppSettings) -> SourceRegistry:
@@ -54,19 +64,18 @@ def _build_sources(settings: AppSettings) -> SourceRegistry:
                 "institution.source_health",
             ),
         ))
-    if settings.institution_connector_base_url:
-        if any(item.source_id == settings.institution_connector_source_id for item in definitions):
-            raise ValueError("institution connector source ID conflicts with an existing source")
+    for connector in settings.configured_institution_connectors():
+        if any(item.source_id == connector.source_id for item in definitions):
+            raise ValueError(
+                "institution connector source ID conflicts with an existing source: "
+                f"{connector.source_id}"
+            )
         definitions.append(SourceDefinition(
-            source_id=settings.institution_connector_source_id,
-            institution_id=settings.institution_connector_institution_id,
-            display_name=settings.institution_connector_display_name,
+            source_id=connector.source_id,
+            institution_id=connector.institution_id,
+            display_name=connector.display_name,
             connector_type="remote_http",
-            allowed_tools=(
-                "institution.overview",
-                "institution.attendance_summary",
-                "institution.source_health",
-            ),
+            allowed_tools=connector.allowed_tools,
         ))
     return SourceRegistry(tuple(definitions))
 
@@ -89,7 +98,37 @@ def _build_model(settings: AppSettings):
             model_id=settings.ollama_model_id,
             timeout_seconds=settings.model_timeout_seconds,
         )
+    if settings.model_provider == "litellm":
+        return LiteLLMProvider(
+            model_id=settings.litellm_model_id,
+            api_base=settings.litellm_base_url,
+            api_key=settings.litellm_api_key,
+            timeout_seconds=settings.model_timeout_seconds,
+        )
     return None
+
+
+def _build_pdp(settings: AppSettings) -> PolicyDecisionPoint:
+    if settings.pdp_mode == "cerbos":
+        return CerbosPolicyDecisionPoint(
+            base_url=settings.cerbos_url or "",
+            policy_version=settings.cerbos_policy_version,
+            timeout_seconds=settings.cerbos_timeout_seconds,
+            require_fresh=settings.cerbos_require_fresh,
+        )
+    return LocalPolicyDecisionPoint()
+
+
+def _build_edge_identity(settings: AppSettings) -> EdgeIdentityAdapter | None:
+    if settings.edge_adapter == "disabled":
+        return None
+    if not settings.edge_adapter_base_url or not settings.edge_adapter_auth_token:
+        raise ValueError("configured edge adapter requires a base URL and server auth token")
+    adapter_type = OpenEdxAdapter if settings.edge_adapter == "openedx" else MoodleAdapter
+    return adapter_type(
+        base_url=settings.edge_adapter_base_url,
+        auth_token=settings.edge_adapter_auth_token,
+    )
 
 
 def _build_web_research(settings: AppSettings) -> PublicWebResearchService | None:
@@ -116,27 +155,29 @@ def _build_web_research(settings: AppSettings) -> PublicWebResearchService | Non
 
 
 def _build_connectors(settings: AppSettings) -> ConnectorRegistry:
-    connectors = []
-    source_ids: list[str] = []
+    connectors: list[ReadOnlyConnector] = []
+    source_ids: set[str] = set()
     if settings.demo_data_enabled:
         connectors.append(CollegeADemoConnector())
-        source_ids.append("college_a_demo")
-    if settings.institution_connector_base_url:
-        if settings.institution_connector_source_id in source_ids:
-            raise ValueError("institution connector source ID conflicts with an existing connector")
+        source_ids.add("college_a_demo")
+    for definition in settings.configured_institution_connectors():
+        if definition.source_id in source_ids:
+            raise ValueError(
+                "institution connector source ID conflicts with an existing connector: "
+                f"{definition.source_id}"
+            )
         connectors.append(RemoteHttpConnector(
-            source_id=settings.institution_connector_source_id,
-            institution_id=settings.institution_connector_institution_id,
-            display_name=settings.institution_connector_display_name,
-            base_url=settings.institution_connector_base_url,
-            allowed_tools=frozenset({
-                "institution.overview",
-                "institution.attendance_summary",
-                "institution.source_health",
-            }),
-            timeout_seconds=5.0,
-            auth_token=settings.institution_connector_auth_token,
+            source_id=definition.source_id,
+            institution_id=definition.institution_id,
+            display_name=definition.display_name,
+            base_url=definition.base_url,
+            allowed_tools=frozenset(definition.allowed_tools),
+            timeout_seconds=settings.connector_timeout_seconds,
+            max_response_bytes=settings.connector_max_response_bytes,
+            auth_token=definition.auth_token,
+            scope_attestation_required=definition.scope_attestation_required,
         ))
+        source_ids.add(definition.source_id)
     return ConnectorRegistry(tuple(connectors))
 
 
@@ -148,28 +189,42 @@ def build_runtime(settings: AppSettings | None = None) -> Runtime:
     tools = ToolRegistry((*build_college_tools(source_ids), *build_health_tools(source_ids)))
     connectors = _build_connectors(settings)
     store = _build_store(settings)
+    store.prune_retention(settings.audit_retention_days)
+    pdp = _build_pdp(settings)
+    exporter = (
+        HttpJsonTraceExporter(settings.otel_exporter_endpoint, settings.otel_exporter_timeout_seconds)
+        if settings.otel_exporter_endpoint else None
+    )
+    tracer = TraceRecorder(exporter=exporter)
     auth_verifier = None if settings.environment in {"development", "test"} else JwtVerifier(settings)
+    edge_identity = _build_edge_identity(settings)
     model = _build_model(settings)
     web_research = _build_web_research(settings)
+    assistant = AssistantService(
+        sources=sources,
+        tools=tools,
+        connectors=connectors,
+        store=store,
+        limits=QueryLimits(),
+        model=model,
+        model_max_tokens=settings.model_max_tokens,
+        web_research=web_research,
+        pdp=pdp,
+        tracer=tracer,
+    )
     return Runtime(
         settings=settings,
         sources=sources,
         tools=tools,
         connectors=connectors,
         store=store,
-        assistant=AssistantService(
-            sources=sources,
-            tools=tools,
-            connectors=connectors,
-            store=store,
-            limits=QueryLimits(),
-            model=model,
-            model_max_tokens=settings.model_max_tokens,
-            web_research=web_research,
-        ),
+        assistant=assistant,
         voice=VoiceSessionManager(ttl_seconds=300, max_active=10),
+        pdp=pdp,
+        tracer=tracer,
         web_research=web_research,
         auth_verifier=auth_verifier,
+        edge_identity=edge_identity,
     )
 
 
@@ -179,6 +234,12 @@ def runtime_from_request(request: Request) -> Runtime:
 
 def principal_from_request(request: Request):
     runtime = runtime_from_request(request)
+    if runtime.edge_identity is not None:
+        try:
+            assertion = request.headers.get("x-guru-edge-session", "")
+            return runtime.edge_identity.resolve(assertion)
+        except (PermissionError, ValueError, RuntimeError):
+            return principal_from_headers({}, runtime.settings, runtime.auth_verifier)
     return principal_from_headers(request.headers, runtime.settings, runtime.auth_verifier)
 
 

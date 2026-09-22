@@ -6,34 +6,49 @@ from ..connectors.base import ConnectorContext
 from ..connectors.registry import ConnectorRegistry
 from ..domain.principals import InstitutionScope, Principal
 from ..domain.results import ResultStatus, ToolResult
+from ..policy.pdp import LocalPolicyDecisionPoint, PolicyDecision, PolicyDecisionPoint
 from ..policy.query_limits import QueryLimits
 from ..tools.registry import ToolRegistry
 from .plan_validator import PlannedTool
 
 
-def _has_capability(principal: Principal, capability: object) -> bool:
-    return capability in principal.capabilities
-
-
-def _has_scope(principal: Principal, requested_scope: InstitutionScope) -> bool:
-    return any(scope.covers(requested_scope) for scope in principal.scopes)
-
-
 async def execute_plan(
     plan: tuple[PlannedTool, ...], principal: Principal, tools: ToolRegistry,
     connectors: ConnectorRegistry, requested_scope: InstitutionScope, request_id: str,
-    limits: QueryLimits,
+    limits: QueryLimits, pdp: PolicyDecisionPoint | None = None,
+    decision_log: list[PolicyDecision] | None = None,
 ) -> tuple[ToolResult, ...]:
+    decision_point = pdp or LocalPolicyDecisionPoint()
     results: list[ToolResult] = []
     for step in plan:
         tool = tools.get(step.name)
-        if not _has_capability(principal, tool.required_capability) or not _has_scope(principal, requested_scope):
+        decision = decision_point.evaluate(
+            principal=principal,
+            required_capability=tool.required_capability,
+            action="retrieve",
+            resource_type="connector_resource",
+            resource_id=step.source_id,
+            requested_scope=requested_scope,
+        )
+        if decision_log is not None:
+            decision_log.append(decision)
+        if not decision.allowed:
             results.append(ToolResult(tool_name=step.name, status=ResultStatus.UNAUTHORIZED))
             continue
         connector = connectors.get(step.source_id)
         results.append(await connector.execute(
             step.name, step.arguments,
-            ConnectorContext(request_id=request_id, source_id=step.source_id, limits=limits),
+            ConnectorContext(
+                request_id=request_id,
+                source_id=step.source_id,
+                limits=limits,
+                principal_id=principal.principal_id,
+                principal_type=principal.principal_type,
+                institution_scope=requested_scope,
+                capabilities=principal.capabilities,
+                consent_verified=principal.consent_verified,
+                revoked=principal.revoked,
+            ),
         ))
     return tuple(results)
 
