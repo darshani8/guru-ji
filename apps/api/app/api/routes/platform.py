@@ -11,6 +11,7 @@ from starlette.concurrency import run_in_threadpool
 
 from ...actions.files import FORMAT_CONTENT_TYPES
 from ...domain.principals import Capability, InstitutionScope
+from ...storage.object_store import ObjectStoreError
 from ..dependencies import platform_from_request
 from ._platform_common import require_principal, resolve_institution, translate
 
@@ -77,6 +78,9 @@ async def download_report(report_id: str, request: Request, institution_id: str 
         record, content = await run_in_threadpool(platform.reports.fetch, principal, target, report_id)
     except (PermissionError, KeyError) as exc:
         raise translate(exc) from exc
+    except ObjectStoreError as exc:
+        # The record exists but its file is gone (expired, deleted, or an in-memory store after a restart).
+        raise HTTPException(status_code=410, detail=f"the file for report {report_id} is no longer available; generate the report again") from exc
     file_name = str(record["object_key"]).rsplit("/", 1)[-1]
     return Response(content=content, media_type=FORMAT_CONTENT_TYPES.get(str(record["format"]), "application/octet-stream"), headers={"Content-Disposition": f'attachment; filename="{file_name}"'})
 

@@ -89,6 +89,39 @@ class IngestionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job["report"]["import"]["inserted"], 1)
         self.assertEqual(self.store.count_records("college_a", "student"), 3)
 
+    async def test_approving_a_duplicate_keeps_the_update_and_drops_the_new_identity(self):
+        await self._upload("students.csv", STUDENTS)
+        # Row 2 updates the existing student (new semester); row 3 is the same person under a new USN.
+        roster = (
+            b"Student Name,USN,Course,Sem,Phone,Email ID,DOB\n"
+            b"Ravi Kumar,1MS23MBA001,MBA,2,9876543210,ravi@x.com,12/05/2003\n"
+            b"Ravi Kumar,1MS23MBA901,MBA,2,9876543210,ravi@x.com,12/05/2003\n"
+        )
+        job = await self._upload("roster2.csv", roster)
+        self.assertEqual((job["status"], job["stage"]), (JOB_NEEDS_REVIEW, STAGE_DUPLICATE_REVIEW))
+        items = self.store.list_review_items("college_a", job_id=job["job_id"])
+        self.assertGreaterEqual(len(items), 1)
+        for item in items:
+            job = self.service.resolve_review("college_a", item["review_id"], decision="approved", resolved_by="staff-1")
+        self.assertEqual(job["status"], JOB_IMPORTED)
+        self.assertEqual(job["report"]["import"]["updated"], 1, "the existing student's update is imported")
+        self.assertEqual(job["report"]["import"]["inserted"], 0, "the new identity is not imported")
+        self.assertEqual(self.store.get_record("college_a", "student", "1ms23mba001")["semester"], 2)
+        self.assertIsNone(self.store.get_record("college_a", "student", "1ms23mba901"))
+        self.assertEqual(self.store.count_records("college_a", "student"), 2)
+        # Two brand-new rows for one person keep the first occurrence.
+        fresh = (
+            b"Student Name,USN,Course,Sem,Phone,Email ID,DOB\n"
+            b"Meena Nair,1MS23MBA501,MBA,1,9876500501,meena@x.com,03/03/2003\n"
+            b"Meena Nair,1MS23MBA502,MBA,1,9876500501,meena@x.com,03/03/2003\n"
+        )
+        job = await self._upload("roster3.csv", fresh)
+        for item in self.store.list_review_items("college_a", job_id=job["job_id"]):
+            job = self.service.resolve_review("college_a", item["review_id"], decision="approved", resolved_by="staff-1")
+        self.assertEqual(job["report"]["import"]["inserted"], 1)
+        self.assertIsNotNone(self.store.get_record("college_a", "student", "1ms23mba501"))
+        self.assertIsNone(self.store.get_record("college_a", "student", "1ms23mba502"))
+
     async def test_updates_are_detected_when_data_changes(self):
         await self._upload("students.csv", STUDENTS)
         job = await self._upload("students_new.csv", STUDENTS.replace(b"Sem 1", b"Sem 2"))

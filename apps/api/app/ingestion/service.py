@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 
 import hashlib
 import logging
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
@@ -427,16 +427,7 @@ class IngestionService:
             raise IngestionError(f"{pending_duplicates} duplicate review item(s) are still pending; resolve them before committing")
         entity = CANONICAL_ENTITIES[job["entity"]]
         resolved = {item["review_id"]: item for item in self.store.list_review_items(institution_id, job_id=job_id, status=None)}
-        skip_locators: set[str] = set()
-        for item in resolved.values():
-            if item["kind"] != "duplicate":
-                continue
-            payload = item.get("payload", {})
-            if item["status"] == "pending":
-                skip_locators.add(str(payload.get("left_locator")))
-            elif item["status"] == "approved":
-                # Reviewer confirmed it is the same record/person: the newer row is not imported.
-                skip_locators.add(str(payload.get("left_locator")))
+        skip_locators = self._locators_to_skip(institution_id, job, entity, resolved.values())
         self.store.update_job(institution_id, job_id, status=JOB_PROCESSING, stage=STAGE_IMPORTING, error=None)
         try:
             return self._import(institution_id, job, entity, skip_locators, committed_by=committed_by)
@@ -445,6 +436,44 @@ class IngestionService:
             message = f"the import failed ({type(exc).__name__}); the job can be committed again once the cause is fixed"
             self.store.update_job(institution_id, job_id, status=JOB_READY, stage=STAGE_READY, error=message)
             raise CommitError(message) from exc
+
+    def _locators_to_skip(self, institution_id: str, job: Mapping[str, Any], entity: CanonicalEntity, items: Iterable[Mapping[str, Any]]) -> set[str]:
+        """Rows an approved duplicate decision keeps out of the import.
+
+        Approving "same person" must drop the row that would create a second
+        identity, never the legitimate update of the record that already
+        exists: for a match against an existing record that is the new row;
+        for a pair inside the batch it is the row whose key is not yet known
+        (or the later row when both are new). Two rows that both update
+        existing records are both imported: they already are separate records
+        and merging them is not an import decision. Conflicting copies of one
+        key keep the first copy.
+        """
+
+        approved = [item for item in items if item["kind"] == "duplicate" and item["status"] == "approved"]
+        if not approved:
+            return set()
+        rows = {row["locator"]: row for row in self.store.job_records(institution_id, job["job_id"], limit=self.max_rows)}
+        keys = {str(row.get("record_key")) for row in rows.values() if row.get("record_key") and str(row["record_key"]).strip("|")}
+        existing = self.store.existing_keys(institution_id, entity.name, sorted(keys)) if keys else {}
+        skip: set[str] = set()
+        for item in approved:
+            payload = item.get("payload", {})
+            left, right = str(payload.get("left_locator") or ""), payload.get("right_locator")
+            if payload.get("kind") == "conflicting_key" or not right:
+                skip.add(left)
+                continue
+            right = str(right)
+            left_key = str(rows.get(left, {}).get("record_key") or "")
+            right_key = str(rows.get(right, {}).get("record_key") or "")
+            left_known, right_known = left_key in existing, right_key in existing
+            if left_known and not right_known:
+                skip.add(right)
+            elif right_known and not left_known:
+                skip.add(left)
+            elif not left_known and not right_known:
+                skip.add(right)
+        return skip
 
     def _import(self, institution_id: str, job: dict[str, Any], entity: CanonicalEntity, skip_locators: set[str], *, committed_by: str) -> dict[str, Any]:
         job_id = job["job_id"]

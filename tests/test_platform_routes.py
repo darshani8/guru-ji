@@ -28,6 +28,21 @@ class PlatformRouteTests(unittest.TestCase):
         cls.job_id = upload.json()["job"]["job_id"]
         cls.client.post("/v1/ingestion/uploads", headers=cls.principal, files={"file": ("attendance.csv", ATTENDANCE, "text/csv")})
 
+    def test_downloading_a_report_whose_file_is_gone_is_410_not_500(self):
+        platform = app.state.runtime.platform
+        command = self.client.post("/v1/agent/commands", headers=self.principal, json={"command": "Create a csv report of MBA students below 75% attendance"})
+        self.assertEqual(command.status_code, 200, command.text)
+        artifacts = command.json().get("artifacts") or []
+        self.assertTrue(artifacts, command.json())
+        report_id = artifacts[0].get("report_id") or str(artifacts[0].get("download_path", "")).rsplit("/", 2)[-2]
+        path = f"/v1/reports/{report_id}/download"
+        self.assertEqual(self.client.get(path, headers=self.principal).status_code, 200)
+        record = platform.store.get_report("route_college", report_id)
+        self.assertTrue(platform.objects.delete(record["object_key"]))
+        gone = self.client.get(path, headers=self.principal)
+        self.assertEqual(gone.status_code, 410, gone.text)
+        self.assertIn("no longer available", gone.json()["detail"])
+
     def test_readiness_reports_an_unreachable_store_as_not_ready(self):
         platform = app.state.runtime.platform
 

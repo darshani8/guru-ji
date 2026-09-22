@@ -245,7 +245,8 @@ async def resolve_review(review_id: str, body: ReviewDecisionBody, request: Requ
     principal = require_principal(request, Capability.DATA_REVIEW)
     target = resolve_institution(principal, institution_id)
     try:
-        job = platform.ingestion.resolve_review(target, review_id, decision=body.decision, resolved_by=principal.principal_id, note=body.note)
+        # Resolving the last duplicate may auto-commit the whole import: keep it off the event loop.
+        job = await run_in_threadpool(platform.ingestion.resolve_review, target, review_id, decision=body.decision, resolved_by=principal.principal_id, note=body.note)
     except ProcessingError as exc:
         # A server-side failure (database, storage): the job state was recorded and the step can be retried.
         raise HTTPException(status_code=503, detail=str(exc)) from exc
