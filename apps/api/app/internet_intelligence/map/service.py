@@ -12,6 +12,7 @@ from ..fetch import PublicPageFetcher
 from ..profile import InstitutionProfile
 from .engine import MapEngine
 from .export import export_tsv
+from .gate import rescore
 from .harvest import OfficialSiteHarvester
 from .metrics import map_metrics, record_baseline
 from .pipeline import regrade, sync_profile
@@ -23,6 +24,13 @@ MAX_SEED_BYTES = 2_000_000
 MAX_SEED_ROWS = 5_000
 MAX_HARVEST_DOMAINS = 10
 MANUAL_SOURCE_CONNECTORS = frozenset({"directory", "lead_page", "feed"})
+# What a person may decide about each kind of review item.
+_ON_ASSETS = frozenset({"confirm", "reject", "lookalike", "impersonation", "personal", "dismiss"})
+DECISIONS: dict[str, frozenset[str]] = {
+    "impersonation_candidate": _ON_ASSETS, "dispute": _ON_ASSETS, "candidate_account": _ON_ASSETS, "canary_leak": frozenset({"acknowledge", "dismiss"}),
+    "court_record": frozenset({"acknowledge", "dismiss"}), "run_gate": frozenset({"publish", "discard"}),
+}
+ASSET_DECISIONS = frozenset({"confirm", "reject", "lookalike", "impersonation", "personal"})
 
 
 @dataclass(slots=True)
@@ -169,6 +177,66 @@ class MapService:
         source_id, created = self.store.upsert_source(institution_id, connector=connector, target=target.strip(), origin="seed", work_class="explore" if connector == "lead_page" else "rotation", hops=0, interval_seconds=30 * 86400)
         return {"source_id": source_id, "created": created, "enabled": bool(self.engine and self.engine.registry.get(connector))}
 
+    # ------------------------------------------------------------ review queue
+    def review_items(self, principal: Principal, institution_id: str, *, status: str | None = "open", kind: str | None = None, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+        """The queue is manager-only: it holds unverified accounts, suspected impersonators and court records."""
+
+        self.guard(principal, institution_id, Capability.INTELLIGENCE_MANAGE)
+        return {"items": self.store.list_review_items(institution_id, status=status, kind=kind, limit=limit, offset=offset), "open": self.store.review_counts(institution_id)}
+
+    def decide(self, principal: Principal, institution_id: str, review_id: str, *, decision: str, note: str = "", relation: str | None = None) -> dict[str, Any]:
+        """Apply a person's decision. Every effect on a grade goes through evidence, so it can be explained later."""
+
+        self.guard(principal, institution_id, Capability.INTELLIGENCE_MANAGE)
+        item = self.store.get_review_item(institution_id, review_id)
+        if item is None:
+            raise KeyError("review item not found")
+        if item["status"] != "open":
+            raise ValueError(f"this item is already {item['status']}")
+        allowed = DECISIONS.get(item["kind"], frozenset())
+        if decision not in allowed:
+            raise ValueError(f"a {item['kind']} item takes one of: {', '.join(sorted(allowed))}")
+        asset = self.store.get_asset(institution_id, item["asset_id"]) if item.get("asset_id") else None
+        if decision in ASSET_DECISIONS and asset is None:
+            raise ValueError("the asset this item was about is no longer in the map")
+        effect: dict[str, Any] = {"decision": decision}
+        reviewer = f"reviewer:{principal.principal_id}"
+        detail = (note or decision).strip()[:300]
+        if decision == "confirm":
+            self.store.add_evidence(institution_id, asset_id=asset["asset_id"], kind="reviewer_confirm", detail=detail, channel=reviewer, observed_via="reviewer")
+            if relation:
+                self.store.set_relation(institution_id, asset["asset_id"], relation)
+        elif decision in {"reject", "lookalike", "impersonation"}:
+            kind = {"reject": "reviewer_reject", "lookalike": "lookalike", "impersonation": "impersonation"}[decision]
+            self.store.add_evidence(institution_id, asset_id=asset["asset_id"], kind=kind, polarity="refutes", detail=detail, channel=reviewer, observed_via="reviewer")
+            effect["sources_pruned"] = self.store.prune_sources_for(institution_id, asset_id=asset["asset_id"], url=asset["url"])
+            if decision == "impersonation":
+                effect["incident"] = {"kind": "impersonation_confirmed", "target": asset["asset_key"], "signals": [detail], "severity": "high"}
+        elif decision == "personal":
+            # A person's account leaves the map: only a keyed fingerprint stays, so it never comes back.
+            self.store.suppress(institution_id, asset["asset_key"], reason="personal account (review decision)")
+            self.store.suppress(institution_id, asset["url"], reason="personal account (review decision)")
+            self.store.forget_asset(institution_id, asset["asset_id"])
+            asset = None
+        elif decision == "publish":
+            effect["published"] = self.store.apply_proposed(institution_id)
+        elif decision == "discard":
+            effect["discarded"] = self.store.discard_proposed(institution_id)
+        if asset is not None and decision in ASSET_DECISIONS:
+            effect["changes"] = regrade(self.store, institution_id, [asset["asset_id"]])
+        if not self.store.decide_review_item(institution_id, review_id, decision=decision, decided_by=principal.principal_id, note=note, redact=decision == "personal"):
+            raise ValueError("this item was decided by someone else just now")
+        return {"review_id": review_id, "kind": item["kind"], **effect}
+
+    def rescore(self, principal: Principal, institution_id: str) -> dict[str, Any]:
+        """Recompute every grade under the current rule; publish only if the ground truth does not get worse."""
+
+        self.guard(principal, institution_id, Capability.INTELLIGENCE_MANAGE)
+        run_id = self.store.start_map_run(institution_id, kind="rescore")
+        verdict = rescore(self.store, institution_id, run_id=run_id)
+        self.store.finish_map_run(institution_id, run_id, status="succeeded", stop_reason="published" if verdict.passed else "held", gate="passed" if verdict.passed else "held", metrics=verdict.after)
+        return {"run_id": run_id, **verdict.as_dict()}
+
     def connectors(self, principal: Principal, institution_id: str) -> list[dict[str, Any]]:
         self.guard(principal, institution_id, Capability.INTELLIGENCE_READ)
         return self.engine.registry.describe() if self.engine else []
@@ -180,4 +248,4 @@ class MapService:
         return {"day": day, "platform": self.store.spend(day=day), "institution": self.store.tenant_spend(institution_id, day=day), "caps": caps, "tenant_caps": {key: value * share for key, value in caps.items()}}
 
 
-__all__ = ["MANUAL_SOURCE_CONNECTORS", "MAX_HARVEST_DOMAINS", "MAX_SEED_BYTES", "MAX_SEED_ROWS", "MapService"]
+__all__ = ["ASSET_DECISIONS", "DECISIONS", "MANUAL_SOURCE_CONNECTORS", "MAX_HARVEST_DOMAINS", "MAX_SEED_BYTES", "MAX_SEED_ROWS", "MapService"]

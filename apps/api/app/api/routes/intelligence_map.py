@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Literal
 from uuid import uuid4
 
 from fastapi import APIRouter, HTTPException, Request
@@ -35,6 +35,13 @@ class HarvestBody(BaseModel):
 
 
 class MapInstitutionBody(BaseModel):
+    institution_id: str | None = Field(default=None, max_length=128)
+
+
+class DecisionBody(BaseModel):
+    decision: str = Field(min_length=1, max_length=20)
+    note: str = Field(default="", max_length=500)
+    relation: Literal["official", "affiliated", "community", "third_party"] | None = None
     institution_id: str | None = Field(default=None, max_length=128)
 
 
@@ -225,6 +232,46 @@ async def add_source(request: Request, body: SourceBody) -> dict[str, Any]:
     except (ValueError, PermissionError) as exc:
         raise translate(exc) from exc
     audit_map_action(request, principal, "add_source", metadata={"institution_id": target, "connector": body.connector, "created": bool(result["created"])})
+    return result
+
+
+@router.get("/review", summary="What a person must decide (managers only): suspected impersonators, disputes, court records, held runs")
+async def review_queue(request: Request, institution_id: str | None = None, status: str | None = "open", kind: str | None = None, limit: int = 100, offset: int = 0) -> dict[str, Any]:
+    service = map_service(request)
+    principal = require_principal(request, Capability.INTELLIGENCE_MANAGE)
+    target = resolve_institution(principal, institution_id)
+    try:
+        return {**service.review_items(principal, target, status=status or None, kind=kind, limit=min(max(limit, 1), 500), offset=max(offset, 0)), "untrusted_content": True}
+    except (ValueError, PermissionError) as exc:
+        raise translate(exc) from exc
+
+
+@router.post("/review/{review_id}/decision", summary="Decide a review item; the decision becomes evidence and is audited")
+async def decide(review_id: str, body: DecisionBody, request: Request) -> dict[str, Any]:
+    service = map_service(request)
+    principal = require_principal(request, Capability.INTELLIGENCE_MANAGE)
+    target = resolve_institution(principal, body.institution_id)
+    try:
+        result = service.decide(principal, target, review_id, decision=body.decision, note=body.note, relation=body.relation)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="review item not found") from exc
+    except (ValueError, PermissionError) as exc:
+        audit_map_action(request, principal, "review_decision", outcome=AuditOutcome.DENIED if isinstance(exc, PermissionError) else AuditOutcome.FAILED, metadata={"institution_id": target, "review_id": review_id, "decision": body.decision})
+        raise translate(exc) from exc
+    audit_map_action(request, principal, "review_decision", metadata={"institution_id": target, "review_id": review_id, "kind": result["kind"], "decision": body.decision, "relation": body.relation})
+    return result
+
+
+@router.post("/rescore", summary="Recompute every grade; published only if the map's ground truth does not get worse")
+async def rescore(request: Request, body: MapInstitutionBody) -> dict[str, Any]:
+    service = map_service(request)
+    principal = require_principal(request, Capability.INTELLIGENCE_MANAGE)
+    target = resolve_institution(principal, body.institution_id)
+    try:
+        result = await run_in_threadpool(service.rescore, principal, target)
+    except (ValueError, PermissionError) as exc:
+        raise translate(exc) from exc
+    audit_map_action(request, principal, "rescore", metadata={"institution_id": target, "passed": bool(result["passed"])})
     return result
 
 

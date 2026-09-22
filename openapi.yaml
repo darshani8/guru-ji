@@ -2517,6 +2517,131 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/review:
+    get:
+      tags:
+      - intelligence-map
+      summary: 'What a person must decide (managers only): suspected impersonators,
+        disputes, court records, held runs'
+      operationId: review_queue_v1_intelligence_map_review_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: status
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: open
+          title: Status
+      - name: kind
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Kind
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 100
+          title: Limit
+      - name: offset
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 0
+          title: Offset
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Review Queue V1 Intelligence Map Review Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/review/{review_id}/decision:
+    post:
+      tags:
+      - intelligence-map
+      summary: Decide a review item; the decision becomes evidence and is audited
+      operationId: decide_v1_intelligence_map_review__review_id__decision_post
+      parameters:
+      - name: review_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Review Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecisionBody'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Decide V1 Intelligence Map Review  Review Id  Decision
+                  Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/rescore:
+    post:
+      tags:
+      - intelligence-map
+      summary: Recompute every grade; published only if the map's ground truth does
+        not get worse
+      operationId: rescore_v1_intelligence_map_rescore_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MapInstitutionBody'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Rescore V1 Intelligence Map Rescore Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /v1/intelligence/map/connectors:
     get:
       tags:
@@ -3020,6 +3145,38 @@ components:
       required:
       - command
       title: CommandBody
+    DecisionBody:
+      properties:
+        decision:
+          type: string
+          maxLength: 20
+          minLength: 1
+          title: Decision
+        note:
+          type: string
+          maxLength: 500
+          title: Note
+          default: ''
+        relation:
+          anyOf:
+          - type: string
+            enum:
+            - official
+            - affiliated
+            - community
+            - third_party
+          - type: 'null'
+          title: Relation
+        institution_id:
+          anyOf:
+          - type: string
+            maxLength: 128
+          - type: 'null'
+          title: Institution Id
+      type: object
+      required:
+      - decision
+      title: DecisionBody
     DocumentSearchBody:
       properties:
         question:

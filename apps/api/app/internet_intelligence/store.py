@@ -99,6 +99,15 @@ _STATEMENTS: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_intelligence_reports_institution ON intelligence_reports(institution_id, created_at)",
+    """
+    CREATE TABLE IF NOT EXISTS investigation_quota (
+        institution_id TEXT NOT NULL,
+        principal_id TEXT NOT NULL,
+        day TEXT NOT NULL,
+        used INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(institution_id, principal_id, day)
+    )
+    """,
 )
 # Provenance added after the tables first shipped: why a row has its status,
 # which provider and queries found it, the URL the provider returned before
@@ -112,14 +121,19 @@ ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("monitoring_runs", "stop_reason", "TEXT"),
     # When a row was first kept (and so reported); NULL means never reported.
     ("internet_documents", "first_kept_at", "TEXT"),
+    # A report whose findings touch a sensitive topic is shown to managers only.
+    ("intelligence_reports", "sensitive", "INTEGER NOT NULL DEFAULT 0"),
 )
+# Topics only people who manage intelligence see until someone has reviewed
+# them: allegations and complaints are not published to every reader.
+SENSITIVE_TOPICS = frozenset({"controversy"})
 # A monitoring run still marked running after this long lost its process; it
 # no longer holds the per-institution lock and is closed as abandoned.
 RUN_LOCK_SECONDS = 1800
 # institution_profiles is deliberately not under row-level security: the monitoring
 # scheduler enumerates every profile with monitoring enabled without a tenant
 # context, and the store's own methods always filter profiles by institution_id.
-_TENANT_TABLES = ("internet_documents", "monitoring_runs", "monitoring_events", "intelligence_reports")
+_TENANT_TABLES = ("internet_documents", "monitoring_runs", "monitoring_events", "intelligence_reports", "investigation_quota")
 
 
 def _rls(state: Mapping[str, tuple[bool, bool]], policies: Iterable[tuple[str, str]]) -> tuple[str, ...]:
@@ -300,9 +314,13 @@ class IntelligenceStore:
         row["queries"] = _loads(row.pop("queries_json", "[]"), [])
         return row
 
-    def list_documents(self, institution_id: str, *, days: int | None = None, status: str | None = "kept", source_type: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+    def list_documents(self, institution_id: str, *, days: int | None = None, status: str | None = "kept", source_type: str | None = None, limit: int = 100, exclude_sensitive: bool = False) -> list[dict[str, Any]]:
         clauses = ["institution_id = ?"]
         params: list[Any] = [institution_id]
+        if exclude_sensitive:
+            for topic in sorted(SENSITIVE_TOPICS):
+                clauses.append("topics_json NOT LIKE ?")
+                params.append(f'%"{topic}"%')
         if status:
             clauses.append("status = ?")
             params.append(status)
@@ -399,17 +417,51 @@ class IntelligenceStore:
     # ---------------------------------------------------------------- reports
     def save_report(self, institution_id: str, *, requested_by: str, question: str | None, window_days: int, summary: str, findings: Sequence[Mapping[str, Any]]) -> str:
         report_id = f"irpt-{uuid4().hex}"
+        sensitive = any(SENSITIVE_TOPICS & set(item.get("topics") or ()) for item in findings)
         with self._tenant(institution_id):
             self.backend.execute(
-                "INSERT INTO intelligence_reports(report_id, institution_id, requested_by, question, window_days, findings_count, summary, findings_json, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (report_id, institution_id, requested_by, question, window_days, len(findings), summary[:4000], _json([dict(item) for item in findings]), now_iso()),
+                "INSERT INTO intelligence_reports(report_id, institution_id, requested_by, question, window_days, findings_count, summary, findings_json, created_at, sensitive) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (report_id, institution_id, requested_by, question, window_days, len(findings), summary[:4000], _json([dict(item) for item in findings]), now_iso(), int(sensitive)),
             )
         return report_id
 
-    def list_reports(self, institution_id: str, *, limit: int = 20) -> list[dict[str, Any]]:
+    def list_reports(self, institution_id: str, *, limit: int = 20, include_sensitive: bool = True) -> list[dict[str, Any]]:
+        sensitive = "" if include_sensitive else " AND sensitive = 0"
         with self._tenant(institution_id):
-            rows = self.backend.fetchall("SELECT report_id, requested_by, question, window_days, findings_count, summary, created_at FROM intelligence_reports WHERE institution_id = ? ORDER BY created_at DESC LIMIT ?", (institution_id, max(1, min(limit, 200))))
+            rows = self.backend.fetchall(
+                f"SELECT report_id, requested_by, question, window_days, findings_count, summary, created_at FROM intelligence_reports WHERE institution_id = ?{sensitive} ORDER BY created_at DESC LIMIT ?",
+                (institution_id, max(1, min(limit, 200))),
+            )
         return rows
 
+    def sensitive_documents(self, institution_id: str, document_ids: Sequence[str]) -> set[str]:
+        """Which of these documents carry a sensitive topic."""
 
-__all__ = ["ADDED_COLUMNS", "RUN_LOCK_SECONDS", "IntelligenceStore", "SCHEMA_VERSION", "render_sql_migration"]
+        wanted = [item for item in dict.fromkeys(document_ids) if item]
+        found: set[str] = set()
+        with self._tenant(institution_id):
+            for start in range(0, len(wanted), 200):
+                chunk = wanted[start : start + 200]
+                marks = ", ".join("?" for _ in chunk)
+                for row in self.backend.fetchall(f"SELECT document_id, topics_json FROM internet_documents WHERE institution_id = ? AND document_id IN ({marks})", (institution_id, *chunk)):
+                    if SENSITIVE_TOPICS & set(_loads(row["topics_json"], [])):
+                        found.add(str(row["document_id"]))
+        return found
+
+    # ------------------------------------------------------------ quotas
+    def take_investigation(self, institution_id: str, principal_id: str, *, day: str, cap: int) -> bool:
+        """Count one investigation against the person's daily allowance; False when it is used up."""
+
+        with self._tenant(institution_id):
+            return bool(self.backend.execute(
+                "INSERT INTO investigation_quota(institution_id, principal_id, day, used) VALUES (?, ?, ?, 1) ON CONFLICT (institution_id, principal_id, day) DO UPDATE SET used = investigation_quota.used + 1 WHERE investigation_quota.used < ?",
+                (institution_id, principal_id, day, int(cap)),
+            )) if cap > 0 else False
+
+    def investigations_used(self, institution_id: str, principal_id: str, *, day: str) -> int:
+        with self._tenant(institution_id):
+            row = self.backend.fetchone("SELECT used FROM investigation_quota WHERE institution_id = ? AND principal_id = ? AND day = ?", (institution_id, principal_id, day))
+        return int(row["used"]) if row else 0
+
+
+__all__ = ["ADDED_COLUMNS", "RUN_LOCK_SECONDS", "SENSITIVE_TOPICS", "IntelligenceStore", "SCHEMA_VERSION", "render_sql_migration"]

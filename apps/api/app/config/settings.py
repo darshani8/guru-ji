@@ -159,6 +159,7 @@ class AppSettings:
     intelligence_sources_per_tick: int = 25
     intelligence_connectors: tuple[str, ...] = ()
     intelligence_seed_groups: str = ""
+    intelligence_investigations_per_day: int = 20
     intelligence_youtube_api_key: str | None = field(default=None, repr=False)
     intelligence_indiankanoon_token: str | None = field(default=None, repr=False)
     agent_planner: str = "deterministic"
@@ -277,6 +278,7 @@ class AppSettings:
             intelligence_tenant_share=float(os.getenv("GURU_INTELLIGENCE_TENANT_SHARE", "0.5")),
             intelligence_sources_per_tick=int(os.getenv("GURU_INTELLIGENCE_SOURCES_PER_TICK", "25")),
             intelligence_seed_groups=os.getenv("GURU_INTELLIGENCE_SEED_GROUPS", "").strip(),
+            intelligence_investigations_per_day=int(os.getenv("GURU_INTELLIGENCE_INVESTIGATIONS_PER_DAY", "20")),
             intelligence_connectors=tuple(item.strip().lower() for item in os.getenv("GURU_INTELLIGENCE_CONNECTORS", "").split(",") if item.strip()),
             intelligence_youtube_api_key=os.getenv("GURU_INTELLIGENCE_YOUTUBE_API_KEY") or None,
             intelligence_indiankanoon_token=os.getenv("GURU_INTELLIGENCE_INDIANKANOON_TOKEN") or None,
@@ -536,6 +538,8 @@ class AppSettings:
             raise ValueError("intelligence query limits must be between 1 and 20")
         self.intelligence_budget_caps()
         self.intelligence_seed_group_map()
+        if not 0 <= self.intelligence_investigations_per_day <= 1000:
+            raise ValueError("GURU_INTELLIGENCE_INVESTIGATIONS_PER_DAY must be between 0 and 1000")
         if not 0 < self.intelligence_tenant_share <= 1:
             raise ValueError("GURU_INTELLIGENCE_TENANT_SHARE must be greater than 0 and at most 1")
         if not 1 <= self.intelligence_sources_per_tick <= 500:

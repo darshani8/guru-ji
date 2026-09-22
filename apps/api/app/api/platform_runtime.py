@@ -157,7 +157,10 @@ def _services(settings: AppSettings, store: InstitutionDataStore, intelligence_s
     monitor: ContinuousMonitor | None = None
     if provider is not None:
         fetcher = PublicPageFetcher(timeout_seconds=settings.web_extract_timeout_seconds, max_response_bytes=settings.web_extract_max_bytes, user_agent=crawler_user_agent(settings.intelligence_crawler_contact)) if settings.intelligence_fetch_pages else None
-        intelligence = InternetIntelligenceService(intelligence_store, provider, fetcher=fetcher, institution_store=store, model=model, max_queries=settings.intelligence_max_queries, results_per_query=settings.intelligence_results_per_query)
+        intelligence = InternetIntelligenceService(
+            intelligence_store, provider, fetcher=fetcher, institution_store=store, model=model, max_queries=settings.intelligence_max_queries, results_per_query=settings.intelligence_results_per_query,
+            investigations_per_day=settings.intelligence_investigations_per_day,
+        )
 
         def alert_sink(institution_id: str, recipients: Any, title: str, body: str) -> None:
             notifications.system_notify(institution_id, recipient_ids=list(recipients), title=title, body=body, reference_type="monitoring")

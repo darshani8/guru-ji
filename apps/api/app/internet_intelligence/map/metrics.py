@@ -20,8 +20,12 @@ def _ratio(numerator: int, denominator: int) -> float | None:
     return round(numerator / denominator, 4) if denominator else None
 
 
-def map_metrics(store: MapStore, institution_id: str) -> dict[str, Any]:
+def map_metrics(store: MapStore, institution_id: str, *, proposed: bool = False) -> dict[str, Any]:
+    """How the map measures up against its ground truth; ``proposed`` measures the grades a run is waiting to publish."""
+
     assets = list(store.iter_assets(institution_id))
+    if proposed:
+        assets = [{**asset, "grade": asset.get("proposed_grade") or asset["grade"]} for asset in assets]
     by_key = {asset["asset_key"]: asset for asset in assets}
     gold = store.list_gold(institution_id)
     holdout = [item for item in gold if item["split"] == "holdout"]
@@ -38,7 +42,8 @@ def map_metrics(store: MapStore, institution_id: str) -> dict[str, Any]:
     leaks = [
         {"asset_key": item["asset_key"], "entity_name": item["entity_name"], "grade": by_key[item["asset_key"]]["grade"]}
         for item in canaries
-        if item["asset_key"] in by_key and by_key[item["asset_key"]]["relation"] == "official" and grade_at_least(by_key[item["asset_key"]]["grade"], "B")
+        # Whatever its relation, a canary at B or better is shown to readers: a leak.
+        if item["asset_key"] in by_key and grade_at_least(by_key[item["asset_key"]]["grade"], "B")
     ]
     per_platform: dict[str, dict[str, int]] = {}
     for item in holdout:

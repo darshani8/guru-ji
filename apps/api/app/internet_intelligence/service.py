@@ -26,7 +26,7 @@ from .query_generator import generate_queries
 from .relevance import importance, relevance_score, topic_tags, within_window
 from .search import IntelligenceSearchProvider, IntelligenceSearchUnavailable
 from .source_classification import SOURCE_LABELS, classify_source
-from .store import IntelligenceStore
+from .store import SENSITIVE_TOPICS, IntelligenceStore
 from .urls import canonicalize_url, domain_of
 
 MAX_CANDIDATES = 60
@@ -45,6 +45,8 @@ class InternetIntelligenceService:
     results_per_query: int = 5
     min_match_level: str = MEDIUM
     keep_unknown_dates: bool = True
+    # Live investigations a person may run per day (each one spends search credits).
+    investigations_per_day: int = 20
     _levels: dict[str, int] = field(default_factory=lambda: {NOT_MATCHED: 0, LOW: 1, MEDIUM: 2, HIGH: 3})
 
     # ------------------------------------------------------------------ guards
@@ -78,15 +80,21 @@ class InternetIntelligenceService:
     # ------------------------------------------------------------- investigate
     async def investigate(self, principal: Principal, institution_id: str, *, question: str | None = None, window_days: int = 7, topics: Sequence[str] | None = None, max_results: int = 10, persist: bool = True) -> dict[str, Any]:
         self._guard(principal, institution_id, Capability.INTELLIGENCE_READ)
-        return await self._investigate(institution_id, requested_by=principal.principal_id, question=question, window_days=window_days, topics=topics, max_results=max_results, persist=persist)
+        manager = principal.has_capability(Capability.INTELLIGENCE_MANAGE)
+        day = datetime.now(timezone.utc).date().isoformat()
+        if not self.store.take_investigation(institution_id, principal.principal_id, day=day, cap=self.investigations_per_day * (3 if manager else 1)):
+            raise InvestigationQuotaExceeded(f"the daily allowance of live investigations is used up ({self.investigations_per_day * (3 if manager else 1)} a day); stored mentions and the digest are still available")
+        return await self._investigate(institution_id, requested_by=principal.principal_id, question=question, window_days=window_days, topics=topics, max_results=max_results, persist=persist, include_sensitive=manager)
 
-    async def _investigate(self, institution_id: str, *, requested_by: str, question: str | None, window_days: int, topics: Sequence[str] | None, max_results: int, persist: bool) -> dict[str, Any]:
-        report, _ = await self.collect(institution_id, requested_by=requested_by, question=question, window_days=window_days, topics=topics, max_results=max_results, persist=persist)
+    async def _investigate(
+        self, institution_id: str, *, requested_by: str, question: str | None, window_days: int, topics: Sequence[str] | None, max_results: int, persist: bool, include_sensitive: bool = True,
+    ) -> dict[str, Any]:
+        report, _ = await self.collect(institution_id, requested_by=requested_by, question=question, window_days=window_days, topics=topics, max_results=max_results, persist=persist, include_sensitive=include_sensitive)
         return report
 
     async def collect(
         self, institution_id: str, *, requested_by: str, question: str | None, window_days: int, topics: Sequence[str] | None, max_results: int, persist: bool,
-        analyse: bool = True, save_report: bool = True, rotation: int = 0, run_id: str | None = None,
+        analyse: bool = True, save_report: bool = True, rotation: int = 0, run_id: str | None = None, include_sensitive: bool = True,
     ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         """Run the pipeline; returns the report and every kept record with its change status.
 
@@ -206,8 +214,16 @@ class InternetIntelligenceService:
                 excluded[reason or "review"] = excluded.get(reason or "review", 0) + 1
             else:
                 excluded[reason or "excluded"] = excluded.get(reason or "excluded", 0) + 1
+        held = 0
+        if not include_sensitive:
+            # Allegations and complaints reach readers only after a manager has seen them.
+            held = sum(1 for item in findings if SENSITIVE_TOPICS & set(item["topics"]))
+            findings = [item for item in findings if not SENSITIVE_TOPICS & set(item["topics"])]
+            review = []
         findings.sort(key=lambda item: (self._levels[item["match_level"]], item["relevance_score"], item["published_at"] or ""), reverse=True)
         findings = findings[:max_results]
+        if held:
+            warnings.append({"code": "held_for_review", "message": f"{held} finding(s) on sensitive topics are shown to intelligence managers only."})
         if not findings:
             warnings.append({"code": "no_confident_findings", "message": "No public source matched this institution with enough confidence in the requested window."})
         if any(item["date_status"] == "unknown" for item in findings):
@@ -287,10 +303,13 @@ class InternetIntelligenceService:
     # ------------------------------------------------------------------ digest
     def digest(self, principal: Principal, institution_id: str, *, days: int = 1) -> dict[str, Any]:
         self._guard(principal, institution_id, Capability.INTELLIGENCE_READ)
-        return self.digest_for(institution_id, days=days)
+        return self.digest_for(institution_id, days=days, include_sensitive=principal.has_capability(Capability.INTELLIGENCE_MANAGE))
 
-    def digest_for(self, institution_id: str, *, days: int = 1) -> dict[str, Any]:
+    def digest_for(self, institution_id: str, *, days: int = 1, include_sensitive: bool = True) -> dict[str, Any]:
         events = self.store.list_events(institution_id, days=days)
+        if not include_sensitive:
+            hidden = self.store.sensitive_documents(institution_id, [event["document_id"] for event in events])
+            events = [event for event in events if event["document_id"] not in hidden]
         new_events = [event for event in events if event["event_type"] in {"new", "changed"}]
         by_type: dict[str, int] = {}
         for event in new_events:
@@ -309,4 +328,8 @@ class InternetIntelligenceService:
         }
 
 
-__all__ = ["INSTRUCTION_SMUGGLING_WARNING", "InternetIntelligenceService", "MAX_CANDIDATES"]
+class InvestigationQuotaExceeded(Exception):
+    """A person has used their daily allowance of live investigations."""
+
+
+__all__ = ["INSTRUCTION_SMUGGLING_WARNING", "InternetIntelligenceService", "InvestigationQuotaExceeded", "MAX_CANDIDATES"]

@@ -68,6 +68,31 @@ class PostgresMapStoreTests(unittest.TestCase):
         asset = store.get_asset(institution, asset_id)
         self.assertEqual((asset["platform_id"], asset["followers"], asset["followers_source"], asset["last_activity_at"][:10]), ("p1", 12, "youtube_api", "2026-09-01"))
 
+    def test_the_review_queue_and_its_decisions(self):
+        from app.internet_intelligence.map.assets import asset_ref
+        from app.internet_intelligence.map.store import MapStore
+
+        store = MapStore(POSTGRES_URL, suppression_key=b"k")
+        institution = f"pgt-{uuid4().hex[:10]}"
+        asset_id, _ = store.upsert_asset(institution, asset_ref("https://www.instagram.com/someone/"), entity_id=None)
+        store.upsert_source(institution, connector="lead_page", target="https://www.instagram.com/someone/", asset_id=asset_id, origin="lead", work_class="explore")
+        review_id, outcome = store.add_review_item(institution, kind="candidate_account", title="someone", asset_id=asset_id, url="https://www.instagram.com/someone/")
+        self.assertEqual((outcome, store.add_review_item(institution, kind="candidate_account", title="someone", asset_id=asset_id, url="https://www.instagram.com/someone/")[1]), ("added", "exists"))
+        self.assertEqual(store.prune_sources_for(institution, asset_id=asset_id, url="https://www.instagram.com/someone/"), 1)
+        self.assertTrue(store.decide_review_item(institution, review_id, decision="personal", decided_by="p", redact=True))
+        self.assertTrue(store.forget_asset(institution, asset_id))
+        self.assertEqual(store.review_counts(institution), {})
+        self.assertEqual(store.apply_proposed(institution), 0)
+        self.assertEqual(store.list_review_items(institution, status=None)[0]["url"], "")
+
+    def test_investigation_quota(self):
+        from app.internet_intelligence.store import IntelligenceStore
+
+        store = IntelligenceStore(POSTGRES_URL)
+        institution = f"pgt-{uuid4().hex[:10]}"
+        self.assertEqual([store.take_investigation(institution, "p1", day="2026-09-22", cap=2) for _ in range(3)], [True, True, False])
+        self.assertEqual(store.investigations_used(institution, "p1", day="2026-09-22"), 2)
+
     def test_migration_files_can_be_applied_twice(self):
         import psycopg
 

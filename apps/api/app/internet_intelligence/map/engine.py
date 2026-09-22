@@ -15,7 +15,10 @@ Every tick:
 5. turns what a connector found into new sources (respecting the hop cap
    and suppression), reschedules each source from its yield (productive
    sources come back sooner, idle ones later, failing ones back off), and
-6. records spend, counts, why it stopped and the map's metrics.
+6. corrects any known look-alike that reached B (the canary gate), queues
+   what a person must decide (possible impersonators, competing official
+   accounts, court records), and records spend, counts, why it stopped and
+   the map's metrics.
 """
 
 from __future__ import annotations
@@ -29,6 +32,7 @@ from uuid import uuid4
 from ..fetch import PublicPageFetcher
 from ..profile import InstitutionProfile
 from .connectors.base import ConnectorContext, ConnectorRegistry, ConnectorResult, Lead
+from .gate import guard_canaries
 from .metrics import map_metrics
 from .pipeline import regrade, sync_profile
 from .store import MapStore
@@ -186,11 +190,18 @@ class MapEngine:
                 )
             if touched:
                 regrade(self.store, institution_id, sorted(touched))
+                review.extend(self._disputes(institution_id, touched))
+            # Ground truth last: a known look-alike that reached B is set back and reported.
+            leaks = guard_canaries(self.store, institution_id, run_id=run_id)
+            incidents.extend(leaks)
+            self.store.expire_review_items(institution_id, now=self.clock().isoformat())
+            queued = [self._queue(institution_id, item, run_id) for item in review]
             counts["incidents"] = len(incidents)
-            counts["review"] = len(review)
+            counts["review"] = queued.count("added")
+            counts["review_full"] = queued.count("full")
             stop_reason = "budget" if counts["deferred_budget"] else ("dry" if counts["sources"] and not (counts["new_assets"] or counts["raised"]) else ("idle" if not counts["sources"] else "completed"))
             metrics = map_metrics(self.store, institution_id)
-            self.store.finish_map_run(institution_id, run_id, status="succeeded", stop_reason=stop_reason, spend=spend, counts=counts, metrics=metrics)
+            self.store.finish_map_run(institution_id, run_id, status="succeeded", stop_reason=stop_reason, gate="canary_held" if leaks else "passed", spend=spend, counts=counts, metrics=metrics)
         except Exception as exc:
             self.store.finish_map_run(institution_id, run_id, status="failed", counts=counts, spend=spend, error=str(exc)[:300])
             raise
@@ -198,6 +209,22 @@ class MapEngine:
             "institution_id": institution_id, "run_id": run_id, "stop_reason": stop_reason, "counts": counts, "spend": spend, "incidents": incidents, "review": review,
             "metrics": {key: metrics[key] for key in ("assets", "verified", "holdout_recall", "canary_leaks")},
         }
+
+    def _queue(self, institution_id: str, item: Mapping[str, Any], run_id: str) -> str:
+        _, outcome = self.store.add_review_item(
+            institution_id, kind=str(item["kind"]), title=str(item.get("title") or item["kind"]), detail=str(item.get("detail") or ""), url=str(item.get("url") or ""),
+            asset_id=item.get("asset_id"), entity_id=item.get("entity_id"), severity=str(item.get("severity") or "normal"), connector=str(item.get("connector") or ""),
+            source_id=item.get("source_id"), run_id=run_id,
+        )
+        return outcome
+
+    def _disputes(self, institution_id: str, touched: set[str]) -> list[dict[str, Any]]:
+        """Competing unanchored 'official' accounts need a person to say which is real."""
+
+        return [
+            {"kind": "dispute", "asset_id": asset["asset_id"], "entity_id": asset["entity_id"], "title": f"More than one account claims to be official on {asset['platform']}: {asset['handle']}", "url": asset["url"]}
+            for asset in self.store.get_assets(institution_id, touched).values() if asset["status"] == "disputed"
+        ]
 
     async def tick_all(self, institutions: list[str]) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []

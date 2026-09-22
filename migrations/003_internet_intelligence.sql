@@ -10,6 +10,7 @@ CREATE TABLE IF NOT EXISTS monitoring_events ( event_id TEXT PRIMARY KEY, instit
 CREATE INDEX IF NOT EXISTS idx_monitoring_events_institution ON monitoring_events(institution_id, created_at);
 CREATE TABLE IF NOT EXISTS intelligence_reports ( report_id TEXT PRIMARY KEY, institution_id TEXT NOT NULL, requested_by TEXT NOT NULL, question TEXT, window_days INTEGER NOT NULL, findings_count INTEGER NOT NULL, summary TEXT NOT NULL, findings_json TEXT NOT NULL, created_at TEXT NOT NULL );
 CREATE INDEX IF NOT EXISTS idx_intelligence_reports_institution ON intelligence_reports(institution_id, created_at);
+CREATE TABLE IF NOT EXISTS investigation_quota ( institution_id TEXT NOT NULL, principal_id TEXT NOT NULL, day TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(institution_id, principal_id, day) );
 ALTER TABLE internet_documents ADD COLUMN IF NOT EXISTS status_reason TEXT;
 ALTER TABLE internet_documents ADD COLUMN IF NOT EXISTS provider TEXT;
 ALTER TABLE internet_documents ADD COLUMN IF NOT EXISTS queries_json TEXT NOT NULL DEFAULT '[]';
@@ -17,6 +18,7 @@ ALTER TABLE internet_documents ADD COLUMN IF NOT EXISTS requested_url TEXT;
 ALTER TABLE internet_documents ADD COLUMN IF NOT EXISTS last_run_id TEXT;
 ALTER TABLE monitoring_runs ADD COLUMN IF NOT EXISTS stop_reason TEXT;
 ALTER TABLE internet_documents ADD COLUMN IF NOT EXISTS first_kept_at TEXT;
+ALTER TABLE intelligence_reports ADD COLUMN IF NOT EXISTS sensitive INTEGER NOT NULL DEFAULT 0;
 -- PostgreSQL row-level security (skipped on SQLite); institution_profiles stays outside it for the scheduler
 ALTER TABLE internet_documents ENABLE ROW LEVEL SECURITY;
 ALTER TABLE internet_documents FORCE ROW LEVEL SECURITY;
@@ -30,3 +32,6 @@ DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_
 ALTER TABLE intelligence_reports ENABLE ROW LEVEL SECURITY;
 ALTER TABLE intelligence_reports FORCE ROW LEVEL SECURITY;
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'intelligence_reports' AND policyname = 'intelligence_reports_tenant_isolation') THEN CREATE POLICY intelligence_reports_tenant_isolation ON intelligence_reports USING (institution_id = current_setting('app.institution_id', true)) WITH CHECK (institution_id = current_setting('app.institution_id', true)); END IF; END $$;
+ALTER TABLE investigation_quota ENABLE ROW LEVEL SECURITY;
+ALTER TABLE investigation_quota FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'investigation_quota' AND policyname = 'investigation_quota_tenant_isolation') THEN CREATE POLICY investigation_quota_tenant_isolation ON investigation_quota USING (institution_id = current_setting('app.institution_id', true)) WITH CHECK (institution_id = current_setting('app.institution_id', true)); END IF; END $$;

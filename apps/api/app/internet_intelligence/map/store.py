@@ -1,8 +1,10 @@
 """The internet map's memory: entities, assets, the evidence log and how it is measured.
 
 Everything is tenant data under forced row-level security on PostgreSQL. The
-evidence table is append-only (there is no update or delete method): a grade
-is always recomputed from it, so any grade can be explained and replayed.
+evidence table is append-only (there is no update method): a grade is always
+recomputed from it, so any grade can be explained and replayed. The one
+deletion is ``forget_asset``, for an account a reviewer found to be a
+person's: it leaves the map entirely and only a keyed fingerprint remains.
 Tables carry an ``intel_`` prefix because this store shares its database with
 the institution-data store, which already owns generic names such as
 ``review_items``.
@@ -16,6 +18,7 @@ import json
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from ...persistence.schema_tools import add_missing_columns, apply_schema, begin_migration, existing_policies, idempotent_tenant_isolation_sql, row_level_security_state, tenant_isolation_statements
@@ -190,6 +193,33 @@ _STATEMENTS: tuple[str, ...] = (
         PRIMARY KEY(institution_id, day, connector)
     )
     """,
+    """
+    CREATE TABLE IF NOT EXISTS intel_review_items (
+        review_id TEXT PRIMARY KEY,
+        institution_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open',
+        severity TEXT NOT NULL DEFAULT 'normal',
+        asset_id TEXT,
+        entity_id TEXT,
+        title TEXT NOT NULL,
+        detail TEXT NOT NULL DEFAULT '',
+        url TEXT NOT NULL DEFAULT '',
+        connector TEXT NOT NULL DEFAULT '',
+        source_id TEXT,
+        run_id TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        expires_at TEXT,
+        decision TEXT,
+        decision_note TEXT,
+        decided_by TEXT,
+        decided_at TEXT,
+        UNIQUE(institution_id, fingerprint)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_intel_review_items_open ON intel_review_items(institution_id, status, created_at)",
     # Global tables: public-web metadata and platform-wide spend, never tenant
     # data, so they stay outside row-level security and a tick can use them
     # for every institution.
@@ -218,9 +248,15 @@ ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("intel_assets", "last_activity_at", "TEXT"),
     ("intel_assets", "registration_expires_at", "TEXT"),
 )
-TENANT_TABLES: tuple[str, ...] = ("intel_entities", "intel_assets", "intel_evidence", "intel_gold_items", "intel_suppression", "intel_map_runs", "intel_sources", "intel_quota")
+TENANT_TABLES: tuple[str, ...] = ("intel_entities", "intel_assets", "intel_evidence", "intel_gold_items", "intel_suppression", "intel_map_runs", "intel_sources", "intel_quota", "intel_review_items")
 GLOBAL_TABLES: tuple[str, ...] = ("intel_budget_ledger", "intel_fetch_state")
 SOURCE_CLASSES = frozenset({"rotation", "recheck", "explore"})
+REVIEW_KINDS = frozenset({"impersonation_candidate", "court_record", "dispute", "canary_leak", "run_gate", "candidate_account"})
+REVIEW_STATUSES = frozenset({"open", "decided", "expired"})
+# The queue is for people: past this many open items, new ones are refused
+# (and counted) rather than burying the ones already waiting.
+MAX_OPEN_REVIEW = 500
+REVIEW_TTL_DAYS = 90
 SOURCE_ORIGINS = frozenset({"seed", "recurring", "lead", "gap", "profile"})
 
 
@@ -443,7 +479,142 @@ class MapStoreScheduling:
         return run_id if inserted else None
 
 
-class MapStore(MapStoreScheduling):
+class MapStoreReview:
+    """The review queue: things a person decides before the map concludes anything (mixed into MapStore)."""
+
+    backend: SqlBackend
+
+    def _tenant(self, institution_id: str):  # pragma: no cover - provided by MapStore
+        raise NotImplementedError
+
+    def add_review_item(
+        self, institution_id: str, *, kind: str, title: str, fingerprint: str | None = None, detail: str = "", url: str = "", asset_id: str | None = None, entity_id: str | None = None,
+        severity: str = "normal", connector: str = "", source_id: str | None = None, run_id: str | None = None, now: str | None = None,
+    ) -> tuple[str | None, str]:
+        """Queue an item once; returns (review_id, 'added' | 'exists' | 'full').
+
+        The fingerprint makes it idempotent: the same court record or the same
+        suspected impersonator found again is the same item, open or decided,
+        so a decision is never asked for twice.
+        """
+
+        if kind not in REVIEW_KINDS:
+            raise ValueError(f"unknown review kind {kind!r}")
+        if severity not in {"low", "normal", "high"}:
+            raise ValueError("severity must be low, normal or high")
+        stamp = now or now_iso()
+        key = fingerprint or hashlib.sha256(f"{kind}|{asset_id or ''}|{url}|{'' if asset_id or url else title}".encode("utf-8")).hexdigest()
+        with self._tenant(institution_id):
+            existing = self.backend.fetchone("SELECT review_id FROM intel_review_items WHERE institution_id = ? AND fingerprint = ?", (institution_id, key))
+            if existing is not None:
+                return str(existing["review_id"]), "exists"
+            waiting = self.backend.fetchone("SELECT COUNT(*) AS open_items FROM intel_review_items WHERE institution_id = ? AND status = 'open'", (institution_id,))
+            if waiting and int(waiting["open_items"]) >= MAX_OPEN_REVIEW:
+                return None, "full"
+            review_id = f"irev-{uuid4().hex}"
+            expires = (datetime.fromisoformat(stamp) + timedelta(days=REVIEW_TTL_DAYS)).isoformat()
+            self.backend.execute(
+                "INSERT INTO intel_review_items(review_id, institution_id, kind, fingerprint, severity, asset_id, entity_id, title, detail, url, connector, source_id, run_id, created_at, updated_at, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (review_id, institution_id, kind, key, severity, asset_id, entity_id, title[:300], detail[:2000], url[:1000], connector[:40], source_id, run_id, stamp, stamp, expires),
+            )
+            return review_id, "added"
+
+    def get_review_item(self, institution_id: str, review_id: str) -> dict[str, Any] | None:
+        with self._tenant(institution_id):
+            return self.backend.fetchone("SELECT * FROM intel_review_items WHERE institution_id = ? AND review_id = ?", (institution_id, review_id))
+
+    def list_review_items(self, institution_id: str, *, status: str | None = "open", kind: str | None = None, limit: int = 100, offset: int = 0) -> list[dict[str, Any]]:
+        clauses, params = ["institution_id = ?"], [institution_id]
+        for column, value in (("status", status), ("kind", kind)):
+            if value:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        with self._tenant(institution_id):
+            return self.backend.fetchall(
+                f"SELECT * FROM intel_review_items WHERE {' AND '.join(clauses)} ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'normal' THEN 1 ELSE 2 END, created_at LIMIT ? OFFSET ?",
+                (*params, max(1, min(limit, 500)), max(0, offset)),
+            )
+
+    def review_counts(self, institution_id: str) -> dict[str, int]:
+        with self._tenant(institution_id):
+            rows = self.backend.fetchall("SELECT kind, COUNT(*) AS items FROM intel_review_items WHERE institution_id = ? AND status = 'open' GROUP BY kind", (institution_id,))
+        return {str(row["kind"]): int(row["items"]) for row in rows}
+
+    def decide_review_item(self, institution_id: str, review_id: str, *, decision: str, decided_by: str, note: str = "", redact: bool = False) -> bool:
+        """Close an open item with a decision; returns False when it was not open (decided twice, expired)."""
+
+        stamp = now_iso()
+        with self._tenant(institution_id):
+            if redact:
+                # A personal account leaves no trace of who it was, here either.
+                return bool(self.backend.execute(
+                    "UPDATE intel_review_items SET status = 'decided', decision = ?, decision_note = ?, decided_by = ?, decided_at = ?, updated_at = ?, title = 'a personal account (removed from the map)', detail = '', url = '', asset_id = NULL "
+                    "WHERE institution_id = ? AND review_id = ? AND status = 'open'",
+                    (decision, note[:500], decided_by, stamp, stamp, institution_id, review_id),
+                ))
+            return bool(self.backend.execute(
+                "UPDATE intel_review_items SET status = 'decided', decision = ?, decision_note = ?, decided_by = ?, decided_at = ?, updated_at = ? WHERE institution_id = ? AND review_id = ? AND status = 'open'",
+                (decision, note[:500], decided_by, stamp, stamp, institution_id, review_id),
+            ))
+
+    def expire_review_items(self, institution_id: str, *, now: str) -> int:
+        with self._tenant(institution_id):
+            return self.backend.execute(
+                "UPDATE intel_review_items SET status = 'expired', updated_at = ? WHERE institution_id = ? AND status = 'open' AND expires_at IS NOT NULL AND expires_at < ?", (now, institution_id, now),
+            )
+
+    # ------------------------------------------------ decisions on assets
+    def set_relation(self, institution_id: str, asset_id: str, relation: str) -> None:
+        if relation not in RELATIONS:
+            raise ValueError(f"unknown relation {relation!r}")
+        with self._tenant(institution_id):
+            self.backend.execute("UPDATE intel_assets SET relation = ?, updated_at = ? WHERE institution_id = ? AND asset_id = ?", (relation, now_iso(), institution_id, asset_id))
+
+    def prune_sources_for(self, institution_id: str, *, asset_id: str, url: str) -> int:
+        """Stop following an asset and the leads found on its host (it was rejected)."""
+
+        host = urlparse(url).hostname or ""
+        with self._tenant(institution_id):
+            pruned = self.backend.execute("UPDATE intel_sources SET status = 'pruned', updated_at = ? WHERE institution_id = ? AND status = 'active' AND (asset_id = ? OR target = ?)", (now_iso(), institution_id, asset_id, asset_id))
+            if host:
+                pruned += self.backend.execute(
+                    "UPDATE intel_sources SET status = 'pruned', updated_at = ? WHERE institution_id = ? AND status = 'active' AND (target LIKE ? OR target LIKE ?)",
+                    (now_iso(), institution_id, f"https://{host}/%", f"http://{host}/%"),
+                )
+        return pruned
+
+    def forget_asset(self, institution_id: str, asset_id: str) -> bool:
+        """Remove an asset, its evidence and its sources entirely.
+
+        The evidence log is otherwise append-only; this is the one exception,
+        for an account that turned out to be a person's: the map keeps only a
+        keyed fingerprint (the suppression list) so it is never added again.
+        """
+
+        with self._tenant(institution_id):
+            asset = self.backend.fetchone("SELECT asset_key, url FROM intel_assets WHERE institution_id = ? AND asset_id = ?", (institution_id, asset_id))
+            if asset is None:
+                return False
+            self.backend.execute("DELETE FROM intel_evidence WHERE institution_id = ? AND asset_id = ?", (institution_id, asset_id))
+            self.backend.execute("DELETE FROM intel_sources WHERE institution_id = ? AND (asset_id = ? OR target = ? OR target = ?)", (institution_id, asset_id, asset_id, asset["url"]))
+            self.backend.execute("DELETE FROM intel_gold_items WHERE institution_id = ? AND asset_key = ?", (institution_id, asset["asset_key"]))
+            self.backend.execute("UPDATE intel_review_items SET asset_id = NULL WHERE institution_id = ? AND asset_id = ?", (institution_id, asset_id))
+            self.backend.execute("DELETE FROM intel_assets WHERE institution_id = ? AND asset_id = ?", (institution_id, asset_id))
+        return True
+
+    def apply_proposed(self, institution_id: str) -> int:
+        """Publish every proposed grade (a gate passed or a manager approved it)."""
+
+        with self._tenant(institution_id):
+            return self.backend.execute("UPDATE intel_assets SET grade = proposed_grade, proposed_grade = NULL, updated_at = ? WHERE institution_id = ? AND proposed_grade IS NOT NULL", (now_iso(), institution_id))
+
+    def discard_proposed(self, institution_id: str) -> int:
+        with self._tenant(institution_id):
+            return self.backend.execute("UPDATE intel_assets SET proposed_grade = NULL, updated_at = ? WHERE institution_id = ? AND proposed_grade IS NOT NULL", (now_iso(), institution_id))
+
+
+class MapStore(MapStoreScheduling, MapStoreReview):
     def __init__(self, database_url: str | None = None, backend: SqlBackend | None = None, *, suppression_key: bytes = b"guru-ji-development-only") -> None:
         self.backend = backend or open_backend(database_url)
         self.suppression_key = suppression_key
