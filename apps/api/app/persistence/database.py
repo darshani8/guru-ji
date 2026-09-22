@@ -530,12 +530,50 @@ class PostgresControlStore:
 
         self.database_url = database_url
         self._lock = threading.RLock()
-        self._connection = psycopg.connect(database_url, row_factory=dict_row)
+        # Autocommit: a statement outside an explicit ``transaction()`` block
+        # is its own transaction, so a read never leaves the connection idle
+        # in transaction holding table locks. Before this, a running instance
+        # blocked the next release's start-up DDL until the deploy timed out.
+        self._connection = psycopg.connect(database_url, row_factory=dict_row, autocommit=True)
         self._closed = False
         self._migrate()
 
+    # How long start-up may wait for a table lock before failing loudly. A
+    # hang here is invisible (no log line, health check never answers), an
+    # error is not.
+    MIGRATION_LOCK_TIMEOUT = "15s"
+
+    # Columns added after their table first shipped and the indexes, each run
+    # only when the catalog shows it missing: ``ADD COLUMN IF NOT EXISTS`` and
+    # ``CREATE INDEX IF NOT EXISTS`` still take a table lock even when they
+    # end up doing nothing, and the previous release is still serving.
+    _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+        ("audit_events", "decision_metadata_json", "TEXT NOT NULL DEFAULT '{}'"),
+        ("source_health", "institution_id", "TEXT NOT NULL DEFAULT 'unknown'"),
+        ("source_health", "display_name", "TEXT NOT NULL DEFAULT ''"),
+        ("source_health", "connector_type", "TEXT NOT NULL DEFAULT ''"),
+        ("source_health", "last_success_at", "TEXT"),
+    )
+    _INDEXES: tuple[tuple[str, str], ...] = (
+        ("idx_audit_events_occurred_at", "audit_events(occurred_at DESC)"),
+        ("idx_briefing_runs_created_at", "briefing_runs(created_at DESC)"),
+        ("idx_answer_envelopes_created_at", "answer_envelopes(created_at DESC)"),
+        ("idx_model_attempts_created_at", "model_attempts(created_at DESC)"),
+        ("idx_control_outbox_pending", "control_outbox(delivered_at, created_at)"),
+    )
+
     def _migrate(self) -> None:
-        statements = (
+        """Bring the schema up to date, issuing DDL only for what is missing.
+
+        Another instance of the API is normally still serving while a new one
+        starts, so start-up must not queue behind its connections for an
+        ACCESS EXCLUSIVE lock. ``CREATE TABLE IF NOT EXISTS`` skips an existing
+        table without locking it; columns and indexes are checked in the
+        catalog first; and ``lock_timeout`` turns any wait that does happen
+        into an error instead of a silent hang.
+        """
+
+        tables = (
             """
             CREATE TABLE IF NOT EXISTS schema_migrations (
                 version TEXT PRIMARY KEY,
@@ -559,8 +597,6 @@ class PostgresControlStore:
                 duration_ms INTEGER
             )
             """,
-            "CREATE INDEX IF NOT EXISTS idx_audit_events_occurred_at ON audit_events(occurred_at DESC)",
-            "ALTER TABLE audit_events ADD COLUMN IF NOT EXISTS decision_metadata_json TEXT NOT NULL DEFAULT '{}'",
             """
             CREATE TABLE IF NOT EXISTS source_health (
                 source_id TEXT PRIMARY KEY,
@@ -575,10 +611,6 @@ class PostgresControlStore:
                 detail TEXT NOT NULL
             )
             """,
-            "ALTER TABLE source_health ADD COLUMN IF NOT EXISTS institution_id TEXT NOT NULL DEFAULT 'unknown'",
-            "ALTER TABLE source_health ADD COLUMN IF NOT EXISTS display_name TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE source_health ADD COLUMN IF NOT EXISTS connector_type TEXT NOT NULL DEFAULT ''",
-            "ALTER TABLE source_health ADD COLUMN IF NOT EXISTS last_success_at TEXT",
             """
             CREATE TABLE IF NOT EXISTS briefing_runs (
                 briefing_id TEXT PRIMARY KEY,
@@ -588,7 +620,6 @@ class PostgresControlStore:
                 answer_json TEXT NOT NULL
             )
             """,
-            "CREATE INDEX IF NOT EXISTS idx_briefing_runs_created_at ON briefing_runs(created_at DESC)",
             """
             CREATE TABLE IF NOT EXISTS answer_envelopes (
                 request_id TEXT PRIMARY KEY,
@@ -602,7 +633,6 @@ class PostgresControlStore:
                 created_at TEXT NOT NULL
             )
             """,
-            "CREATE INDEX IF NOT EXISTS idx_answer_envelopes_created_at ON answer_envelopes(created_at DESC)",
             """
             CREATE TABLE IF NOT EXISTS model_attempts (
                 attempt_id TEXT PRIMARY KEY,
@@ -619,7 +649,6 @@ class PostgresControlStore:
                 created_at TEXT NOT NULL
             )
             """,
-            "CREATE INDEX IF NOT EXISTS idx_model_attempts_created_at ON model_attempts(created_at DESC)",
             """
             CREATE TABLE IF NOT EXISTS control_outbox (
                 outbox_id TEXT PRIMARY KEY,
@@ -629,21 +658,26 @@ class PostgresControlStore:
                 delivered_at TEXT
             )
             """,
-            "CREATE INDEX IF NOT EXISTS idx_control_outbox_pending ON control_outbox(delivered_at, created_at)",
         )
-        with self._lock:
-            try:
-                with self._connection.cursor() as cursor:
-                    for statement in statements:
-                        cursor.execute(statement)
-                    cursor.execute(
-                        "INSERT INTO schema_migrations(version, applied_at) VALUES (%s, %s) ON CONFLICT (version) DO NOTHING",
-                        ("001_control_plane", datetime.now(timezone.utc).isoformat()),
-                    )
-                self._connection.commit()
-            except Exception:
-                self._connection.rollback()
-                raise
+        with self._lock, self._connection.transaction(), self._connection.cursor() as cursor:
+            cursor.execute(f"SET LOCAL lock_timeout = '{self.MIGRATION_LOCK_TIMEOUT}'")
+            for statement in tables:
+                cursor.execute(statement)
+            for table, column, definition in self._ADDED_COLUMNS:
+                cursor.execute(
+                    "SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = %s AND column_name = %s",
+                    (table, column),
+                )
+                if cursor.fetchone() is None:
+                    cursor.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {definition}")
+            for index, definition in self._INDEXES:
+                cursor.execute("SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = %s", (index,))
+                if cursor.fetchone() is None:
+                    cursor.execute(f"CREATE INDEX IF NOT EXISTS {index} ON {definition}")
+            cursor.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (%s, %s) ON CONFLICT (version) DO NOTHING",
+                ("001_control_plane", datetime.now(timezone.utc).isoformat()),
+            )
 
     @staticmethod
     def _json(value: Any) -> str:
@@ -683,7 +717,6 @@ class PostgresControlStore:
                         event.duration_ms,
                     ),
                 )
-            self._connection.commit()
 
     def recent_audit(self, limit: int = 100) -> tuple[AuditEvent, ...]:
         if limit <= 0:
@@ -744,7 +777,6 @@ class PostgresControlStore:
                         health.detail,
                     ),
                 )
-            self._connection.commit()
 
     @staticmethod
     def _health_from_row(row: dict[str, Any]) -> SourceHealth:
@@ -796,7 +828,6 @@ class PostgresControlStore:
                         self._json(answer),
                     ),
                 )
-            self._connection.commit()
 
     def recent_briefings(self, limit: int = 50) -> tuple[dict[str, Any], ...]:
         if limit <= 0:
@@ -841,7 +872,6 @@ class PostgresControlStore:
                         envelope.warnings_count, envelope.answer_sha256, envelope.created_at.isoformat(),
                     ),
                 )
-            self._connection.commit()
 
     def record_model_attempt(self, attempt: ModelAttemptMetadata) -> None:
         with self._lock:
@@ -860,7 +890,6 @@ class PostgresControlStore:
                         attempt.cost, attempt.created_at.isoformat(),
                     ),
                 )
-            self._connection.commit()
 
     def enqueue_outbox(self, event_type: str, payload: dict[str, Any]) -> str:
         outbox_id = f"outbox-{uuid4().hex}"
@@ -870,7 +899,6 @@ class PostgresControlStore:
                     "INSERT INTO control_outbox(outbox_id, event_type, payload_json, created_at) VALUES (%s, %s, %s, %s)",
                     (outbox_id, event_type, self._json(payload), now_utc().isoformat()),
                 )
-            self._connection.commit()
         return outbox_id
 
     def drain_outbox(self, limit: int = 100) -> tuple[OutboxRecord, ...]:
@@ -893,27 +921,23 @@ class PostgresControlStore:
         if not outbox_ids:
             return
         delivered_at = now_utc().isoformat()
-        with self._lock:
-            with self._connection.cursor() as cursor:
-                for outbox_id in outbox_ids:
-                    cursor.execute(
-                        "UPDATE control_outbox SET delivered_at = %s WHERE outbox_id = %s AND delivered_at IS NULL",
-                        (delivered_at, outbox_id),
-                    )
-            self._connection.commit()
+        with self._lock, self._connection.transaction(), self._connection.cursor() as cursor:
+            for outbox_id in outbox_ids:
+                cursor.execute(
+                    "UPDATE control_outbox SET delivered_at = %s WHERE outbox_id = %s AND delivered_at IS NULL",
+                    (delivered_at, outbox_id),
+                )
 
     def prune_retention(self, retention_days: int) -> int:
         if retention_days <= 0:
             raise ValueError("retention_days must be positive")
         cutoff = (now_utc() - timedelta(days=retention_days)).isoformat()
-        with self._lock:
-            with self._connection.cursor() as cursor:
-                total = 0
-                for table in ("audit_events", "answer_envelopes", "model_attempts", "control_outbox", "briefing_runs"):
-                    column = "occurred_at" if table == "audit_events" else "created_at"
-                    cursor.execute(f"DELETE FROM {table} WHERE {column} < %s", (cutoff,))
-                    total += cursor.rowcount
-            self._connection.commit()
+        with self._lock, self._connection.transaction(), self._connection.cursor() as cursor:
+            total = 0
+            for table in ("audit_events", "answer_envelopes", "model_attempts", "control_outbox", "briefing_runs"):
+                column = "occurred_at" if table == "audit_events" else "created_at"
+                cursor.execute(f"DELETE FROM {table} WHERE {column} < %s", (cutoff,))
+                total += cursor.rowcount
         return total
 
     def ping(self) -> bool:
@@ -922,6 +946,14 @@ class PostgresControlStore:
                 cursor.execute("SELECT 1")
                 cursor.fetchone()
         return True
+
+    @property
+    def in_transaction(self) -> bool:
+        """True while the connection holds a transaction open (never between calls)."""
+
+        with self._lock:
+            # libpq statuses: 0 IDLE, 1 ACTIVE, 2 INTRANS, 3 INERROR, 4 UNKNOWN (closed).
+            return int(getattr(self._connection.info, "transaction_status", 0)) in (1, 2, 3)
 
     def close(self) -> None:
         with self._lock:

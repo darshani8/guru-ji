@@ -96,30 +96,60 @@ class InstitutionDataStore:
         self._migrate()
 
     # ------------------------------------------------------------------ lifecycle
+    # How long start-up may wait for a PostgreSQL table lock before failing
+    # loudly; a hang here shows nothing in the logs and never answers the
+    # health check, an error does.
+    MIGRATION_LOCK_TIMEOUT = "15s"
+
     def _migrate(self) -> None:
-        self.backend.executescript(portable_statements())
-        self._add_missing_columns()
-        if self.backend.dialect == "postgresql":
-            self.backend.executescript(postgres_row_level_security())
-            self._upgrade_postgres_numeric_columns()
+        """Bring the schema up to date in one transaction, issuing DDL only for what is missing.
+
+        The previous release is normally still serving while a new one starts,
+        so on PostgreSQL nothing here may queue for an ACCESS EXCLUSIVE lock
+        behind its statements: ``CREATE TABLE IF NOT EXISTS`` skips an existing
+        table without locking it, and columns, row-level security and column
+        types are checked in the catalog before any ``ALTER TABLE``.
+        """
+
         with self.backend.transaction():
+            if self.backend.dialect == "postgresql":
+                self.backend.execute(f"SET LOCAL lock_timeout = '{self.MIGRATION_LOCK_TIMEOUT}'")
+            self.backend.executescript(portable_statements())
+            self._add_missing_columns()
+            if self.backend.dialect == "postgresql":
+                self.backend.executescript(postgres_row_level_security(self._tables_enforcing_row_level_security()))
+                self._upgrade_postgres_numeric_columns()
             self.backend.execute(
                 "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?) ON CONFLICT (version) DO NOTHING",
                 (SCHEMA_VERSION, now_iso()),
             )
 
     def _add_missing_columns(self) -> None:
-        """Add columns introduced after a table first shipped to databases that predate them."""
+        """Add columns introduced after a table first shipped to databases that predate them.
+
+        ``ADD COLUMN IF NOT EXISTS`` locks the table even when the column is
+        there, so PostgreSQL is asked first and the statement runs only for a
+        column the catalog does not list.
+        """
 
         for table, column, column_type in ADDED_COLUMNS:
             if self.backend.dialect == "postgresql":
-                with self.backend.transaction():
+                present = self.backend.fetchone(
+                    "SELECT 1 AS present FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?",
+                    (table, column),
+                )
+                if present is None:
                     self.backend.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {column_type}")
                 continue
-            present = {row["name"] for row in self.backend.fetchall(f"PRAGMA table_info({table})")}
-            if column not in present:
-                with self.backend.transaction():
-                    self.backend.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+            present_columns = {row["name"] for row in self.backend.fetchall(f"PRAGMA table_info({table})")}
+            if column not in present_columns:
+                self.backend.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+
+    def _tables_enforcing_row_level_security(self) -> frozenset[str]:
+        rows = self.backend.fetchall(
+            "SELECT relname FROM pg_class WHERE relnamespace = current_schema()::regnamespace AND relkind = 'r' AND relrowsecurity AND relforcerowsecurity"
+        )
+        return frozenset(str(row["relname"]) for row in rows)
 
     def _upgrade_postgres_numeric_columns(self) -> None:
         """Widen NUMBER/PERCENT columns created as REAL (float4) to DOUBLE PRECISION.
@@ -136,11 +166,8 @@ class InstitutionDataStore:
             "SELECT table_name, column_name FROM information_schema.columns WHERE table_schema = current_schema() AND data_type = 'real'"
         )
         stale = [(row["table_name"], row["column_name"]) for row in rows if (row["table_name"], row["column_name"]) in wanted]
-        if not stale:
-            return
-        with self.backend.transaction():
-            for table, column in stale:
-                self.backend.execute(f"ALTER TABLE {_column(table)} ALTER COLUMN {_column(column)} TYPE DOUBLE PRECISION")
+        for table, column in stale:
+            self.backend.execute(f"ALTER TABLE {_column(table)} ALTER COLUMN {_column(column)} TYPE DOUBLE PRECISION")
 
     def ping(self) -> bool:
         return self.backend.ping()
