@@ -31,7 +31,7 @@ def _our_entities(context: ConnectorContext, limit: int, kinds: frozenset[str] |
 
 
 def _existing(context: ConnectorContext, name: str) -> set[str]:
-    return {row["target"] for row in context.store.list_sources(context.institution_id, connector=name, limit=10000)}
+    return context.store.source_targets(context.institution_id, name)
 
 
 @dataclass(slots=True)
@@ -57,7 +57,7 @@ class YouTubeConnector:
         existing = _existing(context, self.name)
         return [
             Lead(self.name, asset["asset_id"], entity_id=asset["entity_id"], asset_id=asset["asset_id"], hops=0, work_class="recheck", origin="recurring", interval_seconds=self.default_interval)
-            for asset in context.store.list_assets(context.institution_id, platform="youtube", kind="account", limit=5000)
+            for asset in context.store.iter_assets(context.institution_id, platform="youtube", kind="account")
             if asset["asset_id"] not in existing and asset["grade"] != "D"
         ]
 
@@ -96,7 +96,7 @@ class YouTubeConnector:
         context.store.add_evidence(context.institution_id, asset_id=asset["asset_id"], kind="liveness", detail="ok:api", source_url=asset["url"], channel="youtube_api", observed_via="live", run_id=context.run_id)
         context.store.add_evidence(context.institution_id, asset_id=asset["asset_id"], kind="api_identity", detail=f"youtube {channel_id}: {title}", source_url=asset["url"], channel="youtube_api", observed_via="live", run_id=context.run_id)
         # A channel that names one of the entity's official sites in its description links back to it.
-        official_hosts = {domain["asset_key"].removeprefix("web:") for domain in context.store.list_assets(context.institution_id, kind="domain", relation="official", limit=5000) if domain["entity_id"] == asset["entity_id"]}
+        official_hosts = {domain["asset_key"].removeprefix("web:") for domain in context.store.iter_assets(context.institution_id, kind="domain", relation="official") if domain["entity_id"] == asset["entity_id"]}
         for url in unique(_URL.findall(str(snippet.get("description") or ""))):
             host = (urlparse(url).hostname or "").lower().removeprefix("www.")
             if host in official_hosts:
@@ -198,7 +198,7 @@ class WikidataConnector:
 
         names = {_compact(str(name)) for name in [entity["name"], *(entity.get("names") or [])] if len(_compact(str(name))) >= 3}
         rivals = {_compact(str(other["name"])) for other in context.entities() if other["kind"] == "lookalike"}
-        ours = {domain["asset_key"] for domain in context.store.list_assets(context.institution_id, kind="domain", limit=5000) if domain["entity_id"] == entity["entity_id"]}
+        ours = {domain["asset_key"] for domain in context.store.iter_assets(context.institution_id, kind="domain") if domain["entity_id"] == entity["entity_id"]}
         named: list[str] = []
         for item_id, item in items.items():
             if not isinstance(item, dict):

@@ -119,12 +119,37 @@ def tenant_isolation_statements(tables: Iterable[str], *, state: Mapping[str, tu
     return tuple(statements)
 
 
+def idempotent_tenant_isolation_sql(tables: Iterable[str]) -> tuple[str, ...]:
+    """Tenant isolation for a migration file applied by hand: safe to run again.
+
+    PostgreSQL has no CREATE POLICY IF NOT EXISTS, so each policy is created
+    inside a guard that checks pg_policies first; a database the application
+    already migrated at start-up takes the file without error.
+    """
+
+    statements: list[str] = []
+    for table in tables:
+        policy = f"{table}_tenant_isolation"
+        statements.append(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
+        statements.append(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
+        statements.append(
+            "DO $$ BEGIN "
+            f"IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = '{table}' AND policyname = '{policy}') THEN "
+            f"CREATE POLICY {policy} ON {table} "
+            "USING (institution_id = current_setting('app.institution_id', true)) "
+            "WITH CHECK (institution_id = current_setting('app.institution_id', true)); "
+            "END IF; END $$"
+        )
+    return tuple(statements)
+
+
 __all__ = [
     "MIGRATION_LOCK_TIMEOUT",
     "add_missing_columns",
     "apply_schema",
     "begin_migration",
     "existing_indexes",
+    "idempotent_tenant_isolation_sql",
     "existing_policies",
     "row_level_security_state",
     "tenant_isolation_statements",

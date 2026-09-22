@@ -21,7 +21,7 @@ def _ratio(numerator: int, denominator: int) -> float | None:
 
 
 def map_metrics(store: MapStore, institution_id: str) -> dict[str, Any]:
-    assets = store.list_assets(institution_id, limit=5000)
+    assets = list(store.iter_assets(institution_id))
     by_key = {asset["asset_key"]: asset for asset in assets}
     gold = store.list_gold(institution_id)
     holdout = [item for item in gold if item["split"] == "holdout"]
@@ -65,12 +65,16 @@ def map_metrics(store: MapStore, institution_id: str) -> dict[str, Any]:
     }
 
 
-def record_baseline(store: MapStore, institution_id: str) -> dict[str, Any]:
-    """Store the current metrics as a baseline run so later runs can be compared with it."""
+def record_baseline(store: MapStore, institution_id: str, *, import_record: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Store the current metrics as a baseline run so later runs can be compared with it.
+
+    ``import_record`` (who imported which groups, and who approved it) is
+    kept with the run, in the tenant's own data.
+    """
 
     run_id = store.start_map_run(institution_id, kind="baseline")
     metrics = map_metrics(store, institution_id)
-    store.finish_map_run(institution_id, run_id, status="succeeded", stop_reason="baseline", metrics=metrics)
+    store.finish_map_run(institution_id, run_id, status="succeeded", stop_reason="baseline", metrics=metrics, counts={"import": import_record} if import_record else None)
     return {"run_id": run_id, **metrics}
 
 

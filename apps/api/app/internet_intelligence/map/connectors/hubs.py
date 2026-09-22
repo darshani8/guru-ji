@@ -52,10 +52,10 @@ class LinkHubConnector:
         return 1.0
 
     def plan(self, context: ConnectorContext) -> list[Lead]:
-        existing = {row["target"] for row in context.store.list_sources(context.institution_id, connector=self.name, limit=10000)}
+        existing = context.store.source_targets(context.institution_id, self.name)
         return [
             Lead(self.name, hub["asset_id"], entity_id=hub["entity_id"], asset_id=hub["asset_id"], hops=0, work_class="rotation", origin="recurring", interval_seconds=self.default_interval)
-            for hub in context.store.list_assets(context.institution_id, platform="linktree", kind="account", limit=5000)
+            for hub in context.store.iter_assets(context.institution_id, platform="linktree", kind="account")
             if hub["asset_id"] not in existing and hub["grade"] != "D"
         ]
 
@@ -135,8 +135,11 @@ class DirectoryConnector:
         page_host = (urlparse(retrieval.url).hostname or "").lower()
         # A page about one institution (its profile on a directory) may list
         # its accounts without naming it in each link.
+        # Only a page whose own title names the entity counts as being about
+        # it; a listing that merely includes the name (with a hundred others)
+        # must not hand every link on it to that entity.
         about = match_entity(context, url=retrieval.url, title=structure.title, text=structure.text[:3000])
-        about = about if about is not None and about.score >= 0.8 else None
+        about = about if about is not None and about.score >= 0.8 and names_entity(about.entity, handle="", title=structure.title) else None
         entities = [entity for entity in context.entities() if entity["kind"] != "lookalike"]
         result = ConnectorResult(outcome="ok")
         for link in structure.links:
@@ -148,7 +151,9 @@ class DirectoryConnector:
                 continue
             if ref.kind not in {ACCOUNT, GROUP, DOMAIN} or context.store.is_suppressed(context.institution_id, ref.key):
                 continue
-            entity = next((item for item in entities if names_entity(item, handle=ref.handle, title=link.text)), None) or (about.entity if about else None)
+            entity = next((item for item in entities if names_entity(item, handle=ref.handle, title=link.text)), None)
+            if entity is None and about is not None and ref.kind in {ACCOUNT, GROUP}:
+                entity = about.entity
             if entity is None:
                 continue
             record = "directory_record" if authority else "community_record"

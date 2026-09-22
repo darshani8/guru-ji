@@ -50,7 +50,7 @@ class SearchConnector:
     def plan(self, context: ConnectorContext) -> list[Lead]:
         if context.search is None:
             return []
-        existing = {row["target"] for row in context.store.list_sources(context.institution_id, connector=self.name, limit=10000)}
+        existing = context.store.source_targets(context.institution_id, self.name)
         leads = []
         for entity in _entities(context, self.max_entities):
             for domain in PLATFORM_DOMAINS:
@@ -111,7 +111,7 @@ class SearchConnector:
     @staticmethod
     def _anchored_accounts(context: ConnectorContext) -> dict[tuple[str, str], set[str]]:
         anchored: dict[tuple[str, str], set[str]] = {}
-        for asset in context.store.list_assets(context.institution_id, kind="account", relation="official", limit=5000):
+        for asset in context.store.iter_assets(context.institution_id, kind="account", relation="official"):
             if GRADE_RANK.get(asset["grade"], 1) >= GRADE_RANK["A"] and asset["entity_id"]:
                 anchored.setdefault((asset["entity_id"], asset["platform"]), set()).add(asset["asset_key"])
         return anchored
@@ -142,10 +142,10 @@ class SpamProbeConnector:
     def plan(self, context: ConnectorContext) -> list[Lead]:
         if context.search is None:
             return []
-        existing = {row["target"] for row in context.store.list_sources(context.institution_id, connector=self.name, limit=10000)}
+        existing = context.store.source_targets(context.institution_id, self.name)
         return [
             Lead(self.name, domain["asset_id"], entity_id=domain["entity_id"], asset_id=domain["asset_id"], hops=0, work_class="recheck", origin="recurring", interval_seconds=self.default_interval)
-            for domain in context.store.list_assets(context.institution_id, kind="domain", relation="official", limit=5000)
+            for domain in context.store.iter_assets(context.institution_id, kind="domain", relation="official")
             if domain["asset_id"] not in existing and domain["grade"] in {"O", "A", "B"}
         ]
 

@@ -171,7 +171,11 @@ class GradingTests(unittest.TestCase):
 
     def test_two_independent_channels_but_not_one_channel_twice(self):
         self.assertEqual(self.g([ev("search_snippet", via="index", channel="tavily"), ev("search_snippet", via="index", channel="tavily", at=NOW + timedelta(hours=1))]), "C")
-        self.assertEqual(self.g([ev("search_snippet", via="index", channel="tavily"), ev("directory_record", channel="wikidata")]), "B")
+        # Two kinds that are each C alone, from different channels: only the two-channel rule makes B.
+        two = grade({"kind": "account"}, [ev("search_snippet", via="index", channel="tavily"), ev("search_snippet", via="index", channel="brave")], now=NOW)
+        self.assertEqual(two.grade, "B")
+        self.assertIn("independent channels", two.reasons[0])
+        self.assertEqual(self.g([ev("search_snippet", via="index", channel="tavily"), ev("backlink", channel="youtube_api")]), "B")
 
     def test_refutations(self):
         self.assertEqual(self.g([ev("official_link", detail="A:footer"), ev("reviewer_reject", polarity="refutes", via="reviewer", at=NOW + timedelta(hours=1))]), "D")
@@ -266,6 +270,10 @@ class HarvestTests(unittest.IsolatedAsyncioTestCase):
 
         result = await OfficialSiteHarvester(PublicPageFetcher(transport=httpx.MockTransport(handler), resolver=lambda host: (PUBLIC_IP,)), self.store).harvest("aitckm", domain_id)
         self.assertEqual((result.integrity, result.accounts), ("redirects_offsite", []))
+        domain = self.store.get_asset("aitckm", domain_id)
+        self.assertEqual((domain["grade"], domain["status"]), ("B", "redirected"), "a configured domain that now sends visitors elsewhere is not a live A site")
+        self.assertIn("redirecting to parking.example", domain["grade_reasons"][0])
+        self.assertNotIn("ok:200", [item["detail"] for item in self.store.list_evidence("aitckm", asset_id=domain_id) if item["kind"] == "liveness"], "the parking page's answer is not this domain's liveness")
 
 
 class ExportAndServiceTests(unittest.IsolatedAsyncioTestCase):

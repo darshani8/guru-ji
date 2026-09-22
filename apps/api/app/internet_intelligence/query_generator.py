@@ -61,23 +61,27 @@ def generate_queries(
     primary = base_names[0]
     with_location = f"{primary} {profile.location}".strip() if profile.location else primary
     terms = question_terms(question)
-    focused: list[str] = []
+    asked: list[str] = []
     if terms:
-        focused.append(f'"{primary}" {" ".join(terms[:4])}')
+        asked.append(f'"{primary}" {" ".join(terms[:4])}')
         if profile.location:
-            focused.append(f'"{primary}" {profile.location} {" ".join(terms[:3])}')
+            asked.append(f'"{primary}" {profile.location} {" ".join(terms[:3])}')
+    focused: list[str] = []
     chosen = [topic.lower() for topic in (topics or ()) if topic] or ([] if terms else list(DEFAULT_TOPICS[:5]))
     identity = [f'"{with_location}"']
     identity.extend(f'"{alias}"' + (f" {profile.location}" if profile.location else "") for alias in base_names[1:])
     identity.extend(f'"{primary}" {keyword}' for keyword in profile.keywords[:2])
     reserved = min(len(identity), max(1, limit // 3))
-    topic_slots = max(1, limit - reserved - len(focused))
+    topic_slots = max(1, limit - reserved - len(asked))
     focused.extend(f'"{primary}" {topic_term(topic, now=now)}' for topic in _rotated(chosen, rotation, topic_slots))
     for program in profile.programs[:2]:
         if terms and any(program.lower() in term for term in terms):
             focused.append(f'"{primary}" {program}')
     identity = _rotated(identity, rotation, reserved)
-    ordered = focused[: limit - reserved] + identity[:reserved] + focused[limit - reserved :] + identity[reserved:]
+    # The question's own queries, then the reserved identity queries, then
+    # topics: a run that stops early (a full candidate pool) still searched
+    # the institution's name.
+    ordered = asked + identity[:reserved] + focused + identity[reserved:]
     queries: list[str] = []
     for query in ordered:
         cleaned = " ".join(query.split())

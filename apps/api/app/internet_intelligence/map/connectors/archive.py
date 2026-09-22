@@ -23,13 +23,13 @@ from .common import ApiClient
 
 CDX = "https://web.archive.org/cdx/search/cdx"
 SNAPSHOT = "https://web.archive.org/web/{timestamp}id_/{url}"
-_FAILING = frozenset({"dead", "parked", "hijacked", "compromised"})
+_FAILING = frozenset({"dead", "parked", "hijacked", "compromised", "redirected"})
 
 
 def historical_grade(context: ConnectorContext, domain: Mapping[str, Any]) -> str:
     """The grade the domain had on everything but its present health."""
 
-    evidence = [item for item in context.store.list_evidence(context.institution_id, asset_id=domain["asset_id"], limit=20000) if item["kind"] not in {"integrity", "liveness"}]
+    evidence = [item for item in context.store.evidence_for(context.institution_id, [domain["asset_id"]])[domain["asset_id"]] if item["kind"] not in {"integrity", "liveness"}]
     return grade(domain, evidence, now=context.now).grade
 
 
@@ -51,10 +51,10 @@ class WaybackConnector:
         return 1.0 + self.max_snapshots
 
     def plan(self, context: ConnectorContext) -> list[Lead]:
-        existing = {row["target"] for row in context.store.list_sources(context.institution_id, connector=self.name, limit=10000)}
+        existing = context.store.source_targets(context.institution_id, self.name)
         return [
             Lead(self.name, domain["asset_id"], entity_id=domain["entity_id"], asset_id=domain["asset_id"], hops=0, work_class="recheck", origin="recurring", interval_seconds=self.default_interval)
-            for domain in context.store.list_assets(context.institution_id, kind="domain", relation="official", limit=5000)
+            for domain in context.store.iter_assets(context.institution_id, kind="domain", relation="official")
             if domain["asset_id"] not in existing and (domain["status"] in _FAILING or domain["grade"] == "D")
         ]
 

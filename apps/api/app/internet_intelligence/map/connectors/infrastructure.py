@@ -44,13 +44,13 @@ def registrable(host: str) -> str:
 
 def _official_domains(context: ConnectorContext, *, grades: frozenset[str] | None = None) -> list[dict[str, Any]]:
     return [
-        domain for domain in context.store.list_assets(context.institution_id, kind="domain", relation="official", limit=5000)
+        domain for domain in context.store.iter_assets(context.institution_id, kind="domain", relation="official")
         if grades is None or domain["grade"] in grades
     ]
 
 
 def _plan(connector: Any, context: ConnectorContext, domains: list[dict[str, Any]], work_class: str = "recheck") -> list[Lead]:
-    existing = {row["target"] for row in context.store.list_sources(context.institution_id, connector=connector.name, limit=10000)}
+    existing = context.store.source_targets(context.institution_id, connector.name)
     return [
         Lead(connector.name, domain["asset_id"], entity_id=domain["entity_id"], asset_id=domain["asset_id"], hops=0, work_class=work_class, origin="recurring", interval_seconds=connector.default_interval)
         for domain in domains if domain["asset_id"] not in existing

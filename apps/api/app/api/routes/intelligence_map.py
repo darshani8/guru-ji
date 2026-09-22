@@ -9,6 +9,7 @@ from uuid import uuid4
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import PlainTextResponse
 from pydantic import BaseModel, Field
+from starlette.concurrency import run_in_threadpool
 
 from ...domain.audit import AuditEvent, AuditOutcome
 from ...domain.principals import Capability, Principal
@@ -118,11 +119,18 @@ async def seed(body: SeedBody, request: Request) -> dict[str, Any]:
     sweep = body.sweep_tsv if body.sweep_tsv is not None else DEFAULT_SWEEP.read_text(encoding="utf-8")
     lookalikes = body.lookalikes_tsv if body.lookalikes_tsv is not None else DEFAULT_LOOKALIKES.read_text(encoding="utf-8")
     try:
-        result = service.seed(principal, target, sweep_text=sweep, lookalikes_text=lookalikes, groups=body.groups, all_groups=body.all_groups, approved_by=body.approved_by, holdout_percent=body.holdout_percent, source="sweep" if body.sweep_tsv else "sweep-2026-09-22")
+        # Thousands of rows are real database work: off the event loop.
+        result = await run_in_threadpool(
+            service.seed, principal, target, sweep_text=sweep, lookalikes_text=lookalikes, groups=body.groups, all_groups=body.all_groups, approved_by=body.approved_by,
+            holdout_percent=body.holdout_percent, source="sweep" if body.sweep_tsv else "sweep-2026-09-22",
+        )
     except (ValueError, PermissionError) as exc:
         audit_map_action(request, principal, "seed", outcome=AuditOutcome.DENIED if isinstance(exc, PermissionError) else AuditOutcome.FAILED, metadata={"institution_id": target})
         raise translate(exc) from exc
-    audit_map_action(request, principal, "seed", metadata={"institution_id": target, "all_groups": body.all_groups, "approved_by": body.approved_by, "assets_created": int(result["summary"]["assets_created"])})
+    audit_map_action(request, principal, "seed", metadata={
+        "institution_id": target, "all_groups": body.all_groups, "groups": ",".join(result["summary"]["groups"])[:500], "approved_by": result["approved_by"],
+        "needed_approval": bool(result["needed_approval"]), "assets_created": int(result["summary"]["assets_created"]),
+    })
     return result
 
 

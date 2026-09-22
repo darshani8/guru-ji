@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
 
@@ -15,10 +15,12 @@ from .export import export_tsv
 from .harvest import OfficialSiteHarvester
 from .metrics import map_metrics, record_baseline
 from .pipeline import regrade, sync_profile
-from .seed import Lookalike, SeedRow, SeedSummary, import_seed, parse_lookalikes, parse_sweep
+from .seed import DEFAULT_SWEEP, Lookalike, SeedRow, SeedSummary, import_seed, parse_lookalikes, parse_sweep
 from .store import MapStore
 
 MAX_SEED_BYTES = 2_000_000
+# The bundled sweep has about 440 rows; a larger file is split into several imports.
+MAX_SEED_ROWS = 5_000
 MAX_HARVEST_DOMAINS = 10
 MANUAL_SOURCE_CONNECTORS = frozenset({"directory", "lead_page", "feed"})
 
@@ -28,6 +30,8 @@ class MapService:
     store: MapStore
     fetcher: PublicPageFetcher | None = None
     engine: MapEngine | None = None
+    # institution -> the sweep groups that are its own (operator configuration)
+    seed_groups: Mapping[str, Sequence[str]] = field(default_factory=dict)
 
     @staticmethod
     def guard(principal: Principal, institution_id: str, capability: Capability) -> None:
@@ -66,26 +70,40 @@ class MapService:
         self, principal: Principal, institution_id: str, *, sweep_text: str, lookalikes_text: str = "", groups: Sequence[str] | None = None, all_groups: bool = False,
         approved_by: str | None = None, holdout_percent: int = 20, source: str = "sweep",
     ) -> dict[str, Any]:
-        """Import a sweep. Mapping beyond the caller's own groups needs a named approval.
+        """Import a sweep. Anything beyond the institution's own groups needs a named approval.
 
-        A pilot institution maps its own part of the tree; importing every
-        group (the Math and its other institutions) is recorded with who
-        approved it, because those institutions have not asked to be mapped.
+        Which sweep groups belong to an institution is operator configuration
+        (GURU_INTELLIGENCE_SEED_GROUPS), never the caller's say-so: a group
+        label in a request, or in a sweep file the caller wrote, proves
+        nothing. An import of the bundled sweep limited to the institution's
+        configured groups needs no approval; anything else (other groups,
+        every group, a caller-supplied sweep) needs ``approved_by``, which is
+        recorded with the importing principal in the baseline run.
         """
 
         self.guard(principal, institution_id, Capability.INTELLIGENCE_MANAGE)
         if len(sweep_text.encode("utf-8")) + len(lookalikes_text.encode("utf-8")) > MAX_SEED_BYTES:
             raise ValueError("the seed files are too large")
-        if all_groups and not (approved_by and approved_by.strip()):
-            raise ValueError("importing every group needs approved_by: who approved mapping the other institutions")
         if not all_groups and not groups:
             raise ValueError("name the groups to import, or set all_groups with approved_by")
         rows: list[SeedRow] = parse_sweep(sweep_text)
+        if len(rows) > MAX_SEED_ROWS:
+            raise ValueError(f"a seed import takes at most {MAX_SEED_ROWS} rows; split the file")
+        requested = {row.group.strip().lower() for row in rows} if all_groups else {group.strip().lower() for group in groups or ()}
+        own = {group.strip().lower() for group in self.seed_groups.get(institution_id, ())}
+        bundled = sweep_text == DEFAULT_SWEEP.read_text(encoding="utf-8")
+        needs_approval = not bundled or not requested or not requested <= own
+        approver = (approved_by or "").strip()
+        if needs_approval and not approver:
+            raise ValueError(
+                "this import maps groups outside the institution's own (" + (", ".join(sorted(own)) or "none configured") + "); it needs approved_by: who approved mapping them"
+            )
         lookalikes: list[Lookalike] = parse_lookalikes(lookalikes_text) if lookalikes_text.strip() else []
-        summary: SeedSummary = import_seed(self.store, institution_id, rows, lookalikes=lookalikes, groups=None if all_groups else groups, holdout_percent=holdout_percent, source=source)
-        baseline = record_baseline(self.store, institution_id)
-        return {"summary": summary.as_dict(), "baseline": baseline, "approved_by": approved_by if all_groups else None}
-
+        with self.store.batch(institution_id):
+            summary: SeedSummary = import_seed(self.store, institution_id, rows, lookalikes=lookalikes, groups=None if all_groups else groups, holdout_percent=holdout_percent, source=source)
+        record = {"imported_by": principal.principal_id, "groups": summary.groups, "all_groups": all_groups, "approved_by": approver or None, "needed_approval": needs_approval, "source": source}
+        baseline = record_baseline(self.store, institution_id, import_record=record)
+        return {"summary": summary.as_dict(), "baseline": baseline, "approved_by": approver or None, "needed_approval": needs_approval}
 
     # ------------------------------------------------------- verification
     def sync_profile(self, principal: Principal, institution_id: str, profile: InstitutionProfile | None) -> dict[str, Any]:
@@ -162,4 +180,4 @@ class MapService:
         return {"day": day, "platform": self.store.spend(day=day), "institution": self.store.tenant_spend(institution_id, day=day), "caps": caps, "tenant_caps": {key: value * share for key, value in caps.items()}}
 
 
-__all__ = ["MANUAL_SOURCE_CONNECTORS", "MAX_HARVEST_DOMAINS", "MAX_SEED_BYTES", "MapService"]
+__all__ = ["MANUAL_SOURCE_CONNECTORS", "MAX_HARVEST_DOMAINS", "MAX_SEED_BYTES", "MAX_SEED_ROWS", "MapService"]

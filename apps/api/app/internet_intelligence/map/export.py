@@ -14,7 +14,7 @@ COLUMNS = ("group", "entity", "url", "grade", "relation", "status", "last_verifi
 def export_rows(store: MapStore, institution_id: str, *, min_grade: str | None = None) -> list[dict[str, Any]]:
     entities = {entity["entity_id"]: entity for entity in store.list_entities(institution_id)}
     rows: list[dict[str, Any]] = []
-    for asset in store.list_assets(institution_id, limit=5000):
+    for asset in store.iter_assets(institution_id):
         if min_grade and GRADE_RANK.get(asset["grade"], 1) < GRADE_RANK[min_grade]:
             continue
         entity = entities.get(asset["entity_id"] or "", {})

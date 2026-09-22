@@ -179,7 +179,7 @@ def _map_service(settings: AppSettings, backend: Any, intelligence_store: Intell
         store, map_connectors(settings), EngineConfig(sources_per_tick=settings.intelligence_sources_per_tick, budgets=settings.intelligence_budget_caps(), tenant_share=settings.intelligence_tenant_share),
         fetcher=fetcher, search=provider, profile_loader=intelligence_store.get_profile,
     )
-    return MapService(store, fetcher=fetcher, engine=engine)
+    return MapService(store, fetcher=fetcher, engine=engine, seed_groups=settings.intelligence_seed_group_map())
 
 
 def map_connectors(settings: AppSettings, *, transport: Any | None = None) -> ConnectorRegistry:

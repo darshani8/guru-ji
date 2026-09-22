@@ -20,15 +20,24 @@ def regrade(store: MapStore, institution_id: str, asset_ids: Iterable[str] | Non
     """
 
     current = now or datetime.now(timezone.utc)
-    assets = {asset["asset_id"]: asset for asset in store.list_assets(institution_id, limit=5000)}
-    wanted = list(dict.fromkeys(asset_ids)) if asset_ids is not None else list(assets)
-    evidence_by_asset: dict[str, list[dict[str, Any]]] = {}
-    for item in store.list_evidence(institution_id, limit=20000):
-        evidence_by_asset.setdefault(item["asset_id"], []).append(item)
+    if asset_ids is None:
+        assets = {asset["asset_id"]: asset for asset in store.iter_assets(institution_id)}
+        wanted = list(assets)
+    else:
+        wanted = list(dict.fromkeys(asset_ids))
+        assets = store.get_assets(institution_id, wanted)
+    # Every row of every graded asset: an ascending cap would drop the newest.
+    evidence_by_asset = store.evidence_for(institution_id, [asset_id for asset_id in wanted if asset_id in assets])
     results = {asset_id: grade(assets[asset_id], evidence_by_asset.get(asset_id, []), now=current) for asset_id in wanted if asset_id in assets}
-    grades = {asset_id: asset["grade"] for asset_id, asset in assets.items()}
+    # Disputes compare an entity's official accounts on one platform, so the
+    # rest of each affected group is loaded too.
+    peers = dict(assets)
+    for entity_id, platform in {(asset["entity_id"], asset["platform"]) for asset_id, asset in assets.items() if asset_id in results and asset["relation"] == "official" and asset["kind"] == "account" and asset["entity_id"]}:
+        if asset_ids is not None:
+            peers.update({peer["asset_id"]: peer for peer in store.iter_assets(institution_id, entity_id=entity_id, platform=platform, kind="account", relation="official")})
+    grades = {asset_id: asset["grade"] for asset_id, asset in peers.items()}
     grades.update({asset_id: result.grade for asset_id, result in results.items()})
-    disputed = apply_disputes(assets.values(), grades)
+    disputed = apply_disputes(peers.values(), grades)
     changes: list[dict[str, Any]] = []
     for asset_id, result in results.items():
         asset = assets[asset_id]
@@ -57,8 +66,7 @@ def sync_profile(store: MapStore, profile: InstitutionProfile, *, run_id: str | 
     for domain in profile.official_domains:
         ref = asset_ref(f"https://{domain}/")
         asset_id, is_new = store.upsert_asset(profile.institution_id, ref, entity_id=entity_id, relation="official", note="configured in the intelligence profile")
-        existing = [item for item in store.list_evidence(profile.institution_id, asset_id=asset_id) if item["kind"] == "configured_domain"]
-        if not existing:
+        if not store.has_evidence(profile.institution_id, asset_id, "configured_domain"):
             store.add_evidence(profile.institution_id, asset_id=asset_id, kind="configured_domain", detail=f"profile of {profile.name}", channel="profile", observed_via="reviewer", run_id=run_id)
         if is_new:
             created.append(asset_id)
@@ -73,7 +81,7 @@ def anchor_grade(store: MapStore, institution_id: str, asset_id: str | None) -> 
     asset = store.get_asset(institution_id, asset_id)
     if asset is None:
         return "C"
-    if asset["status"] in {"parked", "hijacked", "compromised", "dead"}:
+    if asset["status"] in {"parked", "hijacked", "compromised", "dead", "redirected"}:
         return "D"
     return str(asset["grade"])
 

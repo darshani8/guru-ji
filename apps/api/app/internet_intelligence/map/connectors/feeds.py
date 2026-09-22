@@ -42,9 +42,9 @@ class FeedConnector:
         return 1.0
 
     def plan(self, context: ConnectorContext) -> list[Lead]:
-        existing = {row["target"] for row in context.store.list_sources(context.institution_id, connector=self.name, limit=10000)}
+        existing = context.store.source_targets(context.institution_id, self.name)
         leads = []
-        for asset in context.store.list_assets(context.institution_id, platform="youtube", kind="account", limit=5000):
+        for asset in context.store.iter_assets(context.institution_id, platform="youtube", kind="account"):
             if asset["asset_key"].startswith("youtube:channel:") and asset["grade"] != "D":
                 url = youtube_feed_url(asset["asset_key"].removeprefix("youtube:channel:"))
                 if url not in existing:

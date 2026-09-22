@@ -13,12 +13,12 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
-from ...persistence.schema_tools import add_missing_columns, apply_schema, begin_migration, existing_policies, row_level_security_state, tenant_isolation_statements
+from ...persistence.schema_tools import add_missing_columns, apply_schema, begin_migration, existing_policies, idempotent_tenant_isolation_sql, row_level_security_state, tenant_isolation_statements
 from ...persistence.sql_backend import SqlBackend, open_backend
 from .assets import AssetRef
 
@@ -32,7 +32,7 @@ RELATIONS = frozenset({"official", "affiliated", "community", "third_party", "un
 # a lookalike, or on a parked or hijacked domain.
 GRADES = ("O", "A", "A-arch", "B", "C", "D", "unrated")
 GRADE_RANK = {"O": 6, "A": 5, "A-arch": 4, "B": 3, "C": 2, "unrated": 1, "D": 0}
-ASSET_STATUSES = frozenset({"unknown", "live", "blocked", "dead", "parked", "hijacked", "compromised", "disputed"})
+ASSET_STATUSES = frozenset({"unknown", "live", "blocked", "dead", "parked", "hijacked", "compromised", "disputed", "redirected"})
 SPLITS = frozenset({"seed", "holdout", "canary"})
 
 _STATEMENTS: tuple[str, ...] = (
@@ -103,6 +103,7 @@ _STATEMENTS: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_intel_evidence_asset ON intel_evidence(institution_id, asset_id, observed_at)",
+    "CREATE INDEX IF NOT EXISTS idx_intel_evidence_source ON intel_evidence(institution_id, source_asset_id, kind)",
     """
     CREATE TABLE IF NOT EXISTS intel_gold_items (
         gold_id TEXT PRIMARY KEY,
@@ -251,7 +252,7 @@ def render_sql_migration() -> str:
     lines.extend(" ".join(statement.split()) + ";" for statement in _STATEMENTS)
     lines.extend(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {column_type};" for table, column, column_type in ADDED_COLUMNS)
     lines.append("-- PostgreSQL row-level security (skipped on SQLite)")
-    lines.extend(statement + ";" for statement in tenant_isolation_statements(TENANT_TABLES, state={}, policies=()))
+    lines.extend(statement + ";" for statement in idempotent_tenant_isolation_sql(TENANT_TABLES))
     return "\n".join(lines) + "\n"
 
 
@@ -569,6 +570,31 @@ class MapStore(MapStoreScheduling):
             )
         return [self._asset_row(row) for row in rows]
 
+    def iter_assets(self, institution_id: str, *, page: int = 1000, **filters: Any) -> Iterator[dict[str, Any]]:
+        """Every asset matching the filters, a page at a time (``list_assets`` stops at 5000)."""
+
+        offset = 0
+        while True:
+            rows = self.list_assets(institution_id, limit=page, offset=offset, **filters)
+            yield from rows
+            if len(rows) < page:
+                return
+            offset += page
+
+    def get_assets(self, institution_id: str, asset_ids: Iterable[str]) -> dict[str, dict[str, Any]]:
+        wanted = list(dict.fromkeys(asset_ids))
+        found: dict[str, dict[str, Any]] = {}
+        with self._tenant(institution_id):
+            for chunk in iter_chunks(wanted, 200):
+                marks = ", ".join("?" for _ in chunk)
+                for row in self.backend.fetchall(f"SELECT * FROM intel_assets WHERE institution_id = ? AND asset_id IN ({marks})", (institution_id, *chunk)):
+                    found[str(row["asset_id"])] = self._asset_row(row)
+        return found
+
+    def source_targets(self, institution_id: str, connector: str) -> set[str]:
+        with self._tenant(institution_id):
+            return {str(row["target"]) for row in self.backend.fetchall("SELECT target FROM intel_sources WHERE institution_id = ? AND connector = ?", (institution_id, connector))}
+
     def set_grade(self, institution_id: str, asset_id: str, *, grade: str, reasons: Sequence[str], scorer_version: str, proposed: bool = False) -> None:
         """Store a computed grade; ``proposed`` parks it until a run gate lets it through."""
 
@@ -623,6 +649,8 @@ class MapStore(MapStoreScheduling):
         return evidence_id
 
     def list_evidence(self, institution_id: str, *, asset_id: str | None = None, since: str | None = None, limit: int = 1000) -> list[dict[str, Any]]:
+        """The newest ``limit`` evidence rows, oldest first (for display; grading uses ``evidence_for``)."""
+
         clauses, params = ["institution_id = ?"], [institution_id]
         if asset_id:
             clauses.append("asset_id = ?")
@@ -631,7 +659,37 @@ class MapStore(MapStoreScheduling):
             clauses.append("observed_at >= ?")
             params.append(since)
         with self._tenant(institution_id):
-            return self.backend.fetchall(f"SELECT * FROM intel_evidence WHERE {' AND '.join(clauses)} ORDER BY observed_at, evidence_id LIMIT ?", (*params, max(1, min(limit, 20000))))
+            rows = self.backend.fetchall(f"SELECT * FROM intel_evidence WHERE {' AND '.join(clauses)} ORDER BY observed_at DESC, evidence_id DESC LIMIT ?", (*params, max(1, min(limit, 20000))))
+        return rows[::-1]
+
+    def evidence_for(self, institution_id: str, asset_ids: Iterable[str]) -> dict[str, list[dict[str, Any]]]:
+        """Every evidence row of the given assets, oldest first, with no cap: a grade must see all of it."""
+
+        wanted = list(dict.fromkeys(asset_ids))
+        found: dict[str, list[dict[str, Any]]] = {asset_id: [] for asset_id in wanted}
+        with self._tenant(institution_id):
+            for chunk in iter_chunks(wanted, 200):
+                marks = ", ".join("?" for _ in chunk)
+                for row in self.backend.fetchall(f"SELECT * FROM intel_evidence WHERE institution_id = ? AND asset_id IN ({marks}) ORDER BY observed_at, evidence_id", (institution_id, *chunk)):
+                    found[row["asset_id"]].append(row)
+        return found
+
+    def links_from(self, institution_id: str, source_asset_id: str, *, kind: str = "official_link", source_urls: Iterable[str] | None = None) -> list[dict[str, Any]]:
+        """Every ``kind`` row a source (an official domain) gave, oldest first, optionally for some of its pages."""
+
+        clauses, params = ["institution_id = ?", "source_asset_id = ?", "kind = ?"], [institution_id, source_asset_id, kind]
+        urls = list(dict.fromkeys(source_urls)) if source_urls is not None else None
+        if urls is not None:
+            if not urls:
+                return []
+            clauses.append(f"source_url IN ({', '.join('?' for _ in urls)})")
+            params.extend(urls)
+        with self._tenant(institution_id):
+            return self.backend.fetchall(f"SELECT * FROM intel_evidence WHERE {' AND '.join(clauses)} ORDER BY observed_at, evidence_id", tuple(params))
+
+    def has_evidence(self, institution_id: str, asset_id: str, kind: str) -> bool:
+        with self._tenant(institution_id):
+            return self.backend.fetchone("SELECT 1 AS present FROM intel_evidence WHERE institution_id = ? AND asset_id = ? AND kind = ? LIMIT 1", (institution_id, asset_id, kind)) is not None
 
     # -------------------------------------------------------------------- gold
     def add_gold(self, institution_id: str, *, asset_key: str, platform: str, split: str, entity_name: str = "", relation: str = "unknown", expected_min_grade: str = "C", source: str = "") -> bool:
@@ -649,6 +707,20 @@ class MapStore(MapStoreScheduling):
                 (f"igld-{uuid4().hex}", institution_id, asset_key, platform, entity_name[:200], relation, split, expected_min_grade, source[:200], now_iso()),
             )
         return True
+
+    def make_canary(self, institution_id: str, asset_key: str, *, entity_name: str) -> bool:
+        """Turn an existing seed or holdout gold item into a canary (a look-alike that must never grade official)."""
+
+        with self._tenant(institution_id):
+            return bool(self.backend.execute(
+                "UPDATE intel_gold_items SET split = 'canary', relation = 'third_party', expected_min_grade = 'D', entity_name = ? WHERE institution_id = ? AND asset_key = ? AND split <> 'canary'",
+                (entity_name[:200], institution_id, asset_key),
+            ))
+
+    def batch(self, institution_id: str):
+        """One tenant transaction around many store calls (they nest into it)."""
+
+        return self._tenant(institution_id)
 
     def list_gold(self, institution_id: str, *, split: str | None = None) -> list[dict[str, Any]]:
         clauses, params = ["institution_id = ?"], [institution_id]

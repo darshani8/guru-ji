@@ -41,6 +41,7 @@ class HarvestResult:
     evidence: int = 0
     anchor: str = "C"
     incidents: list[dict[str, Any]] = field(default_factory=list)
+    raised: list[str] = field(default_factory=list)  # accounts whose grade went up in this harvest
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -69,13 +70,17 @@ class OfficialSiteHarvester:
         # Grade the domain from its evidence first: the links it vouches for inherit that grade.
         regrade(self.store, institution_id, [domain_asset_id])
         homepage = await self._retrieve(asset["url"])
-        self._liveness(institution_id, domain_asset_id, homepage, run_id)
+        if homepage.ok and _host(homepage.url) != host:
+            # Another host answered: that says nothing about this domain being live.
+            self.store.add_evidence(institution_id, asset_id=domain_asset_id, kind="liveness", polarity="refutes", detail=f"redirected:{_host(homepage.url)}", source_url=homepage.url, channel="fetch", observed_via="live", run_id=run_id)
+        else:
+            self._liveness(institution_id, domain_asset_id, homepage, run_id)
         result.pages.append({"url": homepage.url, "outcome": homepage.outcome})
         if homepage.outcome == "not_modified":
             # Unchanged since the last fetch: the links it gave then still stand.
             result.integrity = "unchanged"
             touched = self._reconfirm(institution_id, domain_asset_id, homepage.url, run_id, result)
-            regrade(self.store, institution_id, [domain_asset_id, *touched])
+            self._note_raised(regrade(self.store, institution_id, [domain_asset_id, *touched]), result)
             return result
         if not homepage.ok:
             regrade(self.store, institution_id, [domain_asset_id])
@@ -142,8 +147,12 @@ class OfficialSiteHarvester:
                 if created:
                     result.new_assets.append(ref.key)
         touched |= self._record_removals(institution_id, domain_asset_id, {url for url, _, _ in pages}, seen_on_page, run_id, result)
-        regrade(self.store, institution_id, sorted(touched))
+        self._note_raised(regrade(self.store, institution_id, sorted(touched)), result)
         return result
+
+    @staticmethod
+    def _note_raised(changes: list[dict[str, Any]], result: HarvestResult) -> None:
+        result.raised.extend(change["asset_key"] for change in changes if GRADE_RANK.get(change["to"], 1) > GRADE_RANK.get(change["from"], 1) and change["asset_key"] not in result.new_assets)
 
     async def _retrieve(self, url: str, *, conditional: bool | None = None) -> Retrieval:
         use_cache = self.conditional if conditional is None else conditional
@@ -158,9 +167,8 @@ class OfficialSiteHarvester:
         """Repeat the latest official-link observation from an unchanged page (a 304 answer)."""
 
         latest: dict[str, dict[str, object]] = {}
-        for item in self.store.list_evidence(institution_id, limit=20000):
-            if item["kind"] == "official_link" and item["source_asset_id"] == domain_asset_id and item["source_url"] == page_url:
-                latest[item["asset_id"]] = item
+        for item in self.store.links_from(institution_id, domain_asset_id, source_urls=[page_url]):
+            latest[item["asset_id"]] = item
         touched: set[str] = set()
         for asset_id, item in latest.items():
             if item["polarity"] != "supports":
@@ -175,11 +183,11 @@ class OfficialSiteHarvester:
 
         removed: set[str] = set()
         linked_before: dict[tuple[str, str], str] = {}
-        for item in self.store.list_evidence(institution_id, limit=20000):
-            if item["kind"] == "official_link" and item["source_asset_id"] == domain_asset_id and item["source_url"] in fetched:
-                linked_before[(item["asset_id"], item["source_url"])] = item["polarity"]
+        for item in self.store.links_from(institution_id, domain_asset_id, source_urls=fetched):
+            linked_before[(item["asset_id"], item["source_url"])] = item["polarity"]
+        linked_assets = self.store.get_assets(institution_id, {asset_id for asset_id, _ in linked_before})
         for (asset_id, page_url), polarity in linked_before.items():
-            asset = self.store.get_asset(institution_id, asset_id)
+            asset = linked_assets.get(asset_id)
             if asset is None or polarity != "supports" or asset["asset_key"] in seen_on_page.get(page_url, set()):
                 continue
             self.store.add_evidence(institution_id, asset_id=asset_id, kind="official_link", polarity="refutes", detail=f"removed:{page_url}"[:500], source_url=page_url, source_asset_id=domain_asset_id, channel=f"site:{result.domain}", observed_via="live", run_id=run_id)

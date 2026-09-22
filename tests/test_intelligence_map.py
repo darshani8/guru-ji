@@ -166,6 +166,45 @@ class SeedTests(unittest.TestCase):
         self.assertEqual(again.assets_created, 0)
         self.assertEqual(self.store.holdout_keys("bgscet"), holdout)
 
+    def test_every_lookalike_url_is_a_canary_even_when_the_sweep_lists_it(self):
+        rows, lookalikes = load_default_seed()
+        with_url = {asset_ref(item.url).key for item in lookalikes if item.url}
+        listed = {asset_ref(row.url).key for row in rows} & with_url
+        self.assertTrue(listed, "the bundled sweep does list some look-alike URLs (the collision this guards)")
+        summary = import_seed(self.store, "bgscet", rows, lookalikes=lookalikes, holdout_percent=20)
+        self.assertEqual({item["asset_key"] for item in self.store.list_gold("bgscet", split="canary")}, with_url)
+        self.assertEqual(map_metrics(self.store, "bgscet")["canary_total"], len(with_url))
+        self.assertEqual(set(summary.canary_collisions), listed)
+        for key in listed:
+            self.assertIsNone(self.store.find_asset("bgscet", key), "a look-alike is never seeded as an ordinary asset")
+
+    def test_a_lookalike_seeded_before_is_turned_into_a_canary(self):
+        row = "Group\tBGS Group\tinstitution\t\t\thttps://www.bgsgroupofinstitutions.com/\tF\tthird_party\t"
+        import_seed(self.store, "bgscet", parse_sweep(sweep(row)), holdout_percent=0)
+        asset = self.store.find_asset("bgscet", "web:bgsgroupofinstitutions.com")
+        self.assertIsNotNone(asset)
+        lookalike = parse_lookalikes("name\tnames\tlocations\turl\twhy\nBGS Group of Institutions\t\t\thttps://www.bgsgroupofinstitutions.com/\tunrelated lookalike\n")
+        import_seed(self.store, "bgscet", [], lookalikes=lookalike)
+        self.assertEqual([item["split"] for item in self.store.list_gold("bgscet") if item["asset_key"] == "web:bgsgroupofinstitutions.com"], ["canary"])
+        from app.internet_intelligence.map.pipeline import regrade
+
+        regrade(self.store, "bgscet", [asset["asset_id"]])
+        self.assertEqual(self.store.get_asset("bgscet", asset["asset_id"])["grade"], "D")
+
+    def test_grades_see_the_newest_evidence_however_long_the_log(self):
+        from app.internet_intelligence.map.pipeline import regrade
+
+        entity = self.store.upsert_entity("bgscet", name="BGSCET")
+        domain, _ = self.store.upsert_asset("bgscet", asset_ref("https://bgscet.ac.in/"), entity_id=entity, relation="official")
+        filler, _ = self.store.upsert_asset("bgscet", asset_ref("https://www.instagram.com/filler/"), entity_id=entity)
+        self.store.add_evidence("bgscet", asset_id=domain, kind="configured_domain", observed_via="reviewer")
+        with self.store.batch("bgscet"):
+            for _ in range(20_001):
+                self.store.add_evidence("bgscet", asset_id=filler, kind="search_snippet", channel="t", observed_via="index")
+        self.store.add_evidence("bgscet", asset_id=domain, kind="integrity", polarity="refutes", detail="hijacked:gambling_terms", source_url="https://bgscet.ac.in/")
+        regrade(self.store, "bgscet")
+        self.assertEqual((self.store.get_asset("bgscet", domain)["grade"], self.store.get_asset("bgscet", domain)["status"]), ("D", "hijacked"))
+
     def test_holdout_is_deterministic(self):
         self.assertEqual(in_holdout("instagram:bgscet_engg_coll", 20), in_holdout("instagram:bgscet_engg_coll", 20))
         self.assertFalse(in_holdout("anything", 0))
@@ -206,7 +245,7 @@ class SeedTests(unittest.TestCase):
 class MapServiceTests(unittest.TestCase):
     def setUp(self):
         self.store = MapStore(":memory:", suppression_key=b"test-key")
-        self.service = MapService(self.store)
+        self.service = MapService(self.store, seed_groups={"bgscet": ["BGSCET"]})
         self.manager = principal(PrincipalType.PRINCIPAL, college_id="bgscet")
         self.reader = principal(PrincipalType.FACULTY, college_id="bgscet")
 
@@ -220,18 +259,53 @@ class MapServiceTests(unittest.TestCase):
             self.service.seed(self.reader, "bgscet", sweep_text=text, groups=["BGSCET"])
         with self.assertRaises(PermissionError):
             self.service.seed(self.manager, "sjbit", sweep_text=text, groups=["SJBIT"])
+        # Naming another institution's groups is not a way round the approval.
+        with self.assertRaisesRegex(ValueError, "approved_by"):
+            self.service.seed(self.manager, "bgscet", sweep_text=text, groups=["BGSCET", "SJBIT", "Math"])
+        # Nor is a sweep file that labels other institutions' rows as one's own group.
+        relabelled = sweep("BGSCET\tSJB Institute of Technology\tinstitution\t\t\thttps://www.instagram.com/sjbit_official/\tA\tofficial\t")
+        with self.assertRaisesRegex(ValueError, "approved_by"):
+            self.service.seed(self.manager, "bgscet", sweep_text=relabelled, groups=["BGSCET"])
         result = self.service.seed(self.manager, "bgscet", sweep_text=text, groups=["BGSCET"])
         self.assertGreater(result["summary"]["assets_created"], 10)
-        self.assertIsNone(result["approved_by"])
+        self.assertEqual((result["approved_by"], result["needed_approval"], result["summary"]["groups"]), (None, False, ["BGSCET"]))
         self.assertIn("holdout_recall", result["baseline"])
+        approved = self.service.seed(self.manager, "bgscet", sweep_text=text, all_groups=True, approved_by="Math IT office, 2026-09-30")
+        self.assertTrue(approved["needed_approval"])
+        record = self.store.list_map_runs("bgscet", kind="baseline")[0]["counts"]["import"]
+        self.assertEqual((record["imported_by"], record["approved_by"], record["all_groups"]), (self.manager.principal_id, "Math IT office, 2026-09-30", True))
+        self.assertGreater(len(record["groups"]), 5)
+        unconfigured = MapService(self.store)
+        with self.assertRaisesRegex(ValueError, "none configured"):
+            unconfigured.seed(self.manager, "bgscet", sweep_text=text, groups=["BGSCET"])
+
+    def test_a_seed_import_is_capped(self):
+        from app.internet_intelligence.map.service import MAX_SEED_ROWS
+
+        rows = sweep(*(f"BGSCET\tBGSCET\tinstitution\t\t\thttps://site{index}.example/\tC\tunknown\t" for index in range(MAX_SEED_ROWS + 1)))
+        with self.assertRaisesRegex(ValueError, "at most"):
+            self.service.seed(self.manager, "bgscet", sweep_text=rows, groups=["BGSCET"], approved_by="x")
 
     def test_readers_see_only_what_the_map_stands_behind(self):
         entity = self.store.upsert_entity("bgscet", name="BGSCET")
         verified, _ = self.store.upsert_asset("bgscet", asset_ref("https://www.instagram.com/bgscet_engg_coll/"), entity_id=entity, relation="official")
         self.store.set_grade("bgscet", verified, grade="A", reasons=["official"], scorer_version="t")
         self.store.upsert_asset("bgscet", asset_ref("https://www.instagram.com/bgscet_cse/"), entity_id=entity, relation="unknown")
-        self.assertEqual([asset["asset_id"] for asset in self.service.assets(self.reader, "bgscet")], [verified])
-        self.assertEqual(len(self.service.assets(self.manager, "bgscet")), 2)
+        graded = {}
+        for url, relation, grade in (
+            ("https://www.bgsgroupofinstitutions.com/", "official", "D"), ("https://www.instagram.com/bgscet_claimed/", "official", "C"),
+            ("https://www.reddit.com/r/bgscet/", "community", "C"), ("https://www.instagram.com/bgscet_mba/", "official", "B"),
+        ):
+            asset_id, _ = self.store.upsert_asset("bgscet", asset_ref(url), entity_id=entity, relation=relation)
+            self.store.set_grade("bgscet", asset_id, grade=grade, reasons=["test"], scorer_version="t")
+            graded[(relation, grade)] = asset_id
+        shown = {asset["asset_id"] for asset in self.service.assets(self.reader, "bgscet")}
+        self.assertEqual(shown, {verified, graded[("official", "B")], graded[("community", "C")]}, "readers never see refuted, parked or unverified official claims")
+        self.assertEqual(len(self.service.assets(self.manager, "bgscet")), 6)
+        exported = self.service.export(self.reader, "bgscet")
+        self.assertIn("instagram.com/bgscet_mba", exported)
+        for hidden in ("bgsgroupofinstitutions.com", "bgscet_claimed", "reddit.com/r/bgscet", "bgscet_cse"):
+            self.assertNotIn(hidden, exported, hidden)
         with self.assertRaises(PermissionError):
             self.service.evidence(self.reader, "bgscet", verified)
         with self.assertRaises(PermissionError):
@@ -247,7 +321,8 @@ class MapRouteTests(unittest.TestCase):
         platform = app.state.runtime.platform
         service = MapService(MapStore(backend=platform.store.backend, suppression_key=b"test-key"))
         with mock.patch.object(platform, "intelligence_map", service):
-            seeded = client.post("/v1/intelligence/map/seed", headers=headers, json={"groups": ["BGSCET"]})
+            self.assertEqual(client.post("/v1/intelligence/map/seed", headers=headers, json={"groups": ["BGSCET"]}).status_code, 422, "no group is this college's own until an operator says so")
+            seeded = client.post("/v1/intelligence/map/seed", headers=headers, json={"groups": ["BGSCET"], "approved_by": "Principal, map college"})
             self.assertEqual(seeded.status_code, 200, seeded.text)
             self.assertGreater(seeded.json()["summary"]["assets_created"], 10)
             refused = client.post("/v1/intelligence/map/seed", headers=headers, json={"all_groups": True})

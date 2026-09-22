@@ -112,7 +112,12 @@ class InternetIntelligenceService:
         candidates: dict[str, dict[str, Any]] = {}
         provider_failures = 0
         queries_run: list[str] = []
-        for query in queries:
+        # Each query may fill the pool up to its fair share (plus whatever the
+        # queries before it left unused), so the first queries cannot take every
+        # slot and starve the identity and topic queries after them.
+        dropped = 0
+        for index, query in enumerate(queries):
+            fill_to = ((index + 1) * MAX_CANDIDATES) // len(queries)
             # Once the candidate pool is full, further queries would be paid for
             # and then thrown away; stop issuing them.
             if len(candidates) >= MAX_CANDIDATES:
@@ -133,14 +138,15 @@ class InternetIntelligenceService:
                     canonical = canonicalize_url(hit.url)
                 except ValueError:
                     continue
-                if canonical not in candidates and len(candidates) >= MAX_CANDIDATES:
-                    break
+                if canonical not in candidates and len(candidates) >= fill_to:
+                    dropped += 1
+                    continue
                 entry = candidates.setdefault(canonical, {"hit": hit, "queries": []})
                 entry["queries"].append(query)
         if provider_failures and provider_failures == len(queries_run):
             raise IntelligenceSearchUnavailable("the search provider was unavailable for every query")
-        if len(queries_run) < len(queries):
-            warnings.append({"code": "candidate_limit_reached", "message": f"Stopped after {len(queries_run)} of {len(queries)} queries: {MAX_CANDIDATES} candidate sources were already collected."})
+        if len(queries_run) < len(queries) or dropped:
+            warnings.append({"code": "candidate_limit_reached", "message": f"{dropped} further results were not considered: a run weighs at most {MAX_CANDIDATES} candidate sources, shared across its {len(queries)} queries."})
         findings: list[dict[str, Any]] = []
         kept: list[dict[str, Any]] = []
         excluded: dict[str, int] = {}

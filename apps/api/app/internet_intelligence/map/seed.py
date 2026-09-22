@@ -66,12 +66,15 @@ class SeedSummary:
     lookalikes: int = 0
     skipped_groups: int = 0
     suppressed: int = 0
+    canary_collisions: list[str] = field(default_factory=list)  # sweep rows that are look-alikes, not seeded
+    groups: list[str] = field(default_factory=list)  # the groups actually imported
     invalid: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, object]:
         return {
             "entities": self.entities, "assets_created": self.assets_created, "assets_existing": self.assets_existing, "evidence": self.evidence, "holdout": self.holdout,
-            "canaries": self.canaries, "lookalikes": self.lookalikes, "skipped_groups": self.skipped_groups, "suppressed": self.suppressed, "invalid": self.invalid[:50],
+            "canaries": self.canaries, "lookalikes": self.lookalikes, "skipped_groups": self.skipped_groups, "suppressed": self.suppressed,
+            "canary_collisions": self.canary_collisions[:50], "groups": self.groups, "invalid": self.invalid[:50],
         }
 
 
@@ -136,6 +139,26 @@ def import_seed(
             summary.entities += 1
         return entity_ids[key]
 
+    # Look-alikes first: a sweep row for a look-alike's URL must neither be
+    # seeded as an ordinary asset nor take the key's gold slot from the canary.
+    canary_keys: set[str] = set()
+    for lookalike in lookalikes:
+        store.upsert_entity(institution_id, name=lookalike.name, kind="lookalike", names=lookalike.names, locations=lookalike.locations, authority="external", notes=lookalike.why)
+        summary.lookalikes += 1
+        if not lookalike.url:
+            continue
+        try:
+            ref = asset_ref(lookalike.url)
+        except ValueError:
+            summary.invalid.append(lookalike.url)
+            continue
+        canary_keys.add(ref.key)
+        if store.add_gold(institution_id, asset_key=ref.key, platform=ref.platform, split="canary", entity_name=lookalike.name, relation="third_party", expected_min_grade="D", source=source) or store.make_canary(institution_id, ref.key, entity_name=lookalike.name):
+            summary.canaries += 1
+        existing = store.find_asset(institution_id, ref.key)
+        if existing is not None and not any(item["kind"] == "lookalike" for item in store.evidence_for(institution_id, [existing["asset_id"]])[existing["asset_id"]]):
+            # Seeded earlier as an ordinary asset: it is a look-alike, and says so in its evidence.
+            store.add_evidence(institution_id, asset_id=existing["asset_id"], kind="lookalike", polarity="refutes", detail=lookalike.why[:200] or lookalike.name, channel=source, observed_via="import")
     for row in rows:
         if wanted is not None and row.group.lower() not in wanted:
             summary.skipped_groups += 1
@@ -145,9 +168,14 @@ def import_seed(
         except ValueError:
             summary.invalid.append(row.url)
             continue
+        if ref.key in canary_keys:
+            summary.canary_collisions.append(ref.key)
+            continue
         if store.is_suppressed(institution_id, ref.key):
             summary.suppressed += 1
             continue
+        if row.group not in summary.groups:
+            summary.groups.append(row.group)
         entity_id = entity(row.subject, row.subject_kind if row.subject_kind in _KINDS else "institution", row.group, row.parent)
         expected = row.expected_min_grade
         if in_holdout(ref.key, holdout_percent):
@@ -161,17 +189,6 @@ def import_seed(
         summary.assets_existing += int(not created)
         store.add_evidence(institution_id, asset_id=asset_id, kind="imported_claim", detail=f"claimed {row.claimed_grade}: {row.note}", channel=source, observed_via="import", source_url="")
         summary.evidence += 1
-    for lookalike in lookalikes:
-        store.upsert_entity(institution_id, name=lookalike.name, kind="lookalike", names=lookalike.names, locations=lookalike.locations, authority="external", notes=lookalike.why)
-        summary.lookalikes += 1
-        if lookalike.url:
-            try:
-                ref = asset_ref(lookalike.url)
-            except ValueError:
-                summary.invalid.append(lookalike.url)
-                continue
-            if store.add_gold(institution_id, asset_key=ref.key, platform=ref.platform, split="canary", entity_name=lookalike.name, relation="third_party", expected_min_grade="D", source=source):
-                summary.canaries += 1
     return summary
 
 

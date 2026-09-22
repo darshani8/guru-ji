@@ -564,8 +564,8 @@ class LeakFixTests(unittest.IsolatedAsyncioTestCase):
         service = InternetIntelligenceService(self.store, provider, fetcher=None, max_queries=8)
         service.save_profile(self.pri, "college_a", PROFILE.as_dict())
         report = await service.investigate(self.pri, "college_a", window_days=7)
-        self.assertEqual(len(provider.calls), -(-MAX_CANDIDATES // 25), "no query is paid for once the pool is full")
-        self.assertEqual(report["queries"], [query for query, _ in provider.calls])
+        self.assertEqual(report["queries"], [query for query, _ in provider.calls], "every planned query runs: the pool is shared, not first come first served")
+        self.assertIn(f'"{PROFILE.name} {PROFILE.location}"', report["queries"][:3], "the name query comes early")
         self.assertEqual(report["candidates_considered"], MAX_CANDIDATES)
         self.assertIn("candidate_limit_reached", {warning["code"] for warning in report["warnings"]})
 
@@ -637,6 +637,26 @@ class LeakFixTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((stored["excerpt"], stored["content_sha256"], stored["extracted"]), ("full page text", "page-hash", True))
         _, change = self.store.upsert_document("college_a", self._record(excerpt="edited page text", content_sha256="edited-hash"))
         self.assertEqual(change, "changed", "a real page edit is still reported")
+
+    def test_a_row_kept_for_the_first_time_is_reported_once(self):
+        # Run 1: the fetch failed and the thin snippet only earned review.
+        document_id, change = self.store.upsert_document("college_a", self._record(excerpt="snippet", content_sha256="snippet-hash", extracted=False, status="review", status_reason="entity_low", match_level="low", match_score=0.4))
+        self.assertEqual(change, "new")
+        # Run 2: the page was fetched and the item is kept: never reported, so new.
+        _, change = self.store.upsert_document("college_a", self._record())
+        self.assertEqual(change, "new")
+        # Run 3: the fetch fails again; the snippet neither demotes the row nor changes it.
+        _, change = self.store.upsert_document("college_a", self._record(excerpt="snippet", content_sha256="snippet-hash", extracted=False, status="review", status_reason="entity_low", match_level="low", match_score=0.4))
+        self.assertEqual(change, "duplicate")
+        stored = self.store.get_document("college_a", document_id)
+        self.assertEqual((stored["status"], stored["match_level"]), ("kept", "high"), "the verdict from the full page stands")
+        # Run 4: fetched again: already reported, so not new again.
+        _, change = self.store.upsert_document("college_a", self._record())
+        self.assertEqual(change, "duplicate")
+
+    def test_identity_queries_run_before_topics_fill_the_pool(self):
+        queries = generate_queries(self._profile(), topics=["admission", "placement", "accreditation", "ranking", "fest", "sports", "research", "alumni"], max_queries=9)
+        self.assertEqual(queries[0], '"ABC College Bengaluru"', "the name query is first, so an early stop still searched it")
 
     def test_a_shorter_window_does_not_undo_a_kept_row(self):
         document_id, _ = self.store.upsert_document("college_a", self._record())

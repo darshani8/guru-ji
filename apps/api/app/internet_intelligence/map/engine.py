@@ -72,17 +72,17 @@ class MapEngine:
             sync_profile(self.store, profile)
         # A domain that was never graded (new from the profile or a seed) is
         # graded now, so a configured domain is watched from the first tick.
-        unrated = [domain["asset_id"] for domain in self.store.list_assets(institution_id, kind="domain", limit=5000) if domain["grade"] == "unrated"]
+        unrated = [domain["asset_id"] for domain in self.store.iter_assets(institution_id, kind="domain") if domain["grade"] == "unrated"]
         if unrated:
             regrade(self.store, institution_id, unrated)
         now = self.clock().isoformat()
         if self.registry.get("official_site"):
-            for domain in self.store.list_assets(institution_id, kind="domain", limit=5000):
+            for domain in self.store.iter_assets(institution_id, kind="domain"):
                 if domain["relation"] == "official" and domain["grade"] in {"O", "A", "B"} and domain["status"] not in {"parked", "hijacked"}:
                     _, created = self.store.upsert_source(institution_id, connector="official_site", target=domain["asset_id"], entity_id=domain["entity_id"], asset_id=domain["asset_id"], origin="recurring", work_class="rotation", interval_seconds=7 * 86400, due_at=now)
                     added += int(created)
         if self.registry.get("recheck"):
-            for page in self.store.list_assets(institution_id, kind="page", limit=5000):
+            for page in self.store.iter_assets(institution_id, kind="page"):
                 if page["platform"] == "website":
                     _, created = self.store.upsert_source(institution_id, connector="recheck", target=page["asset_id"], entity_id=page["entity_id"], asset_id=page["asset_id"], origin="recurring", work_class="recheck", interval_seconds=14 * 86400, due_at=now)
                     added += int(created)

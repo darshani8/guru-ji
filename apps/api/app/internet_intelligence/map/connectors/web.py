@@ -42,25 +42,17 @@ class OfficialSiteConnector:
         domain = context.store.get_asset(context.institution_id, str(source["target"]))
         if domain is None:
             return ConnectorResult(outcome="asset_missing", prune=True)
-        before = {asset["asset_key"]: asset["grade"] for asset in context.store.list_assets(context.institution_id, limit=5000)}
         harvest = await OfficialSiteHarvester(context.fetcher, context.store, max_pages=self.max_pages, conditional=True).harvest(context.institution_id, domain["asset_id"], run_id=context.run_id)
-        after = {asset["asset_key"]: asset for asset in context.store.list_assets(context.institution_id, limit=5000)}
-        raised = [key for key, asset in after.items() if key in before and _rank(asset["grade"]) > _rank(before[key])]
         result = ConnectorResult(outcome=harvest.pages[0]["outcome"] if harvest.pages else "error", new_assets=list(harvest.new_assets), incidents=list(harvest.incidents))
         result.failed = result.outcome in _FAILURES
-        result.touched = {after[key]["asset_id"] for key in [*harvest.accounts, *raised] if key in after} | {domain["asset_id"]}
-        result.yield_count = len(harvest.new_assets) + len(raised)
+        # The harvester regraded what it touched; the engine need not again.
+        result.touched = {domain["asset_id"]}
+        result.yield_count = len(harvest.new_assets) + len(harvest.raised)
         hops = int(source.get("hops") or 0) + 1
         if hops <= context.max_hops:
             result.leads.extend(Lead("lead_page", url, entity_id=domain["entity_id"], hops=hops) for url in harvest.leads[:25])
         result.leads.extend(Lead("feed", url, entity_id=domain["entity_id"], asset_id=domain["asset_id"], hops=hops, work_class="rotation", origin="recurring", interval_seconds=86400) for url in harvest.feeds[:5])
         return result
-
-
-def _rank(grade: str) -> int:
-    from ..store import GRADE_RANK
-
-    return GRADE_RANK.get(grade, 1)
 
 
 def entity_profiles(context: ConnectorContext) -> tuple[list[tuple[dict[str, Any], InstitutionProfile]], list[tuple[dict[str, Any], InstitutionProfile]]]:
@@ -157,9 +149,9 @@ class LeadPageConnector:
         """The anchored official domain this host is a subdomain of, if any."""
 
         best = None
-        for domain in context.store.list_assets(context.institution_id, kind="domain", relation="official", limit=5000):
+        for domain in context.store.iter_assets(context.institution_id, kind="domain", relation="official"):
             parent = domain["asset_key"].removeprefix("web:")
-            if host.endswith("." + parent) and domain["grade"] in {"O", "A", "B"} and domain["status"] not in {"parked", "hijacked", "compromised", "dead"}:
+            if host.endswith("." + parent) and domain["grade"] in {"O", "A", "B"} and domain["status"] not in {"parked", "hijacked", "compromised", "dead", "redirected"}:
                 if best is None or len(parent) > len(best["asset_key"]):
                     best = domain
         return best

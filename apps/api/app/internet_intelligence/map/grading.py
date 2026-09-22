@@ -9,7 +9,8 @@ evidence always gives the same grade and any grade can be explained. The rule:
 * O  - the owner confirmed it (domain-verified accounts file, meta tag, DNS).
 * A  - a live identity link (header, navigation, footer, sameAs, rel=me) on a
        healthy official page, or a configured official domain that is live
-       and healthy. Only in an archived copy: A-arch ("was official then").
+       and healthy (one that now redirects to another host is B, status
+       "redirected"). Only in an archived copy: A-arch ("was official then").
 * B  - one step from an O/A anchor (a hub or account page it links from), an
        official directory record, a reviewer's confirmation, or at least two
        independent channels (vendors) agreeing. A link passes on at most one
@@ -90,6 +91,11 @@ def grade(asset: Mapping[str, Any], evidence: Sequence[Mapping[str, Any]], *, no
     # -- O / A / A-arch / B / C from supporting evidence. An official link that
     # a later clean fetch of the same page no longer found stops counting.
     withdrawn = {str(item.get("source_url")): _when(item.get("observed_at")) for item in refutes if item.get("kind") == "official_link"}
+    latest_integrity = _latest_integrity(ordered)
+    redirected_to = (
+        _detail(latest_integrity[0]).split(":", 1)[1] or "another host"
+        if latest_integrity and latest_integrity[0].get("polarity") == "refutes" and _detail(latest_integrity[0]).startswith("redirects_offsite:") else ""
+    )
     candidates: list[tuple[str, str]] = []
     channels: dict[str, str] = {}
     for item in supports:
@@ -110,7 +116,13 @@ def grade(asset: Mapping[str, Any], evidence: Sequence[Mapping[str, Any]], *, no
             else:
                 candidates.append(("C", label))
         elif kind == "configured_domain":
-            candidates.append(("A", "official domain configured by the institution"))
+            if redirected_to:
+                # The institution configured it, but it now sends visitors to
+                # another host (a move, a lapse, a takeover): it vouches for
+                # nothing until a clean fetch of its own pages says otherwise.
+                candidates.append(("B", f"official domain configured by the institution, now redirecting to {redirected_to[:80]}"))
+            else:
+                candidates.append(("A", "official domain configured by the institution"))
         elif kind == "hub_link":
             source_grade = detail.split(":", 1)[0] if ":" in detail else "C"
             candidates.append((_ONE_STEP_DOWN.get(source_grade, "C"), f"linked from a {source_grade}-graded page ({detail[:80]})"))
@@ -160,6 +172,8 @@ def _status(ordered: Sequence[Mapping[str, Any]], now: datetime) -> str | None:
         verdict = _detail(integrity[0]).split(":", 1)[0]
         if integrity[0].get("polarity") == "refutes" and verdict in {"parked", "hijacked", "compromised"}:
             return verdict
+        if integrity[0].get("polarity") == "refutes" and verdict == "redirects_offsite":
+            return "redirected"
     liveness = [item for item in ordered if item.get("kind") == "liveness"]
     if not liveness:
         return "live" if integrity else None

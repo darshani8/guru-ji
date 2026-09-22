@@ -16,16 +16,17 @@ ALTER TABLE internet_documents ADD COLUMN IF NOT EXISTS queries_json TEXT NOT NU
 ALTER TABLE internet_documents ADD COLUMN IF NOT EXISTS requested_url TEXT;
 ALTER TABLE internet_documents ADD COLUMN IF NOT EXISTS last_run_id TEXT;
 ALTER TABLE monitoring_runs ADD COLUMN IF NOT EXISTS stop_reason TEXT;
+ALTER TABLE internet_documents ADD COLUMN IF NOT EXISTS first_kept_at TEXT;
 -- PostgreSQL row-level security (skipped on SQLite); institution_profiles stays outside it for the scheduler
 ALTER TABLE internet_documents ENABLE ROW LEVEL SECURITY;
 ALTER TABLE internet_documents FORCE ROW LEVEL SECURITY;
-CREATE POLICY internet_documents_tenant_isolation ON internet_documents USING (institution_id = current_setting('app.institution_id', true)) WITH CHECK (institution_id = current_setting('app.institution_id', true));
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'internet_documents' AND policyname = 'internet_documents_tenant_isolation') THEN CREATE POLICY internet_documents_tenant_isolation ON internet_documents USING (institution_id = current_setting('app.institution_id', true)) WITH CHECK (institution_id = current_setting('app.institution_id', true)); END IF; END $$;
 ALTER TABLE monitoring_runs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE monitoring_runs FORCE ROW LEVEL SECURITY;
-CREATE POLICY monitoring_runs_tenant_isolation ON monitoring_runs USING (institution_id = current_setting('app.institution_id', true)) WITH CHECK (institution_id = current_setting('app.institution_id', true));
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'monitoring_runs' AND policyname = 'monitoring_runs_tenant_isolation') THEN CREATE POLICY monitoring_runs_tenant_isolation ON monitoring_runs USING (institution_id = current_setting('app.institution_id', true)) WITH CHECK (institution_id = current_setting('app.institution_id', true)); END IF; END $$;
 ALTER TABLE monitoring_events ENABLE ROW LEVEL SECURITY;
 ALTER TABLE monitoring_events FORCE ROW LEVEL SECURITY;
-CREATE POLICY monitoring_events_tenant_isolation ON monitoring_events USING (institution_id = current_setting('app.institution_id', true)) WITH CHECK (institution_id = current_setting('app.institution_id', true));
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'monitoring_events' AND policyname = 'monitoring_events_tenant_isolation') THEN CREATE POLICY monitoring_events_tenant_isolation ON monitoring_events USING (institution_id = current_setting('app.institution_id', true)) WITH CHECK (institution_id = current_setting('app.institution_id', true)); END IF; END $$;
 ALTER TABLE intelligence_reports ENABLE ROW LEVEL SECURITY;
 ALTER TABLE intelligence_reports FORCE ROW LEVEL SECURITY;
-CREATE POLICY intelligence_reports_tenant_isolation ON intelligence_reports USING (institution_id = current_setting('app.institution_id', true)) WITH CHECK (institution_id = current_setting('app.institution_id', true));
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'intelligence_reports' AND policyname = 'intelligence_reports_tenant_isolation') THEN CREATE POLICY intelligence_reports_tenant_isolation ON intelligence_reports USING (institution_id = current_setting('app.institution_id', true)) WITH CHECK (institution_id = current_setting('app.institution_id', true)); END IF; END $$;
