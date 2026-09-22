@@ -711,6 +711,17 @@ class InstitutionDataStore:
             row["resolution"] = _loads(row.pop("resolution_json", "{}"), {})
         return rows
 
+    def get_review_item(self, institution_id: str, review_id: str) -> dict[str, Any] | None:
+        """One review item of the tenant, decoded like ``list_review_items``; ``None`` when absent."""
+
+        with self._tenant(institution_id):
+            row = self.backend.fetchone("SELECT * FROM review_items WHERE institution_id = ? AND review_id = ?", (institution_id, review_id))
+        if row is None:
+            return None
+        row["payload"] = _loads(row.pop("payload_json", "{}"), {})
+        row["resolution"] = _loads(row.pop("resolution_json", "{}"), {})
+        return row
+
     def resolve_review_item(self, institution_id: str, review_id: str, *, status: str, resolved_by: str, resolution: Mapping[str, Any] | None = None) -> dict[str, Any] | None:
         if status not in {"approved", "rejected"}:
             raise ValueError("review status must be approved or rejected")

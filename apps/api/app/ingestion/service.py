@@ -357,8 +357,8 @@ class IngestionService:
     def resolve_review(self, institution_id: str, review_id: str, *, decision: str, resolved_by: str, note: str = "") -> dict[str, Any]:
         """Resolve a pending duplicate review item; mapping items go through ``apply_mapping``."""
 
-        pending_item = next((entry for entry in self.store.list_review_items(institution_id, status="pending", limit=2000) if entry["review_id"] == review_id), None)
-        if pending_item is None:
+        pending_item = self.store.get_review_item(institution_id, review_id)
+        if pending_item is None or pending_item["status"] != "pending":
             raise KeyError(f"pending review item not found: {review_id}")
         if pending_item["kind"] != "duplicate":
             raise IngestionError("a mapping review is resolved by submitting the mapping decision, not by approving the item")
