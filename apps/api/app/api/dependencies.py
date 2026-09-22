@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from dataclasses import dataclass
 
 from fastapi import Request
@@ -196,7 +198,10 @@ def build_runtime(settings: AppSettings | None = None, *, start_workers: bool = 
     tools = ToolRegistry((*build_college_tools(source_ids), *build_health_tools(source_ids)))
     connectors = _build_connectors(settings)
     store = _build_store(settings)
-    store.prune_retention(settings.audit_retention_days)
+    try:
+        store.prune_retention(settings.audit_retention_days)
+    except Exception as exc:  # noqa: BLE001 - housekeeping must not keep the API from starting
+        logging.getLogger(__name__).warning("audit retention pruning skipped at start-up: %s", exc)
     pdp = _build_pdp(settings)
     exporter = (
         HttpJsonTraceExporter(settings.otel_exporter_endpoint, settings.otel_exporter_timeout_seconds)

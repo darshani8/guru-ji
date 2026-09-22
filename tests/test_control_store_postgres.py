@@ -125,12 +125,16 @@ class _Connection:
 class _FakePsycopg(types.ModuleType):
     def __init__(self) -> None:
         super().__init__("psycopg")
+        self.OperationalError = type("OperationalError", (Exception,), {})
+        self.reject_session_options = False
         self.connections: list[_Connection] = []
         self.rows = types.ModuleType("psycopg.rows")
         self.rows.dict_row = object()
         self.migrated = False
 
     def connect(self, url: str, row_factory: object = None, autocommit: bool = False, **options: object) -> _Connection:
+        if self.reject_session_options and "options" in options:
+            raise self.OperationalError('connection failed: unrecognized configuration parameter "client_connection_check_interval"')
         self.connect_options = dict(options)
         connection = _Connection(autocommit)
         if self.migrated:
@@ -164,12 +168,29 @@ class PostgresControlStoreStartUpTests(unittest.TestCase):
         connection = self.fake.connections[0]
         self.assertTrue(connection.autocommit, "reads must not leave the connection idle in transaction")
         self.assertEqual(self.fake.connect_options.get("connect_timeout"), 15, "a silent TCP connect must fail within seconds")
+        self.assertEqual(self.fake.connect_options.get("options"), "-c client_connection_check_interval=10s", "a backend whose client died must not wait for a lock forever")
         self.assertEqual(self._ddl(connection), [], "ALTER TABLE / CREATE INDEX lock the table even when they change nothing")
         self.assertEqual(connection.statements[0][0], "SET LOCAL lock_timeout = '15s'", "a blocked start-up fails loudly instead of hanging")
         self.assertEqual((connection.transactions, connection.commits, connection.rollbacks), (1, 1, 0))
         self.assertEqual(connection.explicit_commits, 0)
         self.assertFalse(store.in_transaction)
         self.assertIn("INSERT INTO schema_migrations", connection.statements[-1][0])
+
+    def test_a_server_without_the_client_check_is_connected_without_it(self) -> None:
+        self.fake.migrated = True
+        self.fake.reject_session_options = True
+        PostgresControlStore("postgresql://fake/db")
+        self.assertEqual(len(self.fake.connections), 1)
+        self.assertNotIn("options", self.fake.connect_options)
+        self.assertEqual(self.fake.connect_options.get("connect_timeout"), 15)
+
+    def test_pruning_waits_for_locks_only_briefly(self) -> None:
+        self.fake.migrated = True
+        store = PostgresControlStore("postgresql://fake/db")
+        connection = self.fake.connections[0]
+        start = len(connection.statements)
+        store.prune_retention(30)
+        self.assertEqual(connection.statements[start][0], "SET LOCAL lock_timeout = '15s'")
 
     def test_only_what_the_catalog_lacks_is_added(self) -> None:
         self.fake.migrated = True

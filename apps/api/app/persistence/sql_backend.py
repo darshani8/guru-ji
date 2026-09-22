@@ -155,6 +155,36 @@ class SqliteBackend(SqlBackend):
                 self._closed = True
 
 
+# libpq ``options`` applied to every PostgreSQL session. A backend whose
+# client vanished (a container the platform killed while it waited for a
+# lock) otherwise waits for that lock forever, and every later statement on
+# the table queues behind it; with the check the server polls the socket
+# while a statement runs and aborts as soon as the client is gone.
+POSTGRES_SESSION_OPTIONS = "-c client_connection_check_interval=10s"
+
+# A TCP connect that gets no answer (a dropped SYN, an unroutable address
+# family tried first) must fail within seconds, not after the kernel's
+# two-minute retry budget: start-up is silent until the store is ready.
+POSTGRES_CONNECT_TIMEOUT_SECONDS = 15
+
+
+def open_postgres_connection(psycopg_module: Any, database_url: str, **kwargs: Any) -> Any:
+    """Connect with the session options and timeout every store shares.
+
+    ``client_connection_check_interval`` exists from PostgreSQL 14; an older
+    server rejects the option at connect time, so the connection is retried
+    once without it rather than refusing to start.
+    """
+
+    kwargs.setdefault("connect_timeout", POSTGRES_CONNECT_TIMEOUT_SECONDS)
+    try:
+        return psycopg_module.connect(database_url, options=POSTGRES_SESSION_OPTIONS, **kwargs)
+    except psycopg_module.OperationalError as exc:
+        if "client_connection_check_interval" not in str(exc):
+            raise
+        return psycopg_module.connect(database_url, **kwargs)
+
+
 class PostgresBackend(SqlBackend):
     """One psycopg connection that is reopened when the server drops it.
 
@@ -185,13 +215,8 @@ class PostgresBackend(SqlBackend):
         self._connection = self._open_connection()
 
     # -- connection management --------------------------------------------------
-    # A TCP connect that gets no answer (a dropped SYN, an unroutable address
-    # family tried first) must fail within seconds, not after the kernel's
-    # two-minute retry budget: start-up is silent until the store is ready.
-    CONNECT_TIMEOUT_SECONDS = 15
-
     def _open_connection(self) -> Any:
-        return self._psycopg.connect(self._database_url, row_factory=self._dict_row, connect_timeout=self.CONNECT_TIMEOUT_SECONDS)
+        return open_postgres_connection(self._psycopg, self._database_url, row_factory=self._dict_row)
 
     @staticmethod
     def _is_broken(connection: Any) -> bool:
@@ -364,4 +389,4 @@ def open_backend(database_url: str | None) -> SqlBackend:
     raise ValueError("database URL must use sqlite://, postgresql://, or postgres://")
 
 
-__all__ = ["PostgresBackend", "SqlBackend", "SqliteBackend", "open_backend"]
+__all__ = ["POSTGRES_CONNECT_TIMEOUT_SECONDS", "POSTGRES_SESSION_OPTIONS", "PostgresBackend", "SqlBackend", "SqliteBackend", "open_backend", "open_postgres_connection"]
