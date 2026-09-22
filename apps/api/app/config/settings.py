@@ -146,6 +146,8 @@ class AppSettings:
     intelligence_max_queries: int = 8
     intelligence_results_per_query: int = 5
     intelligence_crawler_contact: str = ""
+    intelligence_map_enabled: bool = False
+    intelligence_suppression_key: str | None = field(default=None, repr=False)
     agent_planner: str = "deterministic"
     approval_ttl_seconds: int = 900
     voice_agent_mode: str = "assistant"
@@ -256,6 +258,8 @@ class AppSettings:
             intelligence_max_queries=int(os.getenv("GURU_INTELLIGENCE_MAX_QUERIES", "8")),
             intelligence_results_per_query=int(os.getenv("GURU_INTELLIGENCE_RESULTS_PER_QUERY", "5")),
             intelligence_crawler_contact=os.getenv("GURU_INTELLIGENCE_CRAWLER_CONTACT", "").strip(),
+            intelligence_map_enabled=_bool_env("GURU_INTELLIGENCE_MAP_ENABLED", False),
+            intelligence_suppression_key=os.getenv("GURU_INTELLIGENCE_SUPPRESSION_KEY") or None,
             agent_planner=os.getenv("GURU_AGENT_PLANNER", "deterministic").strip().lower(),
             approval_ttl_seconds=int(os.getenv("GURU_APPROVAL_TTL_SECONDS", "900")),
             voice_agent_mode=os.getenv("GURU_VOICE_AGENT_MODE", "assistant").strip().lower(),
@@ -477,6 +481,8 @@ class AppSettings:
             raise ValueError("GURU_WEB_SEARCH_API_KEY is required when GURU_INTELLIGENCE_SEARCH_PROVIDER=tavily")
         if not 1 <= self.intelligence_max_queries <= 20 or not 1 <= self.intelligence_results_per_query <= 20:
             raise ValueError("intelligence query limits must be between 1 and 20")
+        if self.intelligence_map_enabled and self.environment == "production" and len(self.intelligence_suppression_key or "") < 32:
+            raise ValueError("GURU_INTELLIGENCE_SUPPRESSION_KEY (32+ characters) is required when the internet map is enabled in production")
         if self.intelligence_crawler_contact:
             from ..internet_intelligence.fetch import crawler_user_agent
 

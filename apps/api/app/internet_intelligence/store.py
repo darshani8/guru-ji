@@ -143,6 +143,15 @@ def _rls(state: Mapping[str, tuple[bool, bool]], policies: Iterable[tuple[str, s
     return tuple(statements)
 
 
+def render_sql_migration() -> str:
+    lines = [f"-- Guru Ji internet intelligence schema {SCHEMA_VERSION}", "-- Generated from app.internet_intelligence.store; edit the store, not this file."]
+    lines.extend(" ".join(statement.split()) + ";" for statement in _STATEMENTS)
+    lines.extend(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {column_type};" for table, column, column_type in ADDED_COLUMNS)
+    lines.append("-- PostgreSQL row-level security (skipped on SQLite); institution_profiles stays outside it for the scheduler")
+    lines.extend(statement + ";" for statement in tenant_isolation_statements(_TENANT_TABLES, state={}, policies=()))
+    return "\n".join(lines) + "\n"
+
+
 def _json(value: Any) -> str:
     return json.dumps(value, separators=(",", ":"), ensure_ascii=False, sort_keys=True, default=str)
 
@@ -386,4 +395,4 @@ class IntelligenceStore:
         return rows
 
 
-__all__ = ["ADDED_COLUMNS", "RUN_LOCK_SECONDS", "IntelligenceStore", "SCHEMA_VERSION"]
+__all__ = ["ADDED_COLUMNS", "RUN_LOCK_SECONDS", "IntelligenceStore", "SCHEMA_VERSION", "render_sql_migration"]

@@ -22,6 +22,8 @@ from ..ingestion.registry import ParserRegistry
 from ..ingestion.service import IngestionService
 from ..institution_data.store import InstitutionDataStore
 from ..internet_intelligence.fetch import PublicPageFetcher, crawler_user_agent
+from ..internet_intelligence.map.service import MapService
+from ..internet_intelligence.map.store import MapStore
 from ..internet_intelligence.monitoring import ContinuousMonitor
 from ..internet_intelligence.search import TavilyIntelligenceSearchProvider
 from ..internet_intelligence.service import InternetIntelligenceService
@@ -60,6 +62,7 @@ class PlatformRuntime:
     monitor: ContinuousMonitor | None = None
     sheets: GoogleSheetsCsvConnector | None = None
     worker_store: InstitutionDataStore | None = None
+    intelligence_map: MapService | None = None
 
     def close(self, *, worker_timeout: float = 30.0) -> None:
         stop = getattr(self.jobs, "stop", None)
@@ -171,6 +174,7 @@ def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: P
     database_url = settings.resolved_institution_database_url()
     store = institution_store or InstitutionDataStore(database_url)
     intelligence_store = IntelligenceStore(backend=store.backend)
+    intelligence_map = MapService(MapStore(backend=store.backend, suppression_key=(settings.intelligence_suppression_key or "guru-ji-development-only").encode("utf-8"))) if settings.intelligence_map_enabled else None
     objects = objects or _object_store(settings)
     parsers = ParserRegistry(ocr_engine=_ocr_engine(settings), max_bytes=settings.max_upload_bytes)
     mapping = MappingEngine(threshold=settings.mapping_confidence_threshold, model=model)
@@ -203,7 +207,7 @@ def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: P
     return PlatformRuntime(
         store=store, intelligence_store=intelligence_store, objects=objects, parsers=parsers, ingestion=request.ingestion, data=request.data, reports=request.reports, email=request.email,
         notifications=request.notifications, documents=request.documents, registry=request.registry, gateway=request.gateway, agent=agent, jobs=jobs, intelligence=request.intelligence, monitor=request.monitor,
-        sheets=GoogleSheetsCsvConnector(max_bytes=settings.max_upload_bytes), worker_store=worker_store,
+        sheets=GoogleSheetsCsvConnector(max_bytes=settings.max_upload_bytes), worker_store=worker_store, intelligence_map=intelligence_map,
     )
 
 
