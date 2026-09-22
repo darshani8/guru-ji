@@ -41,6 +41,11 @@ def build_action_tools(services: PlatformServices) -> tuple[PlatformToolSpec, ..
         result = services.notifications.create(context.principal, context.institution_id, recipient_ids=args.get("recipient_ids", []), title=args["title"], body=args["body"], reference_type=args.get("reference_type"), reference_id=args.get("reference_id"))
         return output(context.institution_id, "notifications", result, f"Created {result['count']} notification(s) titled '{args['title']}'.", rows_used=result["count"], records_returned=0)
 
+    def validate_student_update(context: ToolCallContext, args: dict[str, Any]) -> dict[str, Any]:
+        # Runs in the gateway before an approval is created, so a confirmation
+        # is only ever requested for a change the handler will accept.
+        return {**args, "changes": services.data.validate_student_changes(context.institution_id, args["changes"])}
+
     async def update_student_record(context: ToolCallContext, args: dict[str, Any]) -> ToolOutput:
         result = services.data.update_student(context.principal, context.institution_id, args["student_id"], args["changes"], locator=f"agent:{context.request_id}")
         return output(context.institution_id, "students", result, f"Updated {', '.join(result['changed_fields'])} for student {result['student_id']}.", rows_used=1, records_returned=0)
@@ -66,7 +71,7 @@ def build_action_tools(services: PlatformServices) -> tuple[PlatformToolSpec, ..
         ),
         PlatformToolSpec(
             name="update_student_record", group="records", description="Change permitted fields of one student record (semester, section, status, contact details). Requires explicit confirmation before it runs.",
-            required_capability=Capability.RECORDS_WRITE, handler=update_student_record, risk=RiskLevel.HIGH_RISK, returns="{student_id, changed_fields, before, after}",
+            required_capability=Capability.RECORDS_WRITE, handler=update_student_record, validator=validate_student_update, risk=RiskLevel.HIGH_RISK, returns="{student_id, changed_fields, before, after}",
             parameters=(param("student_id", "string", "Student identifier", required=True, max_length=40), param("changes", "object", "Field -> new value", required=True, max_length=10)),
             examples=("Update the phone number of student MBA001 to 9876543210",),
         ),

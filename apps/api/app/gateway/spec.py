@@ -87,6 +87,11 @@ class ToolOutput:
 
 
 ToolHandler = Callable[[ToolCallContext, dict[str, Any]], Awaitable[ToolOutput]]
+# Optional semantic check that runs after schema validation and authorization
+# but before any approval is created or the handler runs. It returns the
+# normalized arguments (the approval digest is computed on them) or raises
+# ValueError with a message safe to show the caller.
+ToolValidator = Callable[[ToolCallContext, dict[str, Any]], dict[str, Any]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +107,7 @@ class PlatformToolSpec:
     allowed_fields: tuple[str, ...] = ()
     audit_policy: str = "metadata_only"
     examples: tuple[str, ...] = ()
+    validator: ToolValidator | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if not self.name.strip() or not self.name.replace("_", "").isalnum() or self.name != self.name.lower():
@@ -218,7 +224,14 @@ def _coerce(spec: ParameterSpec, value: Any) -> Any:
             raise ToolArgumentError(f"{spec.name} must be an object")
         if len(value) > spec.max_length:
             raise ToolArgumentError(f"{spec.name} has too many keys")
-        return dict(value)
+        result: dict[str, Any] = {}
+        for key, item in value.items():
+            if not isinstance(key, str) or not key.strip():
+                raise ToolArgumentError(f"{spec.name} keys must be non-empty strings")
+            if isinstance(item, (Mapping, list, tuple, set, frozenset)):
+                raise ToolArgumentError(f"{spec.name}.{key} must be a scalar value, not a nested object or list")
+            result[key] = item
+        return result
     raise ToolArgumentError(f"unsupported parameter type for {spec.name}")
 
 
@@ -233,4 +246,4 @@ def param(name: str, type_: str, description: str, *, required: bool = False, en
     return ParameterSpec(name, type_, description, required, tuple(enum), minimum, maximum, max_length, items_type, default)
 
 
-__all__ = ["ParameterSpec", "PlatformToolSpec", "RiskLevel", "ToolArgumentError", "ToolCallContext", "ToolHandler", "ToolOutput", "param"]
+__all__ = ["ParameterSpec", "PlatformToolSpec", "RiskLevel", "ToolArgumentError", "ToolCallContext", "ToolHandler", "ToolOutput", "ToolValidator", "param"]

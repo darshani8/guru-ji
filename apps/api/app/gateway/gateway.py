@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from time import monotonic
@@ -28,6 +29,8 @@ from .spec import PlatformToolSpec, RiskLevel, ToolArgumentError, ToolCallContex
 
 ControlStore = InMemoryControlStore | PostgresControlStore | SqliteControlStore
 DEFAULT_APPROVAL_TTL_SECONDS = 900
+HANDLER_FAILURE_MESSAGE = "the tool could not complete because of an internal error; the details have been logged for the administrator"
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -152,13 +155,29 @@ class ToolGateway:
             reason = decision.reason.value if isinstance(decision.reason, DenialReason) else str(decision.reason or "pdp_denied")
             self._audit(context, tool_name, AuditOutcome.DENIED, started=started, decision=decision, extra={"reason": reason})
             return ToolInvocation(tool_name, "denied", denial_reason=_explain(reason, tool), decision_id=decision.decision_id, risk=tool.risk.value)
+        if tool.validator is not None:
+            # Semantic validation (field names, value types, formats) runs before
+            # any approval exists, so a confirmed action can never be burned on
+            # arguments the handler would reject anyway.
+            try:
+                validated = tool.validator(context, validated)
+            except PermissionError as exc:
+                self._audit(context, tool_name, AuditOutcome.DENIED, started=started, decision=decision, extra={"reason": "handler_denied"})
+                return ToolInvocation(tool_name, "denied", denial_reason=str(exc), decision_id=decision.decision_id, risk=tool.risk.value)
+            except (ValueError, KeyError, LookupError) as exc:
+                self._audit(context, tool_name, AuditOutcome.DENIED, started=started, decision=decision, extra={"reason": "invalid_arguments"})
+                return ToolInvocation(tool_name, "invalid_arguments", denial_reason=str(exc)[:500], decision_id=decision.decision_id, risk=tool.risk.value)
+            except Exception:  # noqa: BLE001 - a validator may consult the store; its failures are audited like a handler's
+                logger.exception("tool validator failed: tool=%s request_id=%s principal=%s", tool.name, context.request_id, context.principal.principal_id)
+                self._audit(context, tool_name, AuditOutcome.FAILED, started=started, decision=decision, extra={"reason": "handler_exception"})
+                return ToolInvocation(tool_name, "failed", denial_reason=HANDLER_FAILURE_MESSAGE, decision_id=decision.decision_id, risk=tool.risk.value)
+        approval: dict[str, Any] | None = None
         if tool.risk is RiskLevel.HIGH_RISK:
             approval = self._approval_state(context, tool, validated)
             if approval is None:
                 pending = self.request_approval(context, tool, validated, reason=f"{tool.name} changes institutional records and needs your confirmation")
                 self._audit(context, tool_name, AuditOutcome.PARTIAL, started=started, decision=decision, extra={"reason": "approval_required", "approval_id": pending["approval_id"]})
                 return ToolInvocation(tool_name, "approval_required", summary=pending["reason"], approval=pending, decision_id=decision.decision_id, risk=tool.risk.value)
-            self.store.decide_approval(context.institution_id, approval["approval_id"], status="consumed", decided_by=context.principal.principal_id)
         try:
             output = await tool.handler(context, validated)
         except (PermissionError,) as exc:
@@ -167,6 +186,16 @@ class ToolGateway:
         except (ValueError, KeyError, LookupError) as exc:
             self._audit(context, tool_name, AuditOutcome.FAILED, started=started, decision=decision, extra={"reason": "handler_error"})
             return ToolInvocation(tool_name, "failed", denial_reason=str(exc)[:500], decision_id=decision.decision_id, risk=tool.risk.value)
+        except Exception:  # noqa: BLE001 - every invocation must leave an audit event, whatever the handler raised
+            # Database, object-store and provider errors carry connection details
+            # and raw SQL; they go to the log, never to the caller. The approval
+            # (if any) stays approved so the user does not have to confirm again.
+            logger.exception("tool handler failed: tool=%s request_id=%s principal=%s", tool.name, context.request_id, context.principal.principal_id)
+            self._audit(context, tool_name, AuditOutcome.FAILED, started=started, decision=decision, extra={"reason": "handler_exception"})
+            return ToolInvocation(tool_name, "failed", denial_reason=HANDLER_FAILURE_MESSAGE, decision_id=decision.decision_id, risk=tool.risk.value)
+        if approval is not None:
+            # A high-risk approval is single use, but only a completed action consumes it.
+            self.store.decide_approval(context.institution_id, approval["approval_id"], status="consumed", decided_by=context.principal.principal_id)
         if not isinstance(output, ToolOutput):
             output = ToolOutput(data=output)
         data = strip_student_contact(output.data, context.principal)
@@ -197,4 +226,4 @@ def _explain(reason: str, tool: PlatformToolSpec) -> str:
     return f"policy denied {tool.name} ({reason})"
 
 
-__all__ = ["DEFAULT_APPROVAL_TTL_SECONDS", "ToolGateway", "ToolInvocation", "arguments_digest"]
+__all__ = ["DEFAULT_APPROVAL_TTL_SECONDS", "HANDLER_FAILURE_MESSAGE", "ToolGateway", "ToolInvocation", "arguments_digest"]

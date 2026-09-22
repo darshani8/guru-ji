@@ -17,11 +17,15 @@ from typing import Any
 from ..domain.principals import Capability, InstitutionScope, Principal
 from ..institution_data.store import InstitutionDataStore
 from ..normalization.canonical import PROGRAM_ALIASES
-from ..normalization.cleaning import normalize_program, normalize_semester
+from ..normalization.cleaning import normalize_email, normalize_phone, normalize_program, normalize_semester
 from .field_policy import allowed_faculty_fields, allowed_staff_fields, allowed_student_fields, minimize
 
 MAX_LIST = 500
 STUDENT_UPDATABLE_FIELDS = frozenset({"semester", "section", "status", "phone", "email", "address", "guardian_name", "guardian_phone", "department", "program", "batch"})
+_STUDENT_PHONE_FIELDS = frozenset({"phone", "guardian_phone"})
+_STUDENT_EMAIL_FIELDS = frozenset({"email"})
+_PHONE_PATTERN = re.compile(r"^\+?\d{7,15}$")
+_EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$")
 
 
 class DataAccessDenied(PermissionError):
@@ -89,7 +93,9 @@ class InstitutionDataService:
             "programs": self.known_programs(institution_id)[:50],
             "departments": self.known_departments(institution_id)[:50],
         }
-        if counts.get("attendance"):
+        # Each indicator block is gated by the same capability as the dedicated
+        # tool that exposes it; the overview never widens what a caller may see.
+        if counts.get("attendance") and principal.has_capability(Capability.ATTENDANCE_READ):
             rollup = self.store.attendance_rollup(institution_id)
             percents = [item["attendance_percent"] for item in rollup if item["attendance_percent"] is not None]
             summary["attendance"] = {
@@ -97,15 +103,15 @@ class InstitutionDataService:
                 "average_percent": round(sum(percents) / len(percents), 2) if percents else None,
                 "below_75_percent": sum(1 for value in percents if value < 75),
             }
-        if counts.get("fee"):
+        if counts.get("fee") and principal.has_capability(Capability.FEES_READ):
             fees = self.store.fee_rollup(institution_id)
             summary["fees"] = {
                 "students_with_dues": sum(1 for item in fees if item["balance"] > 0),
                 "total_outstanding": round(sum(item["balance"] for item in fees if item["balance"] > 0), 2),
             }
-        if counts.get("admission"):
+        if counts.get("admission") and principal.has_capability(Capability.ASK_READ_ONLY):
             summary["admissions"] = self.admissions_summary(principal, institution_id)["by_status"]
-        if counts.get("event"):
+        if counts.get("event") and principal.has_capability(Capability.ASK_READ_ONLY):
             summary["upcoming_events"] = len(self.upcoming_events(principal, institution_id, days=30)["events"])
         return summary
 
@@ -151,21 +157,57 @@ class InstitutionDataService:
         result["lineage"] = record.get("lineage")
         return result
 
-    def update_student(self, principal: Principal, institution_id: str, student_id: str, changes: Mapping[str, Any], *, locator: str) -> dict[str, Any]:
-        self._guard(principal, institution_id, Capability.RECORDS_WRITE)
+    def validate_student_changes(self, institution_id: str, changes: Mapping[str, Any]) -> dict[str, Any]:
+        """Normalize a student update before it is approved or applied.
+
+        Every value must be a scalar; text fields are stored as stripped
+        strings so the SQL parameters always match the TEXT columns on
+        PostgreSQL. The result is idempotent: validating it again yields the
+        same mapping, so an approval digest computed on it stays stable.
+        """
+
+        if not isinstance(changes, Mapping) or not changes:
+            raise ValueError("changes must name at least one field to update")
         cleaned: dict[str, Any] = {}
-        for key, value in changes.items():
+        for raw_key, value in changes.items():
+            key = str(raw_key).strip()
             if key not in STUDENT_UPDATABLE_FIELDS:
                 raise ValueError(f"field cannot be updated through the assistant: {key}")
+            if value is None:
+                raise ValueError(f"{key} must have a value; clearing a field is not supported through the assistant")
+            if not isinstance(value, (str, int, float, bool)):
+                raise ValueError(f"{key} must be a single text or numeric value, not a nested object or list")
             if key == "semester":
                 value = self.resolve_semester(value)
                 if value is None:
                     raise ValueError("semester must be a number between 1 and 20")
             elif key == "program":
-                value = self.resolve_program(institution_id, str(value))
-            elif isinstance(value, str):
-                value = value.strip()
+                text = str(value).strip()
+                if not text:
+                    raise ValueError("program must not be blank")
+                value = self.resolve_program(institution_id, text)
+            elif key in _STUDENT_PHONE_FIELDS:
+                digits, _ = normalize_phone(value)
+                if not _PHONE_PATTERN.fullmatch(digits):
+                    raise ValueError(f"{key} must be a phone number of 7 to 15 digits, optionally starting with +")
+                value = digits
+            elif key in _STUDENT_EMAIL_FIELDS:
+                text, _ = normalize_email(value)
+                if len(text) > 254 or not _EMAIL_PATTERN.fullmatch(text):
+                    raise ValueError(f"{key} must be a valid email address")
+                value = text
+            else:
+                value = str(value).strip()
+                if not value:
+                    raise ValueError(f"{key} must not be blank")
+                if len(value) > 500:
+                    raise ValueError(f"{key} exceeds 500 characters")
             cleaned[key] = value
+        return cleaned
+
+    def update_student(self, principal: Principal, institution_id: str, student_id: str, changes: Mapping[str, Any], *, locator: str) -> dict[str, Any]:
+        self._guard(principal, institution_id, Capability.RECORDS_WRITE)
+        cleaned = self.validate_student_changes(institution_id, changes)
         before, after = self.store.update_record_fields(institution_id, "student", student_id.strip().lower(), cleaned, locator=locator)
         allowed = allowed_student_fields(principal)
         return {"student_id": after.get("student_id"), "changed_fields": sorted(cleaned), "before": minimize(before, allowed, cleaned.keys()), "after": minimize(after, allowed, cleaned.keys())}

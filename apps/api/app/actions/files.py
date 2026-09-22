@@ -23,12 +23,31 @@ def _cell_text(value: Any) -> str:
     return str(value)
 
 
+_FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r")
+
+
+def _csv_cell_text(value: Any) -> str:
+    """CSV cells are text; a leading formula trigger is neutralised with a quote.
+
+    Spreadsheet applications evaluate cells that start with ``=``, ``+``, ``-``,
+    ``@``, tab or carriage return as formulas (DDE / HYPERLINK exfiltration).
+    Genuine numbers cannot carry a formula, so they keep their sign.
+    """
+
+    text = _cell_text(value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return text
+    if text.startswith(_FORMULA_TRIGGERS):
+        return "'" + text
+    return text
+
+
 def render_csv(columns: Sequence[str], rows: Sequence[Mapping[str, Any]]) -> bytes:
     buffer = StringIO()
     writer = csv.writer(buffer, lineterminator="\n")
-    writer.writerow(list(columns))
+    writer.writerow([_csv_cell_text(column) for column in columns])
     for row in rows[:MAX_REPORT_ROWS]:
-        writer.writerow([_cell_text(row.get(column)) for column in columns])
+        writer.writerow([_csv_cell_text(row.get(column)) for column in columns])
     return ("﻿" + buffer.getvalue()).encode("utf-8")
 
 
