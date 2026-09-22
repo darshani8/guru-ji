@@ -13,6 +13,31 @@ from ..config.institution_connectors import (
 from ..web_research.domain_allowlist import DEFAULT_ALLOWED_DOMAINS
 
 
+def _origins_from_env(name: str, *extra: str | None) -> tuple[str, ...]:
+    """Collect scheme://host[:port] origins for the browser's connect policy.
+
+    Anything carrying a path, credentials or a non-HTTP(S) scheme is dropped
+    rather than rejected, so a malformed entry cannot widen the policy or take
+    the service down at start-up.
+    """
+
+    candidates = [item.strip() for item in (os.getenv(name) or "").split(",")]
+    candidates.extend(item for item in extra if item)
+    origins: list[str] = []
+    for candidate in candidates:
+        if not candidate:
+            continue
+        parsed = urlparse(candidate.strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            continue
+        if parsed.username or parsed.password:
+            continue
+        origin = f"{parsed.scheme}://{parsed.netloc}"
+        if origin not in origins:
+            origins.append(origin)
+    return tuple(origins)
+
+
 def _bool_env(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -32,6 +57,11 @@ class AppSettings:
     oidc_audience: str | None = None
     oidc_jwks_url: str | None = None
     oidc_algorithms: tuple[str, ...] = ("RS256",)
+    # Origins the browser must reach to complete a login: the issuer's discovery
+    # document and the provider's token endpoint, which for Cognito sits on a
+    # different host than the issuer. Listed explicitly so the page's
+    # Content-Security-Policy can stay closed to everything else.
+    oidc_browser_origins: tuple[str, ...] = ()
     model_provider: str = "deterministic"
     ollama_base_url: str | None = None
     ollama_model_id: str = "llama3.1:8b"
@@ -95,6 +125,7 @@ class AppSettings:
             oidc_audience=os.getenv("GURU_OIDC_AUDIENCE") or None,
             oidc_jwks_url=os.getenv("GURU_OIDC_JWKS_URL") or None,
             oidc_algorithms=tuple(item.strip() for item in os.getenv("GURU_OIDC_ALGORITHMS", "RS256").split(",") if item.strip()),
+            oidc_browser_origins=_origins_from_env("GURU_OIDC_BROWSER_ORIGINS", os.getenv("GURU_OIDC_ISSUER_URL")),
             model_provider=os.getenv("GURU_MODEL_PROVIDER", "deterministic").strip().lower(),
             ollama_base_url=os.getenv("GURU_OLLAMA_BASE_URL") or None,
             ollama_model_id=os.getenv("GURU_OLLAMA_MODEL_ID", "llama3.1:8b").strip(),

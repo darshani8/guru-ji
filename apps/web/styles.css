@@ -268,3 +268,46 @@ button:disabled { cursor: wait; opacity: .68; }
   .message { max-width: 96%; }
   .voice-button { font-size: 11px; }
 }
+
+/* Sign-in gate and account controls */
+.topbar-end { display: flex; align-items: center; gap: 12px; }
+
+.account { display: flex; align-items: center; gap: 8px; }
+.account-name { color: var(--muted); font-size: 11px; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.account-button {
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--navy);
+  border-radius: 8px;
+  padding: 5px 10px;
+  font-size: 11px;
+  font-weight: 650;
+  cursor: pointer;
+}
+.account-button:hover { background: var(--teal-pale); border-color: var(--teal); }
+
+.sign-in-gate {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  padding: 56px 24px;
+  text-align: center;
+}
+.sign-in-title { margin: 0; color: var(--navy); font-size: 20px; font-weight: 850; letter-spacing: -.03em; }
+.sign-in-message { margin: 0; max-width: 420px; color: var(--muted); font-size: 13px; line-height: 1.5; }
+.sign-in-button {
+  margin-top: 4px;
+  border: 0;
+  background: var(--teal);
+  color: #fff;
+  border-radius: 10px;
+  padding: 11px 22px;
+  font-size: 13px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.sign-in-button:hover { background: var(--teal-dark); }
+.sign-in-gate[hidden], .account[hidden] { display: none; }

@@ -14,27 +14,15 @@ const state = {
   pingTimer: null,
 };
 
-const session = {
-  principal: 'demo-user',
-  role: 'student',
-  college: 'college_a',
-  capabilities: ['ask:read_only', 'voice:start'],
-};
-
 const $ = (id) => document.getElementById(id);
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
 state.recognitionSupported = Boolean(SpeechRecognition);
 
+// Identity is owned by auth.js: it sends a verified OIDC ID token when the
+// server asks for one, and only falls back to the fixed demo headers in local
+// development, where the server is the side that decides to accept them.
 function headers(json = false) {
-  const result = {
-    Authorization: 'Bearer dev-token',
-    'X-Demo-Principal': session.principal,
-    'X-Demo-Role': session.role,
-    'X-Demo-College': session.college,
-    'X-Demo-Capabilities': session.capabilities.join(','),
-  };
-  if (json) result['Content-Type'] = 'application/json';
-  return result;
+  return window.GuruAuth.headers(json);
 }
 
 async function api(path, options = {}) {
@@ -147,7 +135,7 @@ async function ask(prompt) {
       method: 'POST',
       body: JSON.stringify({
         prompt: text,
-        institution_scope: { college_id: session.college },
+        institution_scope: { college_id: window.GuruAuth.collegeId() },
         channel: 'text',
       }),
     });
@@ -391,7 +379,7 @@ async function startVoiceSession() {
     await requestMicrophonePermission();
     const data = await api('/v1/voice/sessions', {
       method: 'POST',
-      body: JSON.stringify({ college_id: session.college }),
+      body: JSON.stringify({ college_id: window.GuruAuth.collegeId() }),
     });
     if (data.transport !== 'browser_web_speech_ws' || !data.transport_ticket || !data.websocket_url) {
       throw new Error('The server did not provide a supported live voice transport.');
@@ -507,4 +495,55 @@ window.addEventListener('beforeunload', () => {
   }
 });
 
-loadApiStatus();
+function showSignInGate(message) {
+  $('sign-in-gate').hidden = false;
+  $('chat-history').hidden = true;
+  $('composer-wrap').hidden = true;
+  $('account').hidden = true;
+  if (message) $('sign-in-message').textContent = message;
+}
+
+function showApp() {
+  $('sign-in-gate').hidden = true;
+  $('chat-history').hidden = false;
+  $('composer-wrap').hidden = false;
+  if (window.GuruAuth.mode() === 'oidc') {
+    $('account').hidden = false;
+    $('account-name').textContent = window.GuruAuth.currentUser();
+  }
+}
+
+$('sign-in').addEventListener('click', () => {
+  window.GuruAuth.signIn().catch((error) => showToast(error.message));
+});
+
+$('sign-out').addEventListener('click', () => window.GuruAuth.signOut());
+
+async function start() {
+  let mode;
+  try {
+    mode = await window.GuruAuth.init();
+  } catch (error) {
+    // A failed or refused redirect must not leave the app looking signed in.
+    showSignInGate(error.message);
+    setApiStatus('Signed out', 'error');
+    return;
+  }
+
+  if (mode === 'unavailable') {
+    showSignInGate('This portal is not accepting sign-ins yet. Its identity provider is not configured.');
+    setApiStatus('Sign-in unavailable', 'error');
+    return;
+  }
+
+  if (!window.GuruAuth.isAuthenticated()) {
+    showSignInGate();
+    setApiStatus('Signed out', 'neutral');
+    return;
+  }
+
+  showApp();
+  await loadApiStatus();
+}
+
+start();

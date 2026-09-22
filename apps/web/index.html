@@ -18,11 +18,23 @@
           <span class="brand-subtitle">Institutional assistant</span>
         </div>
       </div>
-      <div id="api-status" class="status neutral" role="status" aria-live="polite">
-        <span class="status-dot"></span>
-        <span id="api-status-label">Connecting…</span>
+      <div class="topbar-end">
+        <div id="api-status" class="status neutral" role="status" aria-live="polite">
+          <span class="status-dot"></span>
+          <span id="api-status-label">Connecting…</span>
+        </div>
+        <div id="account" class="account" hidden>
+          <span id="account-name" class="account-name"></span>
+          <button id="sign-out" type="button" class="account-button">Sign out</button>
+        </div>
       </div>
     </header>
+
+    <section id="sign-in-gate" class="sign-in-gate" hidden>
+      <h1 class="sign-in-title">Sign in to continue</h1>
+      <p id="sign-in-message" class="sign-in-message">This portal is restricted to authorised accounts.</p>
+      <button id="sign-in" type="button" class="sign-in-button">Sign in</button>
+    </section>
 
     <section id="chat-history" class="chat-history" aria-label="Chat history">
       <div class="empty-space"></div>
@@ -35,7 +47,7 @@
       </article>
     </section>
 
-    <section class="composer-wrap" aria-label="Assistant input">
+    <section id="composer-wrap" class="composer-wrap" aria-label="Assistant input">
       <p id="voice-status-line" class="voice-status-line" role="status" aria-live="polite"></p>
       <form id="text-form" class="composer">
         <label class="sr-only" for="text-input">Type a message</label>
@@ -51,6 +63,7 @@
   </main>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/auth.js" defer></script>
   <script src="/app.js" defer></script>
 </body>
 </html>

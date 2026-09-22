@@ -35,6 +35,21 @@ paths:
                 additionalProperties: true
                 type: object
                 title: Response Readiness V1 Health Ready Get
+  /v1/auth/config:
+    get:
+      tags:
+      - auth
+      summary: Describe how the browser client should authenticate
+      operationId: auth_config_v1_auth_config_get
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Auth Config V1 Auth Config Get
   /v1/chat:
     post:
       tags:
