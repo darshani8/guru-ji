@@ -1,0 +1,220 @@
+"""What the connectors share: a bounded client for fixed API endpoints, entity matching and feed parsing."""
+
+from __future__ import annotations
+
+import json
+import re
+import xml.etree.ElementTree as ElementTree
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
+from datetime import datetime
+from typing import Any
+from urllib.parse import urlparse
+
+import httpx
+
+from ...entity_resolution import HIGH, MEDIUM, resolve_entity
+from ...fetch import USER_AGENT
+from ...profile import InstitutionProfile
+from ...relevance import parse_published
+from ....web_research.http_transport import WebPayloadTooLarge, read_bounded
+from .base import ConnectorContext
+
+
+@dataclass(frozen=True, slots=True)
+class ApiResponse:
+    outcome: str  # ok | not_found | blocked | server_error | timeout | too_large | error
+    status: int = 0
+    body: bytes = b""
+
+    @property
+    def ok(self) -> bool:
+        return self.outcome == "ok"
+
+    def json(self) -> Any:
+        try:
+            return json.loads(self.body)
+        except ValueError:
+            return None
+
+    @property
+    def text(self) -> str:
+        return self.body.decode("utf-8", errors="replace")
+
+
+def _outcome(status: int) -> str:
+    if status == 200:
+        return "ok"
+    if status in {404, 410}:
+        return "not_found"
+    if status in {401, 403, 429}:
+        return "blocked"
+    if status >= 500:
+        return "server_error"
+    return "error"
+
+
+@dataclass(slots=True)
+class ApiClient:
+    """Calls documented public APIs at fixed HTTPS endpoints (not pages, so no robots.txt).
+
+    A refusal (401/403/429) is reported as ``blocked`` and never retried here;
+    the engine backs the source off. Redirects are followed only to HTTPS.
+    """
+
+    user_agent: str = USER_AGENT
+    timeout_seconds: float = 10.0
+    max_bytes: int = 2_000_000
+    transport: httpx.AsyncBaseTransport | None = field(default=None, repr=False)
+
+    async def request(self, url: str, *, method: str = "GET", params: Mapping[str, Any] | None = None, headers: Mapping[str, str] | None = None, json_body: Any = None, data: Mapping[str, Any] | None = None) -> ApiResponse:
+        if urlparse(url).scheme != "https":
+            raise ValueError("API endpoints must be HTTPS")
+        current = url
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout_seconds, transport=self.transport, follow_redirects=False) as client:
+                for _ in range(4):
+                    async with client.stream(method, current, params=params, headers={"User-Agent": self.user_agent, "Accept": "application/json, application/xml;q=0.9, */*;q=0.5", **(headers or {})}, json=json_body, data=data) as response:
+                        if response.status_code in {301, 302, 303, 307, 308}:
+                            location = response.headers.get("location", "")
+                            following = str(response.url.join(location)) if location else ""
+                            if urlparse(following).scheme != "https":
+                                return ApiResponse("error", response.status_code)
+                            current, params = following, None
+                            continue
+                        if response.status_code != 200:
+                            return ApiResponse(_outcome(response.status_code), response.status_code)
+                        return ApiResponse("ok", 200, await read_bounded(response, self.max_bytes))
+        except WebPayloadTooLarge:
+            return ApiResponse("too_large")
+        except httpx.TimeoutException:
+            return ApiResponse("timeout")
+        except (httpx.HTTPError, ValueError):
+            return ApiResponse("error")
+        return ApiResponse("error")
+
+
+FAILED_OUTCOMES = frozenset({"blocked", "server_error", "timeout", "too_large", "error", "robots", "login_wall", "not_public", "content_type", "redirect_loop"})
+
+
+# ----------------------------------------------------------------- entities
+def _compact(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def entity_profile(entity: Mapping[str, Any], institution_id: str) -> InstitutionProfile | None:
+    try:
+        return InstitutionProfile(institution_id, str(entity["name"]), (entity.get("locations") or [""])[0], aliases=entity.get("names") or [])
+    except ValueError:
+        return None
+
+
+@dataclass(frozen=True, slots=True)
+class EntityHit:
+    entity: dict[str, Any]
+    score: float
+    rival: float
+
+
+def match_entity(context: ConnectorContext, *, url: str, title: str, text: str, margin: float = 0.2, entity_id: str | None = None) -> EntityHit | None:
+    """The mapped entity a page or result is about, if it names one clearly more strongly than any look-alike."""
+
+    best: tuple[dict[str, Any], float] | None = None
+    rival = 0.0
+    for entity in context.entities():
+        profile = entity_profile(entity, context.institution_id)
+        if profile is None:
+            continue
+        match = resolve_entity(profile, url=url, title=title, text=text)
+        if entity["kind"] == "lookalike":
+            rival = max(rival, match.score)
+        elif (entity_id is None or entity["entity_id"] == entity_id) and match.level in {HIGH, MEDIUM} and (best is None or match.score > best[1]):
+            best = (entity, match.score)
+    if best is None or best[1] < rival + margin:
+        return None
+    return EntityHit(best[0], best[1], rival)
+
+
+def names_entity(entity: Mapping[str, Any], *, handle: str, title: str) -> bool:
+    """Whether an account's own handle or display name carries the entity's name.
+
+    A person who only mentions the college in a bio ("student at BGSCET")
+    does not; the map is about institutional accounts, not people.
+    """
+
+    display = re.split(r"\s+\(@|\s+[•|·-]\s+|\s+on\s+(?:instagram|facebook|x|linkedin|youtube)\b", title, maxsplit=1, flags=re.IGNORECASE)[0]
+    compact_handle, compact_display = _compact(handle), _compact(display)
+    for name in [entity["name"], *(entity.get("names") or [])]:
+        token = _compact(str(name))
+        # Short acronyms ("AIT", "BGS") only count as the whole handle or name;
+        # inside a longer one they match too many other institutions.
+        if token and (token in {compact_handle, compact_display} or (len(token) >= 4 and (token in compact_handle or token in compact_display))):
+            return True
+    return False
+
+
+# -------------------------------------------------------------------- feeds
+@dataclass(frozen=True, slots=True)
+class FeedItem:
+    link: str
+    title: str
+    published_at: datetime | None
+
+
+_DECLARATIONS = re.compile(rb"<!\s*(?:DOCTYPE|ENTITY)", re.IGNORECASE)
+
+
+def parse_feed(body: bytes, *, limit: int = 100) -> tuple[str, list[FeedItem]] | None:
+    """(feed title, items) from RSS 2.0, RSS 1.0 or Atom; None for anything else.
+
+    Documents that declare a DOCTYPE or entities are refused outright, so no
+    entity expansion or external lookup can happen whatever the XML parser.
+    """
+
+    if _DECLARATIONS.search(body):
+        return None
+    try:
+        root = ElementTree.fromstring(body)
+    except ElementTree.ParseError:
+        return None
+
+    def local(tag: str) -> str:
+        return tag.rsplit("}", 1)[-1].lower()
+
+    def child_text(element: ElementTree.Element, *names: str) -> str:
+        for child in element:
+            if local(child.tag) in names and (child.text or "").strip():
+                return (child.text or "").strip()
+        return ""
+
+    items: list[FeedItem] = []
+    title = ""
+    kind = local(root.tag)
+    if kind not in {"rss", "rdf", "feed"}:
+        return None
+    for element in root.iter():
+        name = local(element.tag)
+        if name in {"channel", "feed"} and not title:
+            title = child_text(element, "title")
+        if name not in {"item", "entry"}:
+            continue
+        link = child_text(element, "link")
+        if not link:
+            for child in element:
+                if local(child.tag) == "link" and child.get("href") and child.get("rel", "alternate") == "alternate":
+                    link = str(child.get("href"))
+                    break
+        published = child_text(element, "pubdate", "published", "updated", "date")
+        items.append(FeedItem(link=link[:1000], title=child_text(element, "title")[:300], published_at=parse_published(published)))
+        if len(items) >= limit:
+            break
+    if kind == "feed" and not title:
+        title = child_text(root, "title")
+    return title[:300], items
+
+
+def unique(values: Sequence[str]) -> list[str]:
+    return list(dict.fromkeys(values))
+
+
+__all__ = ["ApiClient", "ApiResponse", "EntityHit", "FAILED_OUTCOMES", "FeedItem", "entity_profile", "match_entity", "names_entity", "parse_feed", "unique"]

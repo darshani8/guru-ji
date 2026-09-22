@@ -22,7 +22,14 @@ from ..ingestion.registry import ParserRegistry
 from ..ingestion.service import IngestionService
 from ..institution_data.store import InstitutionDataStore
 from ..internet_intelligence.fetch import PublicPageFetcher, crawler_user_agent
+from ..internet_intelligence.map.connectors.apis import CourtRecordsConnector, WikidataConnector, YouTubeConnector
+from ..internet_intelligence.map.connectors.archive import WaybackConnector
 from ..internet_intelligence.map.connectors.base import ConnectorRegistry
+from ..internet_intelligence.map.connectors.common import ApiClient
+from ..internet_intelligence.map.connectors.feeds import FeedConnector
+from ..internet_intelligence.map.connectors.hubs import DirectoryConnector, LinkHubConnector
+from ..internet_intelligence.map.connectors.infrastructure import CertificateConnector, DnsConnector, RdapConnector
+from ..internet_intelligence.map.connectors.search import SearchConnector, SpamProbeConnector
 from ..internet_intelligence.map.connectors.web import LeadPageConnector, OfficialSiteConnector, RecheckConnector
 from ..internet_intelligence.map.engine import EngineConfig, MapEngine
 from ..internet_intelligence.map.service import MapService
@@ -175,10 +182,24 @@ def _map_service(settings: AppSettings, backend: Any, intelligence_store: Intell
     return MapService(store, fetcher=fetcher, engine=engine)
 
 
-def map_connectors(settings: AppSettings) -> ConnectorRegistry:
-    """The connectors the map engine may use; each one is off until its settings allow it."""
+def map_connectors(settings: AppSettings, *, transport: Any | None = None) -> ConnectorRegistry:
+    """The connectors the map engine may use.
 
-    return ConnectorRegistry([OfficialSiteConnector(), LeadPageConnector(), RecheckConnector()])
+    The public-page connectors are always on; every other one stays off
+    until GURU_INTELLIGENCE_CONNECTORS names it (and its key is configured).
+    """
+
+    on = set(settings.intelligence_connectors)
+    client = ApiClient(user_agent=crawler_user_agent(settings.intelligence_crawler_contact), timeout_seconds=settings.web_extract_timeout_seconds, transport=transport)
+    return ConnectorRegistry([
+        OfficialSiteConnector(), LeadPageConnector(), RecheckConnector(),
+        SearchConnector(active="search" in on), SpamProbeConnector(active="spam_probe" in on), FeedConnector(active="feed" in on),
+        YouTubeConnector(api_key=settings.intelligence_youtube_api_key or "", active="youtube" in on, client=client),
+        WikidataConnector(active="wikidata" in on, client=client),
+        CourtRecordsConnector(api_token=settings.intelligence_indiankanoon_token or "", active="court_records" in on, client=client),
+        CertificateConnector(active="certificates" in on, client=client), RdapConnector(active="rdap" in on, client=client), DnsConnector(active="dns" in on, client=client),
+        WaybackConnector(active="wayback" in on, client=client), LinkHubConnector(active="link_hub" in on), DirectoryConnector(active="directory" in on),
+    ])
 
 
 def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: PolicyDecisionPoint, tracer: TraceRecorder, model: TextModel | None, institution_store: InstitutionDataStore | None = None, objects: ObjectStore | None = None, search_provider: Any | None = None, start_workers: bool = False) -> PlatformRuntime:

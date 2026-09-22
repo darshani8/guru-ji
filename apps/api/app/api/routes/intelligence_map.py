@@ -37,6 +37,12 @@ class MapInstitutionBody(BaseModel):
     institution_id: str | None = Field(default=None, max_length=128)
 
 
+class SourceBody(BaseModel):
+    connector: str = Field(min_length=1, max_length=40)
+    target: str = Field(min_length=1, max_length=1000)
+    institution_id: str | None = Field(default=None, max_length=128)
+
+
 def map_service(request: Request):
     platform = platform_from_request(request)
     if platform.intelligence_map is None:
@@ -199,6 +205,19 @@ async def sources(request: Request, institution_id: str | None = None, status: s
         return {"sources": service.sources(principal, target, status=status, connector=connector, limit=min(max(limit, 1), 1000))}
     except (ValueError, PermissionError) as exc:
         raise translate(exc) from exc
+
+
+@router.post("/sources", summary="Point a page-reading connector at a URL (a directory or regulator listing)")
+async def add_source(request: Request, body: SourceBody) -> dict[str, Any]:
+    service = map_service(request)
+    principal = require_principal(request, Capability.INTELLIGENCE_MANAGE)
+    target = resolve_institution(principal, body.institution_id)
+    try:
+        result = service.add_source(principal, target, connector=body.connector, target=body.target)
+    except (ValueError, PermissionError) as exc:
+        raise translate(exc) from exc
+    audit_map_action(request, principal, "add_source", metadata={"institution_id": target, "connector": body.connector, "created": bool(result["created"])})
+    return result
 
 
 @router.get("/connectors", summary="The connectors the engine may use and how each reaches the web")

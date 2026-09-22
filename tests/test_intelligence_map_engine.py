@@ -60,8 +60,8 @@ class Site:
         if request.url.path == "/robots.txt":
             return httpx.Response(404, request=request)
         self.seen.append((url, request.headers.get("if-none-match")))
-        status, body = self.pages.get(url, (404, ""))
-        headers = {"content-type": "text/html; charset=utf-8"}
+        status, body, *content_type = self.pages.get(url, (404, ""))
+        headers = {"content-type": content_type[0] if content_type else "text/html; charset=utf-8"}
         if self.etags and status == 200:
             tag = f'"{abs(hash(body)) % 10**8}"'
             if request.headers.get("if-none-match") == tag:

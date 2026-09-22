@@ -140,9 +140,10 @@ class MapEngine:
         run_id = self.store.try_start_map_run(institution_id, kind="tick", lock_seconds=self.config.lock_seconds)
         if run_id is None:
             return {"institution_id": institution_id, "run_id": None, "skipped": "another tick is in progress for this institution"}
-        counts = {"sources": 0, "new_assets": 0, "raised": 0, "leads": 0, "deferred_budget": 0, "failed": 0, "pruned": 0, "incidents": 0, "expired": 0, "watches_added": 0}
+        counts = {"sources": 0, "new_assets": 0, "raised": 0, "leads": 0, "deferred_budget": 0, "failed": 0, "pruned": 0, "incidents": 0, "review": 0, "expired": 0, "watches_added": 0}
         spend: dict[str, float] = {}
         incidents: list[dict[str, Any]] = []
+        review: list[dict[str, Any]] = []
         try:
             profile = self.profile_loader(institution_id) if self.profile_loader else None
             counts["watches_added"] = self.ensure_recurring(institution_id, profile)
@@ -170,7 +171,8 @@ class MapEngine:
                 counts["raised"] += max(0, result.yield_count - len(result.new_assets))
                 counts["failed"] += int(result.failed)
                 touched |= result.touched
-                incidents.extend(result.incidents)
+                incidents.extend({**incident, "connector": connector.name, "source_id": source["source_id"]} for incident in result.incidents)
+                review.extend({**item, "connector": connector.name, "source_id": source["source_id"]} for item in result.review)
                 for lead in result.leads:
                     counts["leads"] += int(self._add_lead(institution_id, lead))
                 next_due = (self.clock() + timedelta(seconds=self._next_interval(source, result))).isoformat()
@@ -185,13 +187,17 @@ class MapEngine:
             if touched:
                 regrade(self.store, institution_id, sorted(touched))
             counts["incidents"] = len(incidents)
+            counts["review"] = len(review)
             stop_reason = "budget" if counts["deferred_budget"] else ("dry" if counts["sources"] and not (counts["new_assets"] or counts["raised"]) else ("idle" if not counts["sources"] else "completed"))
             metrics = map_metrics(self.store, institution_id)
             self.store.finish_map_run(institution_id, run_id, status="succeeded", stop_reason=stop_reason, spend=spend, counts=counts, metrics=metrics)
         except Exception as exc:
             self.store.finish_map_run(institution_id, run_id, status="failed", counts=counts, spend=spend, error=str(exc)[:300])
             raise
-        return {"institution_id": institution_id, "run_id": run_id, "stop_reason": stop_reason, "counts": counts, "spend": spend, "incidents": incidents, "metrics": {key: metrics[key] for key in ("assets", "verified", "holdout_recall", "canary_leaks")}}
+        return {
+            "institution_id": institution_id, "run_id": run_id, "stop_reason": stop_reason, "counts": counts, "spend": spend, "incidents": incidents, "review": review,
+            "metrics": {key: metrics[key] for key in ("assets", "verified", "holdout_recall", "canary_leaks")},
+        }
 
     async def tick_all(self, institutions: list[str]) -> list[dict[str, Any]]:
         results: list[dict[str, Any]] = []

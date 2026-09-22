@@ -42,7 +42,7 @@ class SearchHit:
 class IntelligenceSearchProvider(Protocol):
     provider_name: str
 
-    async def search(self, query: str, *, max_results: int, days: int | None = None, topic: str = "general") -> tuple[SearchHit, ...]: ...
+    async def search(self, query: str, *, max_results: int, days: int | None = None, topic: str = "general", include_domains: Sequence[str] = ()) -> tuple[SearchHit, ...]: ...
 
 
 @dataclass(slots=True)
@@ -53,10 +53,13 @@ class StaticSearchProvider:
     provider_name: str = "static"
     calls: list[str] = field(default_factory=list)
 
-    async def search(self, query: str, *, max_results: int, days: int | None = None, topic: str = "general") -> tuple[SearchHit, ...]:
+    async def search(self, query: str, *, max_results: int, days: int | None = None, topic: str = "general", include_domains: Sequence[str] = ()) -> tuple[SearchHit, ...]:
         self.calls.append(query)
         terms = [term.strip('"').lower() for term in query.split() if len(term.strip('"')) > 2]
         matched = [hit for hit in self.hits if any(term in f"{hit.title} {hit.snippet} {hit.url}".lower() for term in terms)]
+        if include_domains:
+            hosts = [(urlparse(hit.url).hostname or "").lower() for hit in matched]
+            matched = [hit for hit, host in zip(matched, hosts) if any(host == domain or host.endswith("." + domain) for domain in include_domains)]
         return tuple(matched[:max_results])
 
 
@@ -100,7 +103,7 @@ class TavilyIntelligenceSearchProvider:
                 continue
         return tuple(hits)
 
-    async def search(self, query: str, *, max_results: int, days: int | None = None, topic: str = "general") -> tuple[SearchHit, ...]:
+    async def search(self, query: str, *, max_results: int, days: int | None = None, topic: str = "general", include_domains: Sequence[str] = ()) -> tuple[SearchHit, ...]:
         if not query.strip() or len(query) > 400:
             raise ValueError("query must be 1 to 400 characters")
         payload: dict[str, Any] = {
@@ -111,6 +114,8 @@ class TavilyIntelligenceSearchProvider:
             payload["days"] = max(1, min(int(days), 365))
         if self.exclude_domains:
             payload["exclude_domains"] = list(self.exclude_domains)
+        if include_domains:
+            payload["include_domains"] = [domain for domain in include_domains if domain][:20]
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds, transport=self.transport, follow_redirects=False) as client:
                 async with client.stream("POST", self.endpoint, headers={"Accept": "application/json", "Content-Type": "application/json"}, json=payload) as response:

@@ -42,6 +42,12 @@ class IntegrityReport:
         return self.status == CLEAN
 
 
+def spam_terms(text: str) -> list[str]:
+    """The SEO-spam words in a piece of text (a search result's title and snippet)."""
+
+    return sorted({match.group(0).lower() for match in _SPAM.finditer(text)})
+
+
 def assess(page: PageStructure, raw_html: str = "") -> IntegrityReport:
     signals: list[str] = []
     if _PARKED.search(raw_html) or _PARKED.search(page.text[:5000]) or (len(raw_html) < 400 and "/lander" in raw_html):
@@ -63,4 +69,4 @@ def assess(page: PageStructure, raw_html: str = "") -> IntegrityReport:
     return IntegrityReport(CLEAN, signals)
 
 
-__all__ = ["CLEAN", "COMPROMISED", "HIJACKED", "PARKED", "SUSPECT", "IntegrityReport", "assess"]
+__all__ = ["CLEAN", "COMPROMISED", "HIJACKED", "PARKED", "SUSPECT", "IntegrityReport", "assess", "spam_terms"]

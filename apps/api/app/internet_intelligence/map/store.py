@@ -212,7 +212,11 @@ _STATEMENTS: tuple[str, ...] = (
     )
     """,
 )
-ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = ()
+# Columns added after the table first existed; created where missing at start-up.
+ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("intel_assets", "last_activity_at", "TEXT"),
+    ("intel_assets", "registration_expires_at", "TEXT"),
+)
 TENANT_TABLES: tuple[str, ...] = ("intel_entities", "intel_assets", "intel_evidence", "intel_gold_items", "intel_suppression", "intel_map_runs", "intel_sources", "intel_quota")
 GLOBAL_TABLES: tuple[str, ...] = ("intel_budget_ledger", "intel_fetch_state")
 SOURCE_CLASSES = frozenset({"rotation", "recheck", "explore"})
@@ -585,11 +589,20 @@ class MapStore(MapStoreScheduling):
             else:
                 self.backend.execute("UPDATE intel_assets SET status = ?, updated_at = ? WHERE institution_id = ? AND asset_id = ?", (status, now_iso(), institution_id, asset_id))
 
-    def set_observation(self, institution_id: str, asset_id: str, *, platform_id: str | None = None, followers: int | None = None, followers_source: str | None = None) -> None:
+    def set_observation(
+        self, institution_id: str, asset_id: str, *, platform_id: str | None = None, followers: int | None = None, followers_source: str | None = None,
+        last_activity_at: str | None = None, registration_expires_at: str | None = None,
+    ) -> None:
+        """Record what a platform or registry reports about an asset; values left None are kept."""
+
         with self._tenant(institution_id):
             self.backend.execute(
-                "UPDATE intel_assets SET platform_id = COALESCE(?, platform_id), followers = COALESCE(?, followers), followers_source = CASE WHEN ? IS NULL THEN followers_source ELSE ? END, followers_at = CASE WHEN ? IS NULL THEN followers_at ELSE ? END, updated_at = ? WHERE institution_id = ? AND asset_id = ?",
-                (platform_id, followers, followers, followers_source, followers, now_iso(), now_iso(), institution_id, asset_id),
+                # The follower fields move together; a Python-side flag decides,
+                # because PostgreSQL cannot type a bare "? IS NULL" probe.
+                "UPDATE intel_assets SET platform_id = COALESCE(?, platform_id), followers = COALESCE(?, followers), followers_source = CASE WHEN ? = 1 THEN ? ELSE followers_source END, "
+                "followers_at = CASE WHEN ? = 1 THEN ? ELSE followers_at END, last_activity_at = COALESCE(?, last_activity_at), registration_expires_at = COALESCE(?, registration_expires_at), updated_at = ? "
+                "WHERE institution_id = ? AND asset_id = ?",
+                (platform_id, followers, int(followers is not None), followers_source, int(followers is not None), now_iso(), last_activity_at, registration_expires_at, now_iso(), institution_id, asset_id),
             )
 
     # ---------------------------------------------------------------- evidence

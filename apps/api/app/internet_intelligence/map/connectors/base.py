@@ -51,6 +51,9 @@ class ConnectorResult:
     new_assets: list[str] = field(default_factory=list)
     leads: list[Lead] = field(default_factory=list)
     incidents: list[dict[str, Any]] = field(default_factory=list)
+    # Items a person has to look at before anything is concluded (a possible
+    # impersonator, a court record); they never change a grade on their own.
+    review: list[dict[str, Any]] = field(default_factory=list)
     etag: str | None = None
     last_modified: str | None = None
     cost: float | None = None  # actual units, when different from the estimate

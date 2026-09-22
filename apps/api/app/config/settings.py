@@ -45,6 +45,12 @@ def _bool_env(name: str, default: bool) -> bool:
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
+# Connectors the internet map may use beyond the always-on public-page ones
+# (official_site, lead_page, recheck); each stays off until named in
+# GURU_INTELLIGENCE_CONNECTORS.
+OPTIONAL_CONNECTORS: tuple[str, ...] = ("search", "spam_probe", "feed", "youtube", "wikidata", "court_records", "certificates", "rdap", "dns", "wayback", "link_hub", "directory")
+
+
 @dataclass(frozen=True, slots=True)
 class AppSettings:
     app_name: str = "guru-ji-api"
@@ -151,6 +157,9 @@ class AppSettings:
     intelligence_budgets: str = ""
     intelligence_tenant_share: float = 0.5
     intelligence_sources_per_tick: int = 25
+    intelligence_connectors: tuple[str, ...] = ()
+    intelligence_youtube_api_key: str | None = field(default=None, repr=False)
+    intelligence_indiankanoon_token: str | None = field(default=None, repr=False)
     agent_planner: str = "deterministic"
     approval_ttl_seconds: int = 900
     voice_agent_mode: str = "assistant"
@@ -266,6 +275,9 @@ class AppSettings:
             intelligence_budgets=os.getenv("GURU_INTELLIGENCE_BUDGETS", "").strip(),
             intelligence_tenant_share=float(os.getenv("GURU_INTELLIGENCE_TENANT_SHARE", "0.5")),
             intelligence_sources_per_tick=int(os.getenv("GURU_INTELLIGENCE_SOURCES_PER_TICK", "25")),
+            intelligence_connectors=tuple(item.strip().lower() for item in os.getenv("GURU_INTELLIGENCE_CONNECTORS", "").split(",") if item.strip()),
+            intelligence_youtube_api_key=os.getenv("GURU_INTELLIGENCE_YOUTUBE_API_KEY") or None,
+            intelligence_indiankanoon_token=os.getenv("GURU_INTELLIGENCE_INDIANKANOON_TOKEN") or None,
             agent_planner=os.getenv("GURU_AGENT_PLANNER", "deterministic").strip().lower(),
             approval_ttl_seconds=int(os.getenv("GURU_APPROVAL_TTL_SECONDS", "900")),
             voice_agent_mode=os.getenv("GURU_VOICE_AGENT_MODE", "assistant").strip().lower(),
@@ -510,6 +522,15 @@ class AppSettings:
             raise ValueError("GURU_INTELLIGENCE_TENANT_SHARE must be greater than 0 and at most 1")
         if not 1 <= self.intelligence_sources_per_tick <= 500:
             raise ValueError("GURU_INTELLIGENCE_SOURCES_PER_TICK must be between 1 and 500")
+        unknown = sorted(set(self.intelligence_connectors) - set(OPTIONAL_CONNECTORS))
+        if unknown:
+            raise ValueError(f"GURU_INTELLIGENCE_CONNECTORS names unknown connectors: {', '.join(unknown)} (known: {', '.join(OPTIONAL_CONNECTORS)})")
+        if {"search", "spam_probe"} & set(self.intelligence_connectors) and self.intelligence_search_provider == "disabled":
+            raise ValueError("the search and spam_probe connectors need GURU_INTELLIGENCE_SEARCH_PROVIDER")
+        if "youtube" in self.intelligence_connectors and not self.intelligence_youtube_api_key:
+            raise ValueError("the youtube connector needs GURU_INTELLIGENCE_YOUTUBE_API_KEY")
+        if "court_records" in self.intelligence_connectors and not self.intelligence_indiankanoon_token:
+            raise ValueError("the court_records connector needs GURU_INTELLIGENCE_INDIANKANOON_TOKEN")
         if self.intelligence_map_enabled and self.environment == "production" and len(self.intelligence_suppression_key or "") < 32:
             raise ValueError("GURU_INTELLIGENCE_SUPPRESSION_KEY (32+ characters) is required when the internet map is enabled in production")
         if self.intelligence_crawler_contact:

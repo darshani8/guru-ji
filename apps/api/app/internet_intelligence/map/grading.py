@@ -14,8 +14,12 @@ evidence always gives the same grade and any grade can be explained. The rule:
        official directory record, a reviewer's confirmation, or at least two
        independent channels (vendors) agreeing. A link passes on at most one
        grade less than its source, so nothing becomes A second-hand.
-* C  - a single channel: one search snippet, one directory mention, or an
-       imported claim nobody has re-verified.
+* C  - a single channel: one search snippet, one community record
+       (Wikidata, a user-made directory profile), one directory mention, or
+       an imported claim nobody has re-verified.
+
+A live, healthy subdomain of an official domain is one step below its
+parent (only the domain's owner controls its DNS).
 
 "Blocked" (a login wall or 403) is not "dead": it changes the status, never
 the grade. A snippet never refreshes "last verified".
@@ -33,7 +37,7 @@ from .store import GRADE_RANK
 SCORER_VERSION = "grader-1"
 DEAD_CONFIRMATION = timedelta(hours=24)
 # Kinds whose channel counts toward the two-independent-channels rule.
-_CORROBORATING = frozenset({"search_snippet", "directory_record", "hub_link", "reviewer_confirm", "backlink", "api_identity"})
+_CORROBORATING = frozenset({"search_snippet", "directory_record", "community_record", "hub_link", "reviewer_confirm", "backlink", "api_identity"})
 _ONE_STEP_DOWN = {"O": "A", "A": "B", "A-arch": "C", "B": "C", "C": "C"}
 
 
@@ -110,6 +114,11 @@ def grade(asset: Mapping[str, Any], evidence: Sequence[Mapping[str, Any]], *, no
         elif kind == "hub_link":
             source_grade = detail.split(":", 1)[0] if ":" in detail else "C"
             candidates.append((_ONE_STEP_DOWN.get(source_grade, "C"), f"linked from a {source_grade}-graded page ({detail[:80]})"))
+        elif kind == "subdomain" and via == "live":
+            # Only a domain's owner can point its subdomains somewhere, so a
+            # live, healthy subdomain is one step from its parent's grade.
+            parent = detail.split(":", 1)[0]
+            candidates.append((_ONE_STEP_DOWN.get(parent, "C"), f"live subdomain of a {parent}-graded domain ({detail[:80]})"))
         elif kind == "directory_record":
             # A regulator's listing of an institution's website (AICTE, UGC,
             # NIRF, NAAC, NMC, VTU) anchors a domain; other directories corroborate.
@@ -119,7 +128,7 @@ def grade(asset: Mapping[str, Any], evidence: Sequence[Mapping[str, Any]], *, no
             candidates.append(("B", f"confirmed by a reviewer ({detail[:80]})"))
         elif kind == "api_identity":
             candidates.append(("C", f"platform API identity ({detail[:80]})"))
-        elif kind in {"search_snippet", "backlink"}:
+        elif kind in {"search_snippet", "backlink", "community_record"}:
             candidates.append(("C", f"{kind.replace('_', ' ')} ({detail[:80]})"))
         elif kind == "imported_claim":
             candidates.append(("C", "unverified imported claim"))

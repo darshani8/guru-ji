@@ -53,7 +53,7 @@ class OfficialSiteConnector:
         hops = int(source.get("hops") or 0) + 1
         if hops <= context.max_hops:
             result.leads.extend(Lead("lead_page", url, entity_id=domain["entity_id"], hops=hops) for url in harvest.leads[:25])
-        result.leads.extend(Lead("feed", url, entity_id=domain["entity_id"], hops=hops, work_class="rotation", origin="recurring", interval_seconds=6 * 3600) for url in harvest.feeds[:5])
+        result.leads.extend(Lead("feed", url, entity_id=domain["entity_id"], asset_id=domain["asset_id"], hops=hops, work_class="rotation", origin="recurring", interval_seconds=86400) for url in harvest.feeds[:5])
         return result
 
 
@@ -114,6 +114,9 @@ class LeadPageConnector:
         structure = parse_structure(retrieval.text, retrieval.url)
         if assess(structure, retrieval.text).status != CLEAN:
             return ConnectorResult(outcome="unhealthy", prune=True)
+        parent = self._official_parent(context, host_ref.key.removeprefix("web:"))
+        if parent is not None and (urlparse(retrieval.url).hostname or "").lower().removeprefix("www.") == host_ref.key.removeprefix("web:"):
+            return self._subdomain(context, host_ref, parent, retrieval.url, target)
         ours, lookalikes = entity_profiles(context)
         best_entity, best_score = None, 0.0
         for entity, profile in ours:
@@ -147,6 +150,28 @@ class LeadPageConnector:
             result.notes.append("candidate site recorded; it anchors nothing until verified")
         regrade(context.store, context.institution_id, sorted(result.touched))
         return result
+
+
+    @staticmethod
+    def _official_parent(context: ConnectorContext, host: str) -> dict[str, Any] | None:
+        """The anchored official domain this host is a subdomain of, if any."""
+
+        best = None
+        for domain in context.store.list_assets(context.institution_id, kind="domain", relation="official", limit=5000):
+            parent = domain["asset_key"].removeprefix("web:")
+            if host.endswith("." + parent) and domain["grade"] in {"O", "A", "B"} and domain["status"] not in {"parked", "hijacked", "compromised", "dead"}:
+                if best is None or len(parent) > len(best["asset_key"]):
+                    best = domain
+        return best
+
+    def _subdomain(self, context: ConnectorContext, host_ref: Any, parent: dict[str, Any], final_url: str, target: str) -> ConnectorResult:
+        if context.store.is_suppressed(context.institution_id, host_ref.key):
+            return ConnectorResult(outcome="suppressed", prune=True)
+        asset_id, created = context.store.upsert_asset(context.institution_id, host_ref, entity_id=parent["entity_id"], relation="official", note=f"subdomain of {parent['handle']}")
+        context.store.add_evidence(context.institution_id, asset_id=asset_id, kind="subdomain", detail=f"{parent['grade']}:{parent['handle']}", source_url=final_url, source_asset_id=parent["asset_id"], channel="dns", observed_via="live", run_id=context.run_id)
+        context.store.add_evidence(context.institution_id, asset_id=asset_id, kind="liveness", detail="ok:200", source_url=final_url, channel="fetch", observed_via="live", run_id=context.run_id)
+        regrade(context.store, context.institution_id, [asset_id])
+        return ConnectorResult(outcome="ok", touched={asset_id}, new_assets=[host_ref.key] if created else [], yield_count=int(created))
 
 
 @dataclass(slots=True)

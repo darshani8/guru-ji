@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlparse
 
 from ...domain.principals import Capability, InstitutionScope, Principal
 from ..fetch import PublicPageFetcher
@@ -19,6 +20,7 @@ from .store import MapStore
 
 MAX_SEED_BYTES = 2_000_000
 MAX_HARVEST_DOMAINS = 10
+MANUAL_SOURCE_CONNECTORS = frozenset({"directory", "lead_page", "feed"})
 
 
 @dataclass(slots=True)
@@ -135,6 +137,20 @@ class MapService:
         self.guard(principal, institution_id, Capability.INTELLIGENCE_MANAGE)
         return self.store.list_sources(institution_id, status=status, connector=connector, limit=limit)
 
+    def add_source(self, principal: Principal, institution_id: str, *, connector: str, target: str) -> dict[str, Any]:
+        """A manager points a page-reading connector at a URL (a regulator's listing, a directory page)."""
+
+        self.guard(principal, institution_id, Capability.INTELLIGENCE_MANAGE)
+        if connector not in MANUAL_SOURCE_CONNECTORS:
+            raise ValueError(f"sources can be added by hand only for {', '.join(sorted(MANUAL_SOURCE_CONNECTORS))}")
+        parsed = urlparse(target.strip())
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or len(target) > 1000:
+            raise ValueError("the target must be a public http(s) URL")
+        if self.store.is_suppressed(institution_id, target.strip()):
+            raise ValueError("that address is suppressed for this institution")
+        source_id, created = self.store.upsert_source(institution_id, connector=connector, target=target.strip(), origin="seed", work_class="explore" if connector == "lead_page" else "rotation", hops=0, interval_seconds=30 * 86400)
+        return {"source_id": source_id, "created": created, "enabled": bool(self.engine and self.engine.registry.get(connector))}
+
     def connectors(self, principal: Principal, institution_id: str) -> list[dict[str, Any]]:
         self.guard(principal, institution_id, Capability.INTELLIGENCE_READ)
         return self.engine.registry.describe() if self.engine else []
@@ -146,4 +162,4 @@ class MapService:
         return {"day": day, "platform": self.store.spend(day=day), "institution": self.store.tenant_spend(institution_id, day=day), "caps": caps, "tenant_caps": {key: value * share for key, value in caps.items()}}
 
 
-__all__ = ["MAX_HARVEST_DOMAINS", "MAX_SEED_BYTES", "MapService"]
+__all__ = ["MANUAL_SOURCE_CONNECTORS", "MAX_HARVEST_DOMAINS", "MAX_SEED_BYTES", "MapService"]

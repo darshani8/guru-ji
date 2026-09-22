@@ -17,6 +17,8 @@ CREATE INDEX IF NOT EXISTS idx_intel_sources_due ON intel_sources(institution_id
 CREATE TABLE IF NOT EXISTS intel_quota ( institution_id TEXT NOT NULL, day TEXT NOT NULL, connector TEXT NOT NULL, units REAL NOT NULL DEFAULT 0, calls INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(institution_id, day, connector) );
 CREATE TABLE IF NOT EXISTS intel_budget_ledger ( day TEXT NOT NULL, connector TEXT NOT NULL, units REAL NOT NULL DEFAULT 0, calls INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(day, connector) );
 CREATE TABLE IF NOT EXISTS intel_fetch_state ( url_sha256 TEXT PRIMARY KEY, etag TEXT, last_modified TEXT, outcome TEXT NOT NULL, content_sha256 TEXT, fetched_at TEXT NOT NULL );
+ALTER TABLE intel_assets ADD COLUMN IF NOT EXISTS last_activity_at TEXT;
+ALTER TABLE intel_assets ADD COLUMN IF NOT EXISTS registration_expires_at TEXT;
 -- PostgreSQL row-level security (skipped on SQLite)
 ALTER TABLE intel_entities ENABLE ROW LEVEL SECURITY;
 ALTER TABLE intel_entities FORCE ROW LEVEL SECURITY;

@@ -234,8 +234,14 @@ class OfficialSiteHarvester:
         return list(dict.fromkeys(out))
 
 
+def identity_links(structure: PageStructure, page_url: str) -> list[tuple[str, str]]:
+    """(href, position) of the links a page uses to declare its own accounts."""
+
+    return OfficialSiteHarvester._identity_links(structure, page_url)
+
+
 def best(grades: list[str]) -> str:
     return max(grades, key=lambda value: GRADE_RANK.get(value, 1)) if grades else "unrated"
 
 
-__all__ = ["ANCHORING_GRADES", "HarvestResult", "OfficialSiteHarvester"]
+__all__ = ["ANCHORING_GRADES", "HarvestResult", "OfficialSiteHarvester", "identity_links"]
