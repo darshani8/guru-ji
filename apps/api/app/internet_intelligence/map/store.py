@@ -144,9 +144,79 @@ _STATEMENTS: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_intel_map_runs_institution ON intel_map_runs(institution_id, started_at)",
+    # At most one running tick per institution, enforced by the database: two
+    # workers racing past the NOT EXISTS check cannot both insert.
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_intel_map_runs_one_tick ON intel_map_runs(institution_id, kind) WHERE status = 'running' AND kind = 'tick'",
+    """
+    CREATE TABLE IF NOT EXISTS intel_sources (
+        source_id TEXT PRIMARY KEY,
+        institution_id TEXT NOT NULL,
+        connector TEXT NOT NULL,
+        target TEXT NOT NULL,
+        entity_id TEXT,
+        asset_id TEXT,
+        topic TEXT NOT NULL DEFAULT '',
+        origin TEXT NOT NULL DEFAULT 'seed',
+        work_class TEXT NOT NULL DEFAULT 'rotation',
+        hops INTEGER NOT NULL DEFAULT 0,
+        status TEXT NOT NULL DEFAULT 'active',
+        due_at TEXT NOT NULL,
+        interval_seconds INTEGER NOT NULL DEFAULT 86400,
+        lease_owner TEXT,
+        lease_until TEXT,
+        etag TEXT,
+        last_modified TEXT,
+        last_outcome TEXT,
+        failure_streak INTEGER NOT NULL DEFAULT 0,
+        runs INTEGER NOT NULL DEFAULT 0,
+        yield_total INTEGER NOT NULL DEFAULT 0,
+        yield_last INTEGER NOT NULL DEFAULT 0,
+        cost_total REAL NOT NULL DEFAULT 0,
+        expires_at TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(institution_id, connector, target)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_intel_sources_due ON intel_sources(institution_id, status, due_at)",
+    """
+    CREATE TABLE IF NOT EXISTS intel_quota (
+        institution_id TEXT NOT NULL,
+        day TEXT NOT NULL,
+        connector TEXT NOT NULL,
+        units REAL NOT NULL DEFAULT 0,
+        calls INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(institution_id, day, connector)
+    )
+    """,
+    # Global tables: public-web metadata and platform-wide spend, never tenant
+    # data, so they stay outside row-level security and a tick can use them
+    # for every institution.
+    """
+    CREATE TABLE IF NOT EXISTS intel_budget_ledger (
+        day TEXT NOT NULL,
+        connector TEXT NOT NULL,
+        units REAL NOT NULL DEFAULT 0,
+        calls INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(day, connector)
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS intel_fetch_state (
+        url_sha256 TEXT PRIMARY KEY,
+        etag TEXT,
+        last_modified TEXT,
+        outcome TEXT NOT NULL,
+        content_sha256 TEXT,
+        fetched_at TEXT NOT NULL
+    )
+    """,
 )
 ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = ()
-TENANT_TABLES: tuple[str, ...] = ("intel_entities", "intel_assets", "intel_evidence", "intel_gold_items", "intel_suppression", "intel_map_runs")
+TENANT_TABLES: tuple[str, ...] = ("intel_entities", "intel_assets", "intel_evidence", "intel_gold_items", "intel_suppression", "intel_map_runs", "intel_sources", "intel_quota")
+GLOBAL_TABLES: tuple[str, ...] = ("intel_budget_ledger", "intel_fetch_state")
+SOURCE_CLASSES = frozenset({"rotation", "recheck", "explore"})
+SOURCE_ORIGINS = frozenset({"seed", "recurring", "lead", "gap", "profile"})
 
 
 def _json(value: Any) -> str:
@@ -181,7 +251,194 @@ def render_sql_migration() -> str:
     return "\n".join(lines) + "\n"
 
 
-class MapStore:
+class MapStoreScheduling:
+    """Sources, leases, budgets and the shared fetch cache (mixed into MapStore)."""
+
+    backend: SqlBackend
+
+    def _tenant(self, institution_id: str):  # pragma: no cover - provided by MapStore
+        raise NotImplementedError
+
+    # ---------------------------------------------------------------- sources
+    def upsert_source(
+        self, institution_id: str, *, connector: str, target: str, entity_id: str | None = None, asset_id: str | None = None, topic: str = "", origin: str = "seed",
+        work_class: str = "rotation", hops: int = 0, interval_seconds: int = 86400, due_at: str | None = None, expires_at: str | None = None,
+    ) -> tuple[str, bool]:
+        """Add a source unless it exists; an existing one keeps its schedule and history."""
+
+        if origin not in SOURCE_ORIGINS or work_class not in SOURCE_CLASSES:
+            raise ValueError("unknown source origin or work class")
+        target = target.strip()[:1000]
+        if not target:
+            raise ValueError("a source needs a target")
+        stamp = now_iso()
+        with self._tenant(institution_id):
+            existing = self.backend.fetchone("SELECT source_id, hops FROM intel_sources WHERE institution_id = ? AND connector = ? AND target = ?", (institution_id, connector, target))
+            if existing is not None:
+                # A shorter path to a known lead lowers its hop count.
+                if hops < int(existing["hops"]):
+                    self.backend.execute("UPDATE intel_sources SET hops = ?, updated_at = ? WHERE institution_id = ? AND source_id = ?", (hops, stamp, institution_id, existing["source_id"]))
+                return str(existing["source_id"]), False
+            source_id = f"isrc-{uuid4().hex}"
+            self.backend.execute(
+                "INSERT INTO intel_sources(source_id, institution_id, connector, target, entity_id, asset_id, topic, origin, work_class, hops, due_at, interval_seconds, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (source_id, institution_id, connector, target, entity_id, asset_id, topic[:100], origin, work_class, max(0, hops), due_at or stamp, max(60, int(interval_seconds)), expires_at, stamp, stamp),
+            )
+            return source_id, True
+
+    def get_source(self, institution_id: str, source_id: str) -> dict[str, Any] | None:
+        with self._tenant(institution_id):
+            return self.backend.fetchone("SELECT * FROM intel_sources WHERE institution_id = ? AND source_id = ?", (institution_id, source_id))
+
+    def list_sources(self, institution_id: str, *, status: str | None = None, connector: str | None = None, limit: int = 1000) -> list[dict[str, Any]]:
+        clauses, params = ["institution_id = ?"], [institution_id]
+        for column, value in (("status", status), ("connector", connector)):
+            if value:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        with self._tenant(institution_id):
+            return self.backend.fetchall(f"SELECT * FROM intel_sources WHERE {' AND '.join(clauses)} ORDER BY due_at, source_id LIMIT ?", (*params, max(1, min(limit, 10000))))
+
+    def claim_due(self, institution_id: str, *, now: str, worker: str, lease_seconds: int, limit: int, work_class: str | None = None, connectors: Sequence[str] | None = None) -> list[dict[str, Any]]:
+        """Lease up to ``limit`` due sources; a source leased by another live worker is skipped.
+
+        The lease is written with a condition on the lease columns, so two
+        workers racing for the same source cannot both win it.
+        """
+
+        lease_until = (datetime.fromisoformat(now) + timedelta(seconds=lease_seconds)).isoformat()
+        claimed: list[dict[str, Any]] = []
+        with self._tenant(institution_id):
+            clauses, params = ["institution_id = ?", "status = 'active'", "due_at <= ?", "(lease_until IS NULL OR lease_until < ?)"], [institution_id, now, now]
+            if work_class:
+                clauses.append("work_class = ?")
+                params.append(work_class)
+            if connectors is not None:
+                if not connectors:
+                    return []
+                clauses.append(f"connector IN ({', '.join('?' for _ in connectors)})")
+                params.extend(connectors)
+            candidates = self.backend.fetchall(f"SELECT * FROM intel_sources WHERE {' AND '.join(clauses)} ORDER BY due_at, source_id LIMIT ?", (*params, max(1, limit * 3)))
+            for row in candidates:
+                if len(claimed) >= limit:
+                    break
+                won = self.backend.execute(
+                    "UPDATE intel_sources SET lease_owner = ?, lease_until = ? WHERE institution_id = ? AND source_id = ? AND (lease_until IS NULL OR lease_until < ?)",
+                    (worker, lease_until, institution_id, row["source_id"], now),
+                )
+                if won:
+                    claimed.append({**row, "lease_owner": worker, "lease_until": lease_until})
+        return claimed
+
+    def release_source(self, institution_id: str, source_id: str) -> None:
+        with self._tenant(institution_id):
+            self.backend.execute("UPDATE intel_sources SET lease_owner = NULL, lease_until = NULL WHERE institution_id = ? AND source_id = ?", (institution_id, source_id))
+
+    def complete_source(
+        self, institution_id: str, source_id: str, *, outcome: str, next_due: str, interval_seconds: int, yield_count: int, cost: float, failed: bool,
+        etag: str | None = None, last_modified: str | None = None, status: str | None = None, origin: str | None = None, clear_expiry: bool = False,
+    ) -> None:
+        with self._tenant(institution_id):
+            if clear_expiry:
+                self.backend.execute("UPDATE intel_sources SET expires_at = NULL WHERE institution_id = ? AND source_id = ?", (institution_id, source_id))
+            self.backend.execute(
+                """
+                UPDATE intel_sources SET last_outcome = ?, due_at = ?, interval_seconds = ?, yield_last = ?, yield_total = yield_total + ?, cost_total = cost_total + ?, runs = runs + 1,
+                    failure_streak = CASE WHEN ? = 1 THEN failure_streak + 1 ELSE 0 END, etag = COALESCE(?, etag), last_modified = COALESCE(?, last_modified),
+                    status = COALESCE(?, status), origin = COALESCE(?, origin), lease_owner = NULL, lease_until = NULL, updated_at = ?
+                WHERE institution_id = ? AND source_id = ?
+                """,
+                (outcome[:60], next_due, max(60, int(interval_seconds)), yield_count, yield_count, float(cost), 1 if failed else 0, etag, last_modified, status, origin, now_iso(), institution_id, source_id),
+            )
+
+    def set_source_status(self, institution_id: str, source_id: str, status: str) -> None:
+        with self._tenant(institution_id):
+            self.backend.execute("UPDATE intel_sources SET status = ?, lease_owner = NULL, lease_until = NULL, updated_at = ? WHERE institution_id = ? AND source_id = ?", (status, now_iso(), institution_id, source_id))
+
+    def expire_sources(self, institution_id: str, *, now: str) -> int:
+        """Leads past their expiry that never produced anything stop being scheduled (kept for audit)."""
+
+        with self._tenant(institution_id):
+            return self.backend.execute(
+                "UPDATE intel_sources SET status = 'expired', updated_at = ? WHERE institution_id = ? AND status = 'active' AND expires_at IS NOT NULL AND expires_at < ? AND yield_total = 0",
+                (now, institution_id, now),
+            )
+
+    # ---------------------------------------------------------------- budgets
+    def reserve_budget(self, institution_id: str, *, connector: str, units: float, day: str, global_cap: float, tenant_cap: float) -> bool:
+        """Reserve spend against the tenant's quota and the platform-wide cap, or neither.
+
+        Each conditional upsert only applies while the running total stays
+        within its cap, so concurrent workers cannot overspend. The tenant
+        quota is taken first and handed back if the global cap refuses.
+        """
+
+        if units <= 0:
+            return True
+        if units > tenant_cap or units > global_cap:
+            return False
+        with self._tenant(institution_id):
+            took_tenant = self.backend.execute(
+                "INSERT INTO intel_quota(institution_id, day, connector, units, calls) VALUES (?, ?, ?, ?, 1) ON CONFLICT (institution_id, day, connector) DO UPDATE SET units = intel_quota.units + excluded.units, calls = intel_quota.calls + 1 WHERE intel_quota.units + excluded.units <= ?",
+                (institution_id, day, connector, float(units), float(tenant_cap)),
+            )
+        if not took_tenant:
+            return False
+        with self.backend.transaction():
+            took_global = self.backend.execute(
+                "INSERT INTO intel_budget_ledger(day, connector, units, calls) VALUES (?, ?, ?, 1) ON CONFLICT (day, connector) DO UPDATE SET units = intel_budget_ledger.units + excluded.units, calls = intel_budget_ledger.calls + 1 WHERE intel_budget_ledger.units + excluded.units <= ?",
+                (day, connector, float(units), float(global_cap)),
+            )
+        if not took_global:
+            with self._tenant(institution_id):
+                self.backend.execute("UPDATE intel_quota SET units = units - ?, calls = calls - 1 WHERE institution_id = ? AND day = ? AND connector = ?", (float(units), institution_id, day, connector))
+            return False
+        return True
+
+    def spend(self, *, day: str) -> dict[str, dict[str, float]]:
+        with self.backend.transaction():
+            rows = self.backend.fetchall("SELECT connector, units, calls FROM intel_budget_ledger WHERE day = ? ORDER BY connector", (day,))
+        return {str(row["connector"]): {"units": float(row["units"]), "calls": int(row["calls"])} for row in rows}
+
+    def tenant_spend(self, institution_id: str, *, day: str) -> dict[str, dict[str, float]]:
+        with self._tenant(institution_id):
+            rows = self.backend.fetchall("SELECT connector, units, calls FROM intel_quota WHERE institution_id = ? AND day = ? ORDER BY connector", (institution_id, day))
+        return {str(row["connector"]): {"units": float(row["units"]), "calls": int(row["calls"])} for row in rows}
+
+    # -------------------------------------------------------------- fetch cache
+    def fetch_state(self, url: str) -> dict[str, Any] | None:
+        with self.backend.transaction():
+            return self.backend.fetchone("SELECT * FROM intel_fetch_state WHERE url_sha256 = ?", (hashlib.sha256(url.encode("utf-8")).hexdigest(),))
+
+    def record_fetch(self, url: str, *, outcome: str, etag: str | None, last_modified: str | None, content_sha256: str | None) -> None:
+        key = hashlib.sha256(url.encode("utf-8")).hexdigest()
+        with self.backend.transaction():
+            self.backend.execute(
+                "INSERT INTO intel_fetch_state(url_sha256, etag, last_modified, outcome, content_sha256, fetched_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (url_sha256) DO UPDATE SET etag = excluded.etag, last_modified = excluded.last_modified, outcome = excluded.outcome, content_sha256 = COALESCE(excluded.content_sha256, intel_fetch_state.content_sha256), fetched_at = excluded.fetched_at",
+                (key, etag, last_modified, outcome[:40], content_sha256, now_iso()),
+            )
+
+    # ---------------------------------------------------------------- run lock
+    def try_start_map_run(self, institution_id: str, *, kind: str, lock_seconds: int) -> str | None:
+        """Start a run of ``kind`` unless one is in progress; a run silent past ``lock_seconds`` is abandoned."""
+
+        run_id = f"imrn-{uuid4().hex}"
+        started = datetime.now(timezone.utc)
+        cutoff = (started - timedelta(seconds=lock_seconds)).isoformat()
+        with self._tenant(institution_id):
+            self.backend.execute(
+                "UPDATE intel_map_runs SET status = 'abandoned', finished_at = ?, error = 'the run lost its process' WHERE institution_id = ? AND kind = ? AND status = 'running' AND started_at < ?",
+                (started.isoformat(), institution_id, kind, cutoff),
+            )
+            inserted = self.backend.execute(
+                "INSERT INTO intel_map_runs(run_id, institution_id, kind, started_at, status) SELECT CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), 'running' WHERE NOT EXISTS (SELECT 1 FROM intel_map_runs WHERE institution_id = ? AND kind = ? AND status = 'running') "
+                "ON CONFLICT (institution_id, kind) WHERE status = 'running' AND kind = 'tick' DO NOTHING",
+                (run_id, institution_id, kind, started.isoformat(), institution_id, kind),
+            )
+        return run_id if inserted else None
+
+
+class MapStore(MapStoreScheduling):
     def __init__(self, database_url: str | None = None, backend: SqlBackend | None = None, *, suppression_key: bytes = b"guru-ji-development-only") -> None:
         self.backend = backend or open_backend(database_url)
         self.suppression_key = suppression_key
@@ -452,6 +709,6 @@ def iter_chunks(items: Sequence[Any], size: int) -> Iterable[Sequence[Any]]:
 
 
 __all__ = [
-    "ADDED_COLUMNS", "ASSET_STATUSES", "ENTITY_KINDS", "GRADES", "GRADE_RANK", "RELATIONS", "SCHEMA_VERSION", "SPLITS", "TENANT_TABLES", "MapStore", "grade_at_least", "iter_chunks",
+    "ADDED_COLUMNS", "ASSET_STATUSES", "ENTITY_KINDS", "GLOBAL_TABLES", "GRADES", "GRADE_RANK", "RELATIONS", "SCHEMA_VERSION", "SOURCE_CLASSES", "SOURCE_ORIGINS", "SPLITS", "TENANT_TABLES", "MapStore", "grade_at_least", "iter_chunks",
     "render_sql_migration", "suppression_fingerprint",
 ]

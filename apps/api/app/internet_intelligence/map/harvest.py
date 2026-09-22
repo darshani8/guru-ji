@@ -11,6 +11,7 @@ hosts or subdomains never anchor, and an unhealthy page vouches for nothing.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass, field
 from typing import Any
@@ -57,6 +58,7 @@ class OfficialSiteHarvester:
     fetcher: PublicPageFetcher
     store: MapStore
     max_pages: int = 5
+    conditional: bool = False  # use the shared fetch cache's validators (the scheduled engine sets this)
 
     async def harvest(self, institution_id: str, domain_asset_id: str, *, run_id: str | None = None) -> HarvestResult:
         asset = self.store.get_asset(institution_id, domain_asset_id)
@@ -66,9 +68,15 @@ class OfficialSiteHarvester:
         result = HarvestResult(domain=host)
         # Grade the domain from its evidence first: the links it vouches for inherit that grade.
         regrade(self.store, institution_id, [domain_asset_id])
-        homepage = await self.fetcher.retrieve(asset["url"])
+        homepage = await self._retrieve(asset["url"])
         self._liveness(institution_id, domain_asset_id, homepage, run_id)
         result.pages.append({"url": homepage.url, "outcome": homepage.outcome})
+        if homepage.outcome == "not_modified":
+            # Unchanged since the last fetch: the links it gave then still stand.
+            result.integrity = "unchanged"
+            touched = self._reconfirm(institution_id, domain_asset_id, homepage.url, run_id, result)
+            regrade(self.store, institution_id, [domain_asset_id, *touched])
+            return result
         if not homepage.ok:
             regrade(self.store, institution_id, [domain_asset_id])
             return result
@@ -87,7 +95,7 @@ class OfficialSiteHarvester:
             for url in self._candidate_pages(home, host):
                 if len(pages) >= self.max_pages:
                     break
-                retrieval = await self.fetcher.retrieve(url)
+                retrieval = await self._retrieve(url, conditional=False)
                 result.pages.append({"url": retrieval.url, "outcome": retrieval.outcome})
                 if retrieval.ok and _host(retrieval.url) == host:
                     structure = parse_structure(retrieval.text, retrieval.url)
@@ -136,6 +144,31 @@ class OfficialSiteHarvester:
         touched |= self._record_removals(institution_id, domain_asset_id, {url for url, _, _ in pages}, seen_on_page, run_id, result)
         regrade(self.store, institution_id, sorted(touched))
         return result
+
+    async def _retrieve(self, url: str, *, conditional: bool | None = None) -> Retrieval:
+        use_cache = self.conditional if conditional is None else conditional
+        state = self.store.fetch_state(url) if use_cache else None
+        retrieval = await self.fetcher.retrieve(url, etag=(state or {}).get("etag"), last_modified=(state or {}).get("last_modified"))
+        if self.conditional:
+            digest = hashlib.sha256(retrieval.body).hexdigest() if retrieval.ok else None
+            self.store.record_fetch(url, outcome=retrieval.outcome, etag=retrieval.etag if retrieval.outcome in {"ok", "not_modified"} else None, last_modified=retrieval.last_modified if retrieval.outcome in {"ok", "not_modified"} else None, content_sha256=digest)
+        return retrieval
+
+    def _reconfirm(self, institution_id: str, domain_asset_id: str, page_url: str, run_id: str | None, result: HarvestResult) -> set[str]:
+        """Repeat the latest official-link observation from an unchanged page (a 304 answer)."""
+
+        latest: dict[str, dict[str, object]] = {}
+        for item in self.store.list_evidence(institution_id, limit=20000):
+            if item["kind"] == "official_link" and item["source_asset_id"] == domain_asset_id and item["source_url"] == page_url:
+                latest[item["asset_id"]] = item
+        touched: set[str] = set()
+        for asset_id, item in latest.items():
+            if item["polarity"] != "supports":
+                continue
+            self.store.add_evidence(institution_id, asset_id=asset_id, kind="official_link", detail=str(item["detail"]), source_url=page_url, source_asset_id=domain_asset_id, channel=str(item["channel"]), observed_via="live", run_id=run_id)
+            result.evidence += 1
+            touched.add(asset_id)
+        return touched
 
     def _record_removals(self, institution_id: str, domain_asset_id: str, fetched: set[str], seen_on_page: dict[str, set[str]], run_id: str | None, result: HarvestResult) -> set[str]:
         """A page fetched cleanly that no longer links an account it used to link refutes that link."""

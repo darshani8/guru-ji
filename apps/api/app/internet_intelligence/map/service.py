@@ -9,6 +9,7 @@ from typing import Any
 from ...domain.principals import Capability, InstitutionScope, Principal
 from ..fetch import PublicPageFetcher
 from ..profile import InstitutionProfile
+from .engine import MapEngine
 from .export import export_tsv
 from .harvest import OfficialSiteHarvester
 from .metrics import map_metrics, record_baseline
@@ -24,6 +25,7 @@ MAX_HARVEST_DOMAINS = 10
 class MapService:
     store: MapStore
     fetcher: PublicPageFetcher | None = None
+    engine: MapEngine | None = None
 
     @staticmethod
     def guard(principal: Principal, institution_id: str, capability: Capability) -> None:
@@ -121,6 +123,27 @@ class MapService:
         self.guard(principal, institution_id, Capability.INTELLIGENCE_READ)
         manager = principal.has_capability(Capability.INTELLIGENCE_MANAGE)
         return export_tsv(self.store, institution_id, min_grade=None if manager else "B")
+
+    # ------------------------------------------------------------ the engine
+    async def tick(self, principal: Principal, institution_id: str) -> dict[str, Any]:
+        self.guard(principal, institution_id, Capability.INTELLIGENCE_MANAGE)
+        if self.engine is None:
+            raise ValueError("the map engine is not configured")
+        return await self.engine.tick(institution_id)
+
+    def sources(self, principal: Principal, institution_id: str, *, status: str | None = None, connector: str | None = None, limit: int = 200) -> list[dict[str, Any]]:
+        self.guard(principal, institution_id, Capability.INTELLIGENCE_MANAGE)
+        return self.store.list_sources(institution_id, status=status, connector=connector, limit=limit)
+
+    def connectors(self, principal: Principal, institution_id: str) -> list[dict[str, Any]]:
+        self.guard(principal, institution_id, Capability.INTELLIGENCE_READ)
+        return self.engine.registry.describe() if self.engine else []
+
+    def spend(self, principal: Principal, institution_id: str, *, day: str) -> dict[str, Any]:
+        self.guard(principal, institution_id, Capability.INTELLIGENCE_MANAGE)
+        caps = dict(self.engine.config.budgets) if self.engine else {}
+        share = self.engine.config.tenant_share if self.engine else 1.0
+        return {"day": day, "platform": self.store.spend(day=day), "institution": self.store.tenant_spend(institution_id, day=day), "caps": caps, "tenant_caps": {key: value * share for key, value in caps.items()}}
 
 
 __all__ = ["MAX_HARVEST_DOMAINS", "MAX_SEED_BYTES", "MapService"]

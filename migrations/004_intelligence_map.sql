@@ -11,6 +11,12 @@ CREATE TABLE IF NOT EXISTS intel_gold_items ( gold_id TEXT PRIMARY KEY, institut
 CREATE TABLE IF NOT EXISTS intel_suppression ( institution_id TEXT NOT NULL, key_hmac TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, PRIMARY KEY(institution_id, key_hmac) );
 CREATE TABLE IF NOT EXISTS intel_map_runs ( run_id TEXT PRIMARY KEY, institution_id TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'tick', started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL, stop_reason TEXT, gate TEXT, spend_json TEXT NOT NULL DEFAULT '{}', counts_json TEXT NOT NULL DEFAULT '{}', metrics_json TEXT NOT NULL DEFAULT '{}', error TEXT );
 CREATE INDEX IF NOT EXISTS idx_intel_map_runs_institution ON intel_map_runs(institution_id, started_at);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_intel_map_runs_one_tick ON intel_map_runs(institution_id, kind) WHERE status = 'running' AND kind = 'tick';
+CREATE TABLE IF NOT EXISTS intel_sources ( source_id TEXT PRIMARY KEY, institution_id TEXT NOT NULL, connector TEXT NOT NULL, target TEXT NOT NULL, entity_id TEXT, asset_id TEXT, topic TEXT NOT NULL DEFAULT '', origin TEXT NOT NULL DEFAULT 'seed', work_class TEXT NOT NULL DEFAULT 'rotation', hops INTEGER NOT NULL DEFAULT 0, status TEXT NOT NULL DEFAULT 'active', due_at TEXT NOT NULL, interval_seconds INTEGER NOT NULL DEFAULT 86400, lease_owner TEXT, lease_until TEXT, etag TEXT, last_modified TEXT, last_outcome TEXT, failure_streak INTEGER NOT NULL DEFAULT 0, runs INTEGER NOT NULL DEFAULT 0, yield_total INTEGER NOT NULL DEFAULT 0, yield_last INTEGER NOT NULL DEFAULT 0, cost_total REAL NOT NULL DEFAULT 0, expires_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(institution_id, connector, target) );
+CREATE INDEX IF NOT EXISTS idx_intel_sources_due ON intel_sources(institution_id, status, due_at);
+CREATE TABLE IF NOT EXISTS intel_quota ( institution_id TEXT NOT NULL, day TEXT NOT NULL, connector TEXT NOT NULL, units REAL NOT NULL DEFAULT 0, calls INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(institution_id, day, connector) );
+CREATE TABLE IF NOT EXISTS intel_budget_ledger ( day TEXT NOT NULL, connector TEXT NOT NULL, units REAL NOT NULL DEFAULT 0, calls INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(day, connector) );
+CREATE TABLE IF NOT EXISTS intel_fetch_state ( url_sha256 TEXT PRIMARY KEY, etag TEXT, last_modified TEXT, outcome TEXT NOT NULL, content_sha256 TEXT, fetched_at TEXT NOT NULL );
 -- PostgreSQL row-level security (skipped on SQLite)
 ALTER TABLE intel_entities ENABLE ROW LEVEL SECURITY;
 ALTER TABLE intel_entities FORCE ROW LEVEL SECURITY;
@@ -30,3 +36,9 @@ CREATE POLICY intel_suppression_tenant_isolation ON intel_suppression USING (ins
 ALTER TABLE intel_map_runs ENABLE ROW LEVEL SECURITY;
 ALTER TABLE intel_map_runs FORCE ROW LEVEL SECURITY;
 CREATE POLICY intel_map_runs_tenant_isolation ON intel_map_runs USING (institution_id = current_setting('app.institution_id', true)) WITH CHECK (institution_id = current_setting('app.institution_id', true));
+ALTER TABLE intel_sources ENABLE ROW LEVEL SECURITY;
+ALTER TABLE intel_sources FORCE ROW LEVEL SECURITY;
+CREATE POLICY intel_sources_tenant_isolation ON intel_sources USING (institution_id = current_setting('app.institution_id', true)) WITH CHECK (institution_id = current_setting('app.institution_id', true));
+ALTER TABLE intel_quota ENABLE ROW LEVEL SECURITY;
+ALTER TABLE intel_quota FORCE ROW LEVEL SECURITY;
+CREATE POLICY intel_quota_tenant_isolation ON intel_quota USING (institution_id = current_setting('app.institution_id', true)) WITH CHECK (institution_id = current_setting('app.institution_id', true));

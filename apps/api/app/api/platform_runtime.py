@@ -22,6 +22,9 @@ from ..ingestion.registry import ParserRegistry
 from ..ingestion.service import IngestionService
 from ..institution_data.store import InstitutionDataStore
 from ..internet_intelligence.fetch import PublicPageFetcher, crawler_user_agent
+from ..internet_intelligence.map.connectors.base import ConnectorRegistry
+from ..internet_intelligence.map.connectors.web import LeadPageConnector, OfficialSiteConnector, RecheckConnector
+from ..internet_intelligence.map.engine import EngineConfig, MapEngine
 from ..internet_intelligence.map.service import MapService
 from ..internet_intelligence.map.store import MapStore
 from ..internet_intelligence.monitoring import ContinuousMonitor
@@ -162,6 +165,22 @@ def _services(settings: AppSettings, store: InstitutionDataStore, intelligence_s
 _SHARED_ONLY_URLS = frozenset({":memory:", "sqlite:///:memory:", ""})
 
 
+def _map_service(settings: AppSettings, backend: Any, intelligence_store: IntelligenceStore, provider: Any | None) -> MapService:
+    fetcher = PublicPageFetcher(timeout_seconds=settings.web_extract_timeout_seconds, max_response_bytes=settings.web_extract_max_bytes, user_agent=crawler_user_agent(settings.intelligence_crawler_contact)) if settings.intelligence_fetch_pages else None
+    store = MapStore(backend=backend, suppression_key=(settings.intelligence_suppression_key or "guru-ji-development-only").encode("utf-8"))
+    engine = MapEngine(
+        store, map_connectors(settings), EngineConfig(sources_per_tick=settings.intelligence_sources_per_tick, budgets=settings.intelligence_budget_caps(), tenant_share=settings.intelligence_tenant_share),
+        fetcher=fetcher, search=provider, profile_loader=intelligence_store.get_profile,
+    )
+    return MapService(store, fetcher=fetcher, engine=engine)
+
+
+def map_connectors(settings: AppSettings) -> ConnectorRegistry:
+    """The connectors the map engine may use; each one is off until its settings allow it."""
+
+    return ConnectorRegistry([OfficialSiteConnector(), LeadPageConnector(), RecheckConnector()])
+
+
 def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: PolicyDecisionPoint, tracer: TraceRecorder, model: TextModel | None, institution_store: InstitutionDataStore | None = None, objects: ObjectStore | None = None, search_provider: Any | None = None, start_workers: bool = False) -> PlatformRuntime:
     """Assemble the platform.
 
@@ -174,16 +193,13 @@ def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: P
     database_url = settings.resolved_institution_database_url()
     store = institution_store or InstitutionDataStore(database_url)
     intelligence_store = IntelligenceStore(backend=store.backend)
-    intelligence_map: MapService | None = None
-    if settings.intelligence_map_enabled:
-        map_fetcher = PublicPageFetcher(timeout_seconds=settings.web_extract_timeout_seconds, max_response_bytes=settings.web_extract_max_bytes, user_agent=crawler_user_agent(settings.intelligence_crawler_contact)) if settings.intelligence_fetch_pages else None
-        intelligence_map = MapService(MapStore(backend=store.backend, suppression_key=(settings.intelligence_suppression_key or "guru-ji-development-only").encode("utf-8")), fetcher=map_fetcher)
     objects = objects or _object_store(settings)
     parsers = ParserRegistry(ocr_engine=_ocr_engine(settings), max_bytes=settings.max_upload_bytes)
     mapping = MappingEngine(threshold=settings.mapping_confidence_threshold, model=model)
     provider = search_provider
     if provider is None and settings.intelligence_search_provider == "tavily":
         provider = TavilyIntelligenceSearchProvider(api_key=settings.web_search_api_key or "", endpoint=settings.web_search_endpoint, timeout_seconds=settings.web_search_timeout_seconds)
+    intelligence_map = _map_service(settings, store.backend, intelligence_store, provider) if settings.intelligence_map_enabled else None
     build = dict(objects=objects, parsers=parsers, mapping=mapping, control_store=control_store, pdp=pdp, tracer=tracer, model=model, provider=provider)
     request = _services(settings, store, intelligence_store, **build)
     # The in-process worker works on its own connection when the database can
@@ -195,11 +211,13 @@ def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: P
     model_planner = ModelPlanner(model) if (settings.agent_planner == "model" and model is not None) else None
     agent = MasterAgent(request.gateway, request.registry, request.data, store, control_store, planner=DeterministicPlanner(), model_planner=model_planner, model=model, model_max_tokens=settings.model_max_tokens, tracer=tracer, background=jobs)
     if worker_store is not None:
-        worker = _services(settings, worker_store, IntelligenceStore(backend=worker_store.backend), **build)
+        worker_intelligence_store = IntelligenceStore(backend=worker_store.backend)
+        worker = _services(settings, worker_store, worker_intelligence_store, **build)
+        worker_map = _map_service(settings, worker_store.backend, worker_intelligence_store, provider) if settings.intelligence_map_enabled else None
         worker_agent = MasterAgent(worker.gateway, worker.registry, worker.data, worker_store, control_store, planner=DeterministicPlanner(), model_planner=model_planner, model=model, model_max_tokens=settings.model_max_tokens, tracer=tracer, background=jobs)
-        register_handlers(jobs, ingestion=worker.ingestion, agent=worker_agent, monitor=worker.monitor, notifications=worker.notifications)
+        register_handlers(jobs, ingestion=worker.ingestion, agent=worker_agent, monitor=worker.monitor, notifications=worker.notifications, map_engine=worker_map.engine if worker_map else None)
     else:
-        register_handlers(jobs, ingestion=request.ingestion, agent=agent, monitor=request.monitor, notifications=request.notifications)
+        register_handlers(jobs, ingestion=request.ingestion, agent=agent, monitor=request.monitor, notifications=request.notifications, map_engine=intelligence_map.engine if intelligence_map else None)
     if start_workers:
         # The thread queue only wakes on enqueue, so start it at boot rather than
         # on the first upload, then hand back jobs whose worker stopped reporting.
@@ -214,4 +232,4 @@ def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: P
     )
 
 
-__all__ = ["PlatformRuntime", "build_platform"]
+__all__ = ["PlatformRuntime", "build_platform", "map_connectors"]

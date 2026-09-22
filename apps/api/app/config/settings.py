@@ -148,6 +148,9 @@ class AppSettings:
     intelligence_crawler_contact: str = ""
     intelligence_map_enabled: bool = False
     intelligence_suppression_key: str | None = field(default=None, repr=False)
+    intelligence_budgets: str = ""
+    intelligence_tenant_share: float = 0.5
+    intelligence_sources_per_tick: int = 25
     agent_planner: str = "deterministic"
     approval_ttl_seconds: int = 900
     voice_agent_mode: str = "assistant"
@@ -260,6 +263,9 @@ class AppSettings:
             intelligence_crawler_contact=os.getenv("GURU_INTELLIGENCE_CRAWLER_CONTACT", "").strip(),
             intelligence_map_enabled=_bool_env("GURU_INTELLIGENCE_MAP_ENABLED", False),
             intelligence_suppression_key=os.getenv("GURU_INTELLIGENCE_SUPPRESSION_KEY") or None,
+            intelligence_budgets=os.getenv("GURU_INTELLIGENCE_BUDGETS", "").strip(),
+            intelligence_tenant_share=float(os.getenv("GURU_INTELLIGENCE_TENANT_SHARE", "0.5")),
+            intelligence_sources_per_tick=int(os.getenv("GURU_INTELLIGENCE_SOURCES_PER_TICK", "25")),
             agent_planner=os.getenv("GURU_AGENT_PLANNER", "deterministic").strip().lower(),
             approval_ttl_seconds=int(os.getenv("GURU_APPROVAL_TTL_SECONDS", "900")),
             voice_agent_mode=os.getenv("GURU_VOICE_AGENT_MODE", "assistant").strip().lower(),
@@ -307,6 +313,24 @@ class AppSettings:
                 raise ValueError(f"institution connector source ID is duplicated: {legacy.source_id}")
             definitions.append(legacy)
         return tuple(definitions)
+
+    def intelligence_budget_caps(self) -> dict[str, float]:
+        """Daily platform-wide caps per connector budget, defaults overridden by GURU_INTELLIGENCE_BUDGETS (JSON)."""
+
+        from ..internet_intelligence.map.engine import DEFAULT_BUDGETS
+
+        caps = dict(DEFAULT_BUDGETS)
+        if self.intelligence_budgets:
+            import json
+
+            try:
+                overrides = json.loads(self.intelligence_budgets)
+            except ValueError as exc:
+                raise ValueError("GURU_INTELLIGENCE_BUDGETS must be a JSON object of budget name to daily units") from exc
+            if not isinstance(overrides, dict) or not all(isinstance(key, str) and isinstance(value, (int, float)) and value >= 0 for key, value in overrides.items()):
+                raise ValueError("GURU_INTELLIGENCE_BUDGETS must be a JSON object of budget name to daily units")
+            caps.update({key: float(value) for key, value in overrides.items()})
+        return caps
 
     def ensure_safe_for_production(self) -> None:
         if self.max_request_bytes <= 0:
@@ -481,6 +505,11 @@ class AppSettings:
             raise ValueError("GURU_WEB_SEARCH_API_KEY is required when GURU_INTELLIGENCE_SEARCH_PROVIDER=tavily")
         if not 1 <= self.intelligence_max_queries <= 20 or not 1 <= self.intelligence_results_per_query <= 20:
             raise ValueError("intelligence query limits must be between 1 and 20")
+        self.intelligence_budget_caps()
+        if not 0 < self.intelligence_tenant_share <= 1:
+            raise ValueError("GURU_INTELLIGENCE_TENANT_SHARE must be greater than 0 and at most 1")
+        if not 1 <= self.intelligence_sources_per_tick <= 500:
+            raise ValueError("GURU_INTELLIGENCE_SOURCES_PER_TICK must be between 1 and 500")
         if self.intelligence_map_enabled and self.environment == "production" and len(self.intelligence_suppression_key or "") < 32:
             raise ValueError("GURU_INTELLIGENCE_SUPPRESSION_KEY (32+ characters) is required when the internet map is enabled in production")
         if self.intelligence_crawler_contact:

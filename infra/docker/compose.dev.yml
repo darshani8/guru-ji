@@ -131,6 +131,35 @@ services:
       - ../../scripts:/app/scripts:ro
       - guru-ji-objects:/app/data/objects
 
+  # The internet map engine: one tick per institution every 15 minutes; only
+  # sources that are due do any work. Opt-in like the monitor:
+  #   docker compose --profile monitor up map-engine
+  map-engine:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.api
+    command: ["python", "scripts/run_monitor.py", "--map", "--every", "900"]
+    profiles: ["monitor"]
+    environment:
+      GURU_ENVIRONMENT: development
+      GURU_PDP_MODE: local
+      CONTROL_DATABASE_URL: postgresql://guru_ji:guru_ji_dev_only@postgres:5432/guru_ji
+      INSTITUTION_DATABASE_URL: postgresql://guru_ji:guru_ji_dev_only@postgres:5432/guru_ji
+      GURU_OBJECT_STORE: local
+      GURU_OBJECT_STORE_PATH: /app/data/objects
+      GURU_JOB_QUEUE: inline
+      GURU_INTELLIGENCE_MAP_ENABLED: "true"
+      GURU_INTELLIGENCE_SEARCH_PROVIDER: ${GURU_INTELLIGENCE_SEARCH_PROVIDER:-disabled}
+      GURU_WEB_SEARCH_API_KEY: ${GURU_WEB_SEARCH_API_KEY:-}
+      GURU_INTELLIGENCE_CRAWLER_CONTACT: ${GURU_INTELLIGENCE_CRAWLER_CONTACT:-}
+      GURU_INTELLIGENCE_SUPPRESSION_KEY: ${GURU_INTELLIGENCE_SUPPRESSION_KEY:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ../../apps:/app/apps:ro
+      - ../../scripts:/app/scripts:ro
+
 volumes:
   guru-ji-postgres:
   guru-ji-objects:

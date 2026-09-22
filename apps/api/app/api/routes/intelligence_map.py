@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
@@ -169,6 +170,57 @@ async def export(request: Request, institution_id: str | None = None) -> PlainTe
     except (ValueError, PermissionError) as exc:
         raise translate(exc) from exc
     return PlainTextResponse(body, media_type="text/tab-separated-values; charset=utf-8", headers={"Content-Disposition": f'attachment; filename="internet-map-{target}.tsv"'})
+
+
+@router.post("/tick", summary="Run one map engine tick now (normally scheduled)")
+async def tick(request: Request, body: MapInstitutionBody, background: bool = True) -> dict[str, Any]:
+    service = map_service(request)
+    principal = require_principal(request, Capability.INTELLIGENCE_MANAGE)
+    target = resolve_institution(principal, body.institution_id)
+    try:
+        service.guard(principal, target, Capability.INTELLIGENCE_MANAGE)
+        if background:
+            job_id = platform_from_request(request).jobs.enqueue(target, "intelligence.map_tick", {"institution_id": target})
+            audit_map_action(request, principal, "tick", metadata={"institution_id": target, "background": True})
+            return {"accepted": True, "job_id": job_id}
+        result = await service.tick(principal, target)
+    except (ValueError, PermissionError) as exc:
+        raise translate(exc) from exc
+    audit_map_action(request, principal, "tick", metadata={"institution_id": target, "background": False, "sources": int(result.get("counts", {}).get("sources", 0))})
+    return result
+
+
+@router.get("/sources", summary="What the map watches and which leads it follows")
+async def sources(request: Request, institution_id: str | None = None, status: str | None = None, connector: str | None = None, limit: int = 200) -> dict[str, Any]:
+    service = map_service(request)
+    principal = require_principal(request, Capability.INTELLIGENCE_MANAGE)
+    target = resolve_institution(principal, institution_id)
+    try:
+        return {"sources": service.sources(principal, target, status=status, connector=connector, limit=min(max(limit, 1), 1000))}
+    except (ValueError, PermissionError) as exc:
+        raise translate(exc) from exc
+
+
+@router.get("/connectors", summary="The connectors the engine may use and how each reaches the web")
+async def connectors(request: Request, institution_id: str | None = None) -> dict[str, Any]:
+    service = map_service(request)
+    principal = require_principal(request, Capability.INTELLIGENCE_READ)
+    target = resolve_institution(principal, institution_id)
+    try:
+        return {"connectors": service.connectors(principal, target)}
+    except (ValueError, PermissionError) as exc:
+        raise translate(exc) from exc
+
+
+@router.get("/spend", summary="Today's spend against the platform caps and this institution's quota")
+async def spend(request: Request, institution_id: str | None = None, day: str | None = None) -> dict[str, Any]:
+    service = map_service(request)
+    principal = require_principal(request, Capability.INTELLIGENCE_MANAGE)
+    target = resolve_institution(principal, institution_id)
+    try:
+        return service.spend(principal, target, day=day or datetime.now(timezone.utc).date().isoformat())
+    except (ValueError, PermissionError) as exc:
+        raise translate(exc) from exc
 
 
 __all__ = ["audit_map_action", "map_service", "router"]
