@@ -311,6 +311,9 @@ button:disabled { cursor: wait; opacity: .68; }
 }
 .sign-in-button:hover { background: var(--teal-dark); }
 .sign-in-gate[hidden], .account[hidden] { display: none; }
+/* These containers set their own display, which would otherwise beat the UA's
+   [hidden] rule and leave the gate stacked on top of the signed-out page. */
+.platform-body[hidden], .chat-history[hidden] { display: none; }
 
 
 /* ---- Platform console ---------------------------------------------------- */
@@ -349,6 +352,13 @@ button:disabled { cursor: wait; opacity: .68; }
 .mapping-grid { display: grid; grid-template-columns: 1fr 1fr 80px; gap: 6px 10px; align-items: center; font-size: 12px; }
 .mapping-grid select { padding: 6px 8px; border: 1px solid #cfdde7; border-radius: 8px; font-size: 12px; }
 .muted { color: var(--muted); }
+/* Layout helpers that replace inline style attributes (the CSP has no
+   style-src 'unsafe-inline', so element styles are refused). */
+.field-row .grow { flex: 1; }
+.stack { margin-top: 10px; }
+.stack-sm { margin-top: 8px; }
+.link-button { padding: 0; color: var(--teal-dark); background: none; border: 0; font: inherit; text-decoration: underline; cursor: pointer; }
+.link-button:disabled { cursor: wait; opacity: .68; }
 @media (max-width: 760px) {
   .platform-body { grid-template-columns: 1fr; }
   .platform-nav { flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); }

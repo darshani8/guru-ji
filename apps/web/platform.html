@@ -51,7 +51,7 @@
         <p class="lede">Commands run through the master agent: understand → plan → check permission → use tools → verify → report. Nothing reaches the database except through registered tools.</p>
         <div class="card">
           <div class="field-row">
-            <label style="flex:1">Command
+            <label class="grow">Command
               <input id="command-input" type="text" maxlength="4000" placeholder="e.g. Find all MBA students below 75% attendance and send the report to the HOD">
             </label>
             <label>Run in background <select id="command-background"><option value="false">No</option><option value="true">Yes</option></select></label>
@@ -83,7 +83,7 @@
         <div class="card">
           <h3>Recent jobs</h3>
           <button id="jobs-refresh" class="btn secondary" type="button">Refresh</button>
-          <div id="jobs-table" style="margin-top:10px"></div>
+          <div id="jobs-table" class="stack"></div>
         </div>
         <div class="card" id="review-card" hidden>
           <h3>Review</h3>
@@ -108,7 +108,7 @@
         <div class="card">
           <h3>Ask the documents</h3>
           <div class="field-row">
-            <label style="flex:1">Question <input id="doc-question" type="text" maxlength="1000" placeholder="What is the attendance policy?"></label>
+            <label class="grow">Question <input id="doc-question" type="text" maxlength="1000" placeholder="What is the attendance policy?"></label>
             <button id="doc-search" class="btn" type="button">Search</button>
           </div>
           <div id="doc-search-result" class="result-box" hidden></div>
@@ -116,7 +116,7 @@
         <div class="card">
           <h3>Indexed documents</h3>
           <button id="docs-refresh" class="btn secondary" type="button">Refresh</button>
-          <div id="docs-table" style="margin-top:10px"></div>
+          <div id="docs-table" class="stack"></div>
         </div>
       </section>
 
@@ -141,7 +141,7 @@
         <div class="card">
           <h3>Investigate now</h3>
           <div class="field-row">
-            <label style="flex:1">Question <input id="intel-question" type="text" placeholder="What happened about our college this week?"></label>
+            <label class="grow">Question <input id="intel-question" type="text" placeholder="What happened about our college this week?"></label>
             <label>Window (days) <input id="intel-days" type="number" min="1" max="365" value="7"></label>
             <button id="intel-run" class="btn" type="button">Investigate</button>
             <button id="intel-digest" class="btn secondary" type="button">Daily digest</button>
@@ -156,12 +156,12 @@
         <div class="card">
           <h3>Reports</h3>
           <button id="reports-refresh" class="btn secondary" type="button">Refresh</button>
-          <div id="reports-table" style="margin-top:10px"></div>
+          <div id="reports-table" class="stack"></div>
         </div>
         <div class="card">
           <h3>Notifications</h3>
           <button id="notifications-refresh" class="btn secondary" type="button">Refresh</button>
-          <div id="notifications-table" style="margin-top:10px"></div>
+          <div id="notifications-table" class="stack"></div>
         </div>
       </section>
     </div>

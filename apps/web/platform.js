@@ -10,9 +10,12 @@
     return window.GuruAuth.headers(json);
   }
 
+  // `options.raw` returns the Response untouched (used for file downloads);
+  // otherwise JSON bodies are parsed and anything else is returned as-is.
   async function api(path, options = {}) {
-    const init = { ...options, headers: { ...headers(Boolean(options.json)), ...(options.headers || {}) } };
-    if (options.json) init.body = JSON.stringify(options.json);
+    const { json, raw, ...rest } = options;
+    const init = { ...rest, headers: { ...headers(Boolean(json)), ...(options.headers || {}) } };
+    if (json) init.body = JSON.stringify(json);
     const response = await fetch(path, init);
     const type = response.headers.get('content-type') || '';
     if (!response.ok) {
@@ -23,7 +26,51 @@
       } catch { /* non-JSON error */ }
       throw new Error(message);
     }
+    if (raw) return response;
     return type.includes('application/json') ? response.json() : response;
+  }
+
+  // Report downloads must carry the same verified identity as every other
+  // call, and a plain anchor navigation cannot send the Authorization header.
+  // So the file is fetched with the api() helper and handed to the browser as
+  // an object URL behind a temporary anchor with the `download` attribute.
+  function fileNameFromDisposition(header, fallback) {
+    const match = /filename\*?=(?:UTF-8'')?"?([^";]+)"?/i.exec(header || '');
+    return match ? decodeURIComponent(match[1]) : fallback;
+  }
+
+  async function downloadReport(path, fallbackName) {
+    const response = await api(path, { raw: true });
+    const blob = await response.blob();
+    const name = fileNameFromDisposition(response.headers.get('content-disposition'), fallbackName || 'report');
+    const url = URL.createObjectURL(blob);
+    try {
+      const anchor = document.createElement('a');
+      anchor.href = url;
+      anchor.download = name;
+      anchor.rel = 'noopener';
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+    } finally {
+      // Give the click a tick to start before the URL is revoked.
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    }
+  }
+
+  // Every element rendered with data-download="/v1/reports/<id>/download"
+  // becomes an authenticated download; data-file-name is the fallback name.
+  function bindDownloads(root) {
+    root.querySelectorAll('[data-download]').forEach((button) => button.addEventListener('click', async () => {
+      button.disabled = true;
+      try {
+        await downloadReport(button.dataset.download, button.dataset.fileName);
+      } catch (error) {
+        toast(error.message);
+      } finally {
+        button.disabled = false;
+      }
+    }));
   }
 
   async function upload(path, file, fields) {
@@ -89,7 +136,7 @@
     const sources = (data.sources || []).map((source) => source.url
       ? `<li><a href="${escapeHtml(source.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(source.title)}</a>${source.published_at ? ` · ${escapeHtml(source.published_at.slice(0, 10))}` : ''}</li>`
       : `<li>${escapeHtml(source.title)} · ${escapeHtml(source.locator)}</li>`).join('');
-    const artifacts = (data.artifacts || []).filter((item) => item.download_path).map((item) => `<li><a href="${escapeHtml(item.download_path)}">${escapeHtml(item.title || item.file_name || 'download')}</a> (${escapeHtml(item.format)}, ${item.row_count} rows)</li>`).join('');
+    const artifacts = (data.artifacts || []).filter((item) => item.download_path).map((item) => `<li><button class="link-button" type="button" data-download="${escapeHtml(item.download_path)}" data-file-name="${escapeHtml(item.file_name || item.title || 'download')}">${escapeHtml(item.title || item.file_name || 'download')}</button> (${escapeHtml(item.format)}, ${item.row_count} rows)</li>`).join('');
     const steps = (data.steps || []).map((step) => `${escapeHtml(step.tool)} ${pill(step.status)}`).join(' → ');
     const warnings = (data.warnings || []).map((warning) => `<li>${escapeHtml(warning.message)}</li>`).join('');
     box.innerHTML = `${pill(data.status)} <strong>${escapeHtml(data.intent || '')}</strong>\n${escapeHtml(data.answer)}`
@@ -98,6 +145,7 @@
       + (artifacts ? `<ul class="source-list">${artifacts}</ul>` : '')
       + (warnings ? `<ul class="source-list muted">${warnings}</ul>` : '')
       + (data.job_id ? `<div class="result-meta">Background job ${escapeHtml(data.job_id)}; check Reports &amp; notifications when it finishes.</div>` : '');
+    bindDownloads(box);
     const approvalBox = $('command-approval');
     if (data.status === 'approval_required' && data.approval) {
       state.lastApproval = data.approval.approval_id;
@@ -229,9 +277,9 @@
           const options = (selected) => `<option value="">— keep as extra attribute —</option>${entity.fields.map((field) => `<option value="${field.name}" ${field.name === selected ? 'selected' : ''}>${field.name}${field.required ? ' *' : ''}</option>`).join('')}`;
           block.innerHTML = `<strong>Column mapping for ${escapeHtml(payload.entity)}</strong> (confidence ${payload.entity_confidence})
 <div class="muted">Review required: ${escapeHtml((payload.review_required || []).map((item) => item.source_header).join(', ') || 'none')}. Missing required: ${escapeHtml((payload.missing_required || []).join(', ') || 'none')}.</div>
-<div class="mapping-grid" style="margin-top:8px"><div class="muted">Source header</div><div class="muted">Canonical field</div><div class="muted">Sample</div>
+<div class="mapping-grid stack-sm"><div class="muted">Source header</div><div class="muted">Canonical field</div><div class="muted">Sample</div>
 ${payload.headers.map((header) => `<div>${escapeHtml(header)}</div><div><select data-header="${escapeHtml(header)}">${options(payload.proposed_mapping[header])}</select></div><div class="muted">${escapeHtml((payload.samples[header] || []).join(' | ').slice(0, 40))}</div>`).join('')}</div>
-<div style="margin-top:10px"><button class="btn" type="button">Approve mapping</button></div>`;
+<div class="stack"><button class="btn" type="button">Approve mapping</button></div>`;
           block.querySelector('button').addEventListener('click', async () => {
             const mapping = {};
             block.querySelectorAll('select[data-header]').forEach((select) => { mapping[select.dataset.header] = select.value || null; });
@@ -245,7 +293,7 @@ ${payload.headers.map((header) => `<div>${escapeHtml(header)}</div><div><select 
         } else {
           const payload = review.payload;
           block.innerHTML = `<strong>Possible duplicate</strong> (${escapeHtml(payload.kind)}, score ${payload.score})<div class="muted">${escapeHtml(payload.left_locator)} vs ${escapeHtml(payload.right_locator || payload.record_key || 'existing record')} · ${escapeHtml(JSON.stringify(payload.evidence))}</div>
-<div style="margin-top:8px"><button class="btn" data-decision="approved" type="button">Same record (skip new row)</button> <button class="btn secondary" data-decision="rejected" type="button">Different (import)</button></div>`;
+<div class="stack-sm"><button class="btn" data-decision="approved" type="button">Same record (skip new row)</button> <button class="btn secondary" data-decision="rejected" type="button">Different (import)</button></div>`;
           block.querySelectorAll('button[data-decision]').forEach((button) => button.addEventListener('click', async () => {
             try {
               await api(`/v1/ingestion/reviews/${review.review_id}`, { method: 'POST', json: { decision: button.dataset.decision } });
@@ -362,7 +410,8 @@ ${payload.headers.map((header) => `<div>${escapeHtml(header)}</div><div><select 
   async function loadReports() {
     try {
       const data = await api('/v1/reports?limit=50');
-      $('reports-table').innerHTML = table(['Title', 'Format', 'Rows', 'Created', ''], data.reports, (report) => [escapeHtml(report.title), escapeHtml(report.format), String(report.row_count), escapeHtml(report.created_at.slice(0, 19)), `<a class="btn secondary" href="${escapeHtml(report.download_path)}">Download</a>`]);
+      $('reports-table').innerHTML = table(['Title', 'Format', 'Rows', 'Created', ''], data.reports, (report) => [escapeHtml(report.title), escapeHtml(report.format), String(report.row_count), escapeHtml(report.created_at.slice(0, 19)), `<button class="btn secondary" type="button" data-download="${escapeHtml(report.download_path)}" data-file-name="${escapeHtml(`${report.title || 'report'}.${report.format || 'csv'}`)}">Download</button>`]);
+      bindDownloads($('reports-table'));
     } catch (error) { $('reports-table').innerHTML = `<p class="muted">${escapeHtml(error.message)}</p>`; }
   }
   async function loadNotifications() {
