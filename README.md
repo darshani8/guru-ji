@@ -8,7 +8,8 @@ The implementation map for the platform is in [`docs/PLATFORM_BLUEPRINT.md`](doc
 
     uv sync --extra dev
     make run
-    # open http://localhost:8000/platform.html (demo role picker: student … institution_admin)
+    # developers: open http://localhost:8000/console/ (demo role picker: student … institution_admin)
+    # clients:    open http://localhost:8000/ (text and voice assistant)
 
 Or from the command line against the running API:
 
@@ -17,6 +18,8 @@ Or from the command line against the running API:
     curl -X POST http://localhost:8000/v1/ingestion/uploads -H 'Authorization: Bearer dev-token' -H 'X-Demo-Role: principal' -F file=@students.xlsx -F entity=student
     # then ask the agent to do work
     curl -X POST http://localhost:8000/v1/agent/commands -H 'Authorization: Bearer dev-token' -H 'X-Demo-Role: principal' -H 'Content-Type: application/json' -d '{"command":"Find all MBA students below 75% attendance and send the report to the HOD"}'
+
+The client assistant (`apps/web/assistant/`, served at `/`) and the developer platform console (`apps/web/console/`, served at `/console/`) are separate apps that share only the sign-in client and base styles (`apps/web/shared/`); neither links to the other. The console is served outside production by default and is off in production unless `GURU_WEB_CONSOLE_ENABLED=true`, so a client-facing deployment serves only the assistant. With OIDC, register both `https://<host>/` and `https://<host>/console/` as callback and sign-out URLs, since each app returns to itself after sign-in.
 
 `make platform-smoke` runs that sequence end to end. Local defaults need no external services (SQLite, local object store, inline job queue, hashing embeddings, deterministic planner, outbox email). See `.env.example` for PostgreSQL, S3, SQS, OCR, SMTP/SES, embeddings, model planner, and the Tavily-backed internet intelligence provider.
 

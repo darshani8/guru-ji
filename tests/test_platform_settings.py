@@ -75,6 +75,22 @@ class PlatformSettingsTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CONTROL_DATABASE_URL": ":memory:", "GURU_ENVIRONMENT": "development", "GURU_PLATFORM_ENABLED": "false"}, clear=False):
             self.assertFalse(AppSettings.from_env().platform_enabled)
 
+    def test_developer_console_is_opt_in_for_production_and_on_elsewhere(self):
+        # Clients reach the assistant; the developer console is only served where a
+        # deployment has chosen to serve it.
+        self.assertFalse(AppSettings(environment="production").web_console_enabled)
+        self.assertTrue(AppSettings(environment="production", web_console_enabled=True).web_console_enabled)
+        self.assertTrue(AppSettings().web_console_enabled)
+        self.assertTrue(AppSettings(environment="staging").web_console_enabled)
+        base_env = {"CONTROL_DATABASE_URL": ":memory:", "GURU_ENVIRONMENT": "production"}
+        with mock.patch.dict(os.environ, base_env, clear=False):
+            os.environ.pop("GURU_WEB_CONSOLE_ENABLED", None)
+            self.assertFalse(AppSettings.from_env().web_console_enabled)
+        with mock.patch.dict(os.environ, {**base_env, "GURU_WEB_CONSOLE_ENABLED": "true"}, clear=False):
+            self.assertTrue(AppSettings.from_env().web_console_enabled)
+        with mock.patch.dict(os.environ, {"CONTROL_DATABASE_URL": ":memory:", "GURU_ENVIRONMENT": "development", "GURU_WEB_CONSOLE_ENABLED": "false"}, clear=False):
+            self.assertFalse(AppSettings.from_env().web_console_enabled)
+
     def test_stale_job_age_is_configurable_and_positive(self):
         self.assertEqual(AppSettings().job_stale_seconds, 180)
         with mock.patch.dict(os.environ, {"CONTROL_DATABASE_URL": ":memory:", "GURU_JOB_STALE_SECONDS": "120"}, clear=False):

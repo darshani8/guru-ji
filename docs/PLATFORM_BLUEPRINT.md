@@ -70,7 +70,7 @@ See `.env.example`. Local defaults need no external service: SQLite, local/in-me
 
 ## Operations
 
-- `make run` starts the API; `/platform.html` is the platform console; `/` is the assistant.
+- `make run` starts the API; `/` is the client assistant and `/console/` is the developer platform console (separate apps; the console is off in production unless `GURU_WEB_CONSOLE_ENABLED=true`).
 - `make worker` drains background jobs (required for `GURU_JOB_QUEUE=sqs`; optional alongside the thread queue). The thread queue starts with the API process only (scripts never claim jobs). Workers heartbeat every 30 seconds while running a job; at boot and once a minute, workers return jobs whose heartbeat is older than `GURU_JOB_STALE_SECONDS` (default 180) to the queue and dispatch them again, so a job whose worker died resumes within minutes while a long-running live job is never duplicated. On shutdown the API waits (bounded) for the job in flight and hands an unfinished one straight back to the queue. When the database allows a second connection, the in-process worker uses its own, so imports never delay request handling.
 - `make monitor` runs one monitoring pass for every institution with monitoring enabled (schedule with cron/EventBridge).
 - `make platform-smoke` exercises upload → import → command → report against a running development API.
