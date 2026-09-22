@@ -1,0 +1,69 @@
+name: deploy-agentic-saffron
+
+# Builds the portal image and pushes it to ECR. Credentials come from GitHub's
+# OIDC provider, so no AWS keys are stored in this repository.
+#
+# The job is skipped until the repository variable AWS_DEPLOY_ROLE_ARN is set,
+# which keeps main green before the role exists. Set it to the ARN of a role
+# whose trust policy names this repository's main branch and which may push to
+# the agentic-saffron-api repository only.
+
+on:
+  push:
+    branches: ["main"]
+    paths:
+      - "apps/**"
+      - "migrations/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - "infra/docker/Dockerfile.api"
+      - ".github/workflows/deploy-agentic-saffron.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-agentic-saffron
+  cancel-in-progress: false
+
+jobs:
+  build-and-push:
+    if: vars.AWS_DEPLOY_ROLE_ARN != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      AWS_REGION: ap-south-1
+      ECR_REPOSITORY: agentic-saffron-api
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Assume the deployment role
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push the image
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+        run: |
+          set -euo pipefail
+          image="$REGISTRY/$ECR_REPOSITORY"
+          # Tagged with the commit so a deployment names exactly what it runs.
+          docker build -f infra/docker/Dockerfile.api -t "$image:${GITHUB_SHA}" -t "$image:latest" .
+          docker push "$image:${GITHUB_SHA}"
+          docker push "$image:latest"
+          echo "Pushed $image:${GITHUB_SHA}"
+
+      - name: Report the pushed image
+        run: |
+          echo "### Image pushed" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '`'"${ECR_REPOSITORY}:${GITHUB_SHA}"'`' >> "$GITHUB_STEP_SUMMARY"
