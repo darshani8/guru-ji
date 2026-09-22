@@ -330,6 +330,50 @@ async def send_map_digest(request: Request, body: MapInstitutionBody) -> dict[st
     return result
 
 
+class SuppressBody(BaseModel):
+    identifier: str = Field(min_length=1, max_length=1000, description="An account URL or web address to keep out of the map")
+    reason: str = Field(min_length=1, max_length=200)
+    institution_id: str | None = Field(default=None, max_length=128)
+
+
+@router.post("/suppress", summary="Keep an account or address out of the map for good (only a keyed fingerprint is stored)")
+async def suppress(request: Request, body: SuppressBody) -> dict[str, Any]:
+    service = map_service(request)
+    principal = require_principal(request, Capability.INTELLIGENCE_MANAGE)
+    target = resolve_institution(principal, body.institution_id)
+    try:
+        result = service.suppress(principal, target, identifier=body.identifier, reason=body.reason)
+    except (ValueError, PermissionError) as exc:
+        raise translate(exc) from exc
+    # The audit record names who suppressed and why, never what: that would undo the point.
+    audit_map_action(request, principal, "suppress", metadata={"institution_id": target, "removed": bool(result["removed"]), "reason": body.reason[:200]})
+    return result
+
+
+@router.get("/ownership", summary="The institution's ownership token, how to publish it, and what the owner has confirmed (managers only)")
+async def ownership(request: Request, institution_id: str | None = None) -> dict[str, Any]:
+    service = map_service(request)
+    principal = require_principal(request, Capability.INTELLIGENCE_MANAGE)
+    target = resolve_institution(principal, institution_id)
+    try:
+        return service.ownership(principal, target)
+    except (ValueError, PermissionError) as exc:
+        raise translate(exc) from exc
+
+
+@router.post("/ownership/verify", summary="Check the official domains for the ownership token now")
+async def verify_ownership(request: Request, body: MapInstitutionBody) -> dict[str, Any]:
+    service = map_service(request)
+    principal = require_principal(request, Capability.INTELLIGENCE_MANAGE)
+    target = resolve_institution(principal, body.institution_id)
+    try:
+        result = await service.verify_ownership(principal, target)
+    except (ValueError, PermissionError) as exc:
+        raise translate(exc) from exc
+    audit_map_action(request, principal, "ownership_verify", metadata={"institution_id": target, "verified": sum(item["outcome"] == "verified" for item in result["results"])})
+    return result
+
+
 @router.get("/connectors", summary="The connectors the engine may use and how each reaches the web")
 async def connectors(request: Request, institution_id: str | None = None) -> dict[str, Any]:
     service = map_service(request)

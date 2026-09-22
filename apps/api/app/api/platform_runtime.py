@@ -33,6 +33,7 @@ from ..internet_intelligence.map.connectors.search import SearchConnector, SpamP
 from ..internet_intelligence.map.connectors.web import LeadPageConnector, OfficialSiteConnector, RecheckConnector
 from ..internet_intelligence.map.engine import EngineConfig, MapEngine
 from ..internet_intelligence.map.incidents import IncidentDesk
+from ..internet_intelligence.map.ownership import OwnerClaimsConnector
 from ..internet_intelligence.map.service import MapService
 from ..internet_intelligence.map.store import MapStore
 from ..internet_intelligence.monitoring import ContinuousMonitor
@@ -178,7 +179,7 @@ _SHARED_ONLY_URLS = frozenset({":memory:", "sqlite:///:memory:", ""})
 
 def _map_service(settings: AppSettings, backend: Any, intelligence_store: IntelligenceStore, provider: Any | None, notifications: NotificationService | None = None) -> MapService:
     fetcher = PublicPageFetcher(timeout_seconds=settings.web_extract_timeout_seconds, max_response_bytes=settings.web_extract_max_bytes, user_agent=crawler_user_agent(settings.intelligence_crawler_contact)) if settings.intelligence_fetch_pages else None
-    store = MapStore(backend=backend, suppression_key=(settings.intelligence_suppression_key or "guru-ji-development-only").encode("utf-8"))
+    store = MapStore(backend=backend, suppression_key=_suppression_key(settings))
 
     def recipients(institution_id: str) -> tuple[str, ...]:
         profile = intelligence_store.get_profile(institution_id)
@@ -196,10 +197,15 @@ def _map_service(settings: AppSettings, backend: Any, intelligence_store: Intell
     return MapService(store, fetcher=fetcher, engine=engine, seed_groups=settings.intelligence_seed_group_map(), desk=desk)
 
 
+def _suppression_key(settings: AppSettings) -> bytes:
+    return (settings.intelligence_suppression_key or "guru-ji-development-only").encode("utf-8")
+
+
 def map_connectors(settings: AppSettings, *, transport: Any | None = None) -> ConnectorRegistry:
     """The connectors the map engine may use.
 
-    The public-page connectors are always on; every other one stays off
+    The public-page connectors (and the owner check, which reads only the
+    institution's own domains) are always on; every other one stays off
     until GURU_INTELLIGENCE_CONNECTORS names it (and its key is configured).
     """
 
@@ -213,6 +219,8 @@ def map_connectors(settings: AppSettings, *, transport: Any | None = None) -> Co
         CourtRecordsConnector(api_token=settings.intelligence_indiankanoon_token or "", active="court_records" in on, client=client),
         CertificateConnector(active="certificates" in on, client=client), RdapConnector(active="rdap" in on, client=client), DnsConnector(active="dns" in on, client=client),
         WaybackConnector(active="wayback" in on, client=client), LinkHubConnector(active="link_hub" in on), DirectoryConnector(active="directory" in on),
+        # Reads only the institution's own domains; the DNS TXT check uses DNS over HTTPS only when the dns connector is allowed.
+        OwnerClaimsConnector(key=_suppression_key(settings), dns=client if "dns" in on else None),
     ])
 
 

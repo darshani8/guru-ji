@@ -410,9 +410,9 @@ class WiringTests(unittest.TestCase):
     def test_connectors_are_off_until_named_and_keyed(self):
         from app.api.platform_runtime import map_connectors
 
-        self.assertEqual(map_connectors(AppSettings()).names(), ["lead_page", "official_site", "recheck"])
+        self.assertEqual(map_connectors(AppSettings()).names(), ["lead_page", "official_site", "owner_claims", "recheck"], "only readers of public pages and the institution's own domains are on")
         on = AppSettings(intelligence_connectors=("wikidata", "rdap", "youtube"), intelligence_youtube_api_key="k")
-        self.assertEqual(map_connectors(on).names(), ["lead_page", "official_site", "rdap", "recheck", "wikidata", "youtube"])
+        self.assertEqual(map_connectors(on).names(), ["lead_page", "official_site", "owner_claims", "rdap", "recheck", "wikidata", "youtube"])
         for bad, message in (
             (AppSettings(intelligence_connectors=("scraper",)), "unknown connectors"),
             (AppSettings(intelligence_connectors=("youtube",)), "YOUTUBE_API_KEY"),

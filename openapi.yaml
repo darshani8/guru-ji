@@ -2796,6 +2796,93 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/suppress:
+    post:
+      tags:
+      - intelligence-map
+      summary: Keep an account or address out of the map for good (only a keyed fingerprint
+        is stored)
+      operationId: suppress_v1_intelligence_map_suppress_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SuppressBody'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Suppress V1 Intelligence Map Suppress Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/ownership:
+    get:
+      tags:
+      - intelligence-map
+      summary: The institution's ownership token, how to publish it, and what the
+        owner has confirmed (managers only)
+      operationId: ownership_v1_intelligence_map_ownership_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Ownership V1 Intelligence Map Ownership Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/ownership/verify:
+    post:
+      tags:
+      - intelligence-map
+      summary: Check the official domains for the ownership token now
+      operationId: verify_ownership_v1_intelligence_map_ownership_verify_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MapInstitutionBody'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Verify Ownership V1 Intelligence Map Ownership Verify
+                  Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /v1/intelligence/map/connectors:
     get:
       tags:
@@ -3706,6 +3793,30 @@ components:
       - connector
       - target
       title: SourceBody
+    SuppressBody:
+      properties:
+        identifier:
+          type: string
+          maxLength: 1000
+          minLength: 1
+          title: Identifier
+          description: An account URL or web address to keep out of the map
+        reason:
+          type: string
+          maxLength: 200
+          minLength: 1
+          title: Reason
+        institution_id:
+          anyOf:
+          - type: string
+            maxLength: 128
+          - type: 'null'
+          title: Institution Id
+      type: object
+      required:
+      - identifier
+      - reason
+      title: SuppressBody
     ValidationError:
       properties:
         loc:

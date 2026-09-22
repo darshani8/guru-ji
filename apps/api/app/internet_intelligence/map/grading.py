@@ -91,6 +91,8 @@ def grade(asset: Mapping[str, Any], evidence: Sequence[Mapping[str, Any]], *, no
     # -- O / A / A-arch / B / C from supporting evidence. An official link that
     # a later clean fetch of the same page no longer found stops counting.
     withdrawn = {str(item.get("source_url")): _when(item.get("observed_at")) for item in refutes if item.get("kind") == "official_link"}
+    # The owner can take a confirmation back (token removed, account delisted).
+    owner_withdrawn = {str(item.get("channel")): _when(item.get("observed_at")) for item in refutes if item.get("kind") == "owner_claim"}
     latest_integrity = _latest_integrity(ordered)
     redirected_to = (
         _detail(latest_integrity[0]).split(":", 1)[1] or "another host"
@@ -103,7 +105,8 @@ def grade(asset: Mapping[str, Any], evidence: Sequence[Mapping[str, Any]], *, no
             continue
         kind, via, detail = item.get("kind"), item.get("observed_via"), _detail(item)
         if kind == "owner_claim" and via == "owner":
-            candidates.append(("O", f"owner confirmed ({detail[:80]})"))
+            if owner_withdrawn.get(str(item.get("channel")), datetime.min.replace(tzinfo=timezone.utc)) < _when(item.get("observed_at")):
+                candidates.append(("O", f"owner confirmed ({detail[:80]})"))
         elif kind == "official_link":
             # detail is "<anchor grade>:<position>": a footer link on an A/O
             # domain is A; on a B domain it can only be B.

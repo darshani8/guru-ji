@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlparse
 
@@ -13,7 +14,10 @@ from ..profile import InstitutionProfile
 from .engine import MapEngine
 from .export import export_tsv
 from .gate import rescore
+from .assets import asset_ref
+from .connectors.base import ConnectorContext
 from .incidents import IncidentDesk
+from .ownership import OwnerClaimsConnector, instructions, verification_token
 from .harvest import OfficialSiteHarvester
 from .metrics import map_metrics, record_baseline
 from .pipeline import regrade, sync_profile
@@ -231,6 +235,55 @@ class MapService:
         if not self.store.decide_review_item(institution_id, review_id, decision=decision, decided_by=principal.principal_id, note=note, redact=decision == "personal"):
             raise ValueError("this item was decided by someone else just now")
         return {"review_id": review_id, "kind": item["kind"], **effect}
+
+    def suppress(self, principal: Principal, institution_id: str, *, identifier: str, reason: str) -> dict[str, Any]:
+        """Keep an account or address out of the map for good (a person's account, an opt-out request).
+
+        Only a keyed fingerprint is stored; if the map already holds the
+        account it is removed with its evidence.
+        """
+
+        self.guard(principal, institution_id, Capability.INTELLIGENCE_MANAGE)
+        value = identifier.strip()
+        if not value or len(value) > 1000:
+            raise ValueError("name the account URL or address to suppress")
+        keys = [value]
+        try:
+            ref = asset_ref(value)
+            keys = [ref.key, ref.url, value]
+        except ValueError:
+            ref = None
+        for key in dict.fromkeys(keys):
+            self.store.suppress(institution_id, key, reason=reason[:200])
+        existing = self.store.find_asset(institution_id, ref.key) if ref else None
+        removed = bool(existing) and self.store.forget_asset(institution_id, existing["asset_id"])
+        return {"suppressed": True, "removed": removed}
+
+    # --------------------------------------------------------------- ownership
+    def ownership(self, principal: Principal, institution_id: str) -> dict[str, Any]:
+        """The institution's token, how to publish it, and what the owner has confirmed so far."""
+
+        self.guard(principal, institution_id, Capability.INTELLIGENCE_MANAGE)
+        domains = [domain["asset_key"].removeprefix("web:") for domain in self.store.iter_assets(institution_id, kind="domain", relation="official") if domain["grade"] in {"O", "A", "B"}]
+        confirmed = [{key: asset[key] for key in ("asset_id", "asset_key", "url", "kind", "platform")} for asset in self.store.iter_assets(institution_id, grade="O")]
+        return {**instructions(verification_token(self.store.suppression_key, institution_id), domains), "confirmed": confirmed}
+
+    async def verify_ownership(self, principal: Principal, institution_id: str) -> dict[str, Any]:
+        """Check every official domain for the token now (the engine also does this weekly)."""
+
+        self.guard(principal, institution_id, Capability.INTELLIGENCE_MANAGE)
+        if self.fetcher is None:
+            raise ValueError("page fetching is disabled (GURU_INTELLIGENCE_FETCH_PAGES=false)")
+        connector = self.engine.registry.get("owner_claims") if self.engine else None
+        connector = connector or OwnerClaimsConnector(key=self.store.suppression_key)
+        run_id = self.store.start_map_run(institution_id, kind="ownership")
+        context = ConnectorContext(self.store, institution_id, run_id, datetime.now(timezone.utc), fetcher=self.fetcher)
+        results = []
+        for domain in list(self.store.iter_assets(institution_id, kind="domain", relation="official"))[:MAX_HARVEST_DOMAINS]:
+            outcome = await connector.run({"target": domain["asset_id"]}, context)
+            results.append({"domain": domain["asset_key"].removeprefix("web:"), "outcome": outcome.outcome, "accounts_added": outcome.new_assets})
+        self.store.finish_map_run(institution_id, run_id, status="succeeded", stop_reason="completed", counts={"domains": len(results), "verified": sum(item["outcome"] == "verified" for item in results)})
+        return {"run_id": run_id, "results": results, **self.ownership(principal, institution_id)}
 
     # --------------------------------------------------------------- incidents
     def incidents(self, principal: Principal, institution_id: str, *, status: str | None = None, severity: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
