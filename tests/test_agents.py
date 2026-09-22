@@ -3,6 +3,8 @@ import unittest
 from app.agents.bindings import BindingError, resolve_reference
 from app.agents.contracts import AgentCommand, AgentPlan, PlanStep
 from app.agents.planner import DeterministicPlanner, ModelPlanner, Vocabulary, extract_entities
+from app.agents.specialists import STEP_FAILURE_MESSAGE, build_specialists
+from app.domain.audit import AuditOutcome
 from app.domain.principals import InstitutionScope, PrincipalType
 from platform_fixtures import PlatformFixture, principal
 
@@ -56,6 +58,37 @@ class PlannerTests(unittest.TestCase):
         internet = self.planner.plan("What happened about our college on the internet this week?", self.tools, self.vocab)
         self.assertIsNotNone(internet.clarification, "no intelligence service registered -> clarification")
 
+    def test_change_value_stops_at_conjunctions_and_clause_boundaries(self):
+        cases = {
+            "Change section of student MBA001 to B and notify me": ("section", "B"),
+            "Set the status of student MBA001 to inactive then email the HOD": ("status", "inactive"),
+            "Change the semester of student MBA001 to 4 and section to B": ("semester", "4"),
+            "Update section of student MBA001 to B, then notify me": ("section", "B"),
+            "Update the phone number of student MBA001 to 9999988888 and notify me": ("phone", "9999988888"),
+            "Update the address of student MBA001 to Jayanagar Bengaluru": ("address", "Jayanagar Bengaluru"),
+            "Update the address of student MBA001 to Jayanagar and notify me": ("address", "Jayanagar"),
+        }
+        for text, expected in cases.items():
+            self.assertEqual(extract_entities(text, self.vocab).field_change, expected, text)
+        plan = self.planner.plan("Change section of student MBA001 to B and notify me", self.tools, self.vocab)
+        self.assertEqual(plan.steps[0].arguments, {"student_id": "MBA001", "changes": {"section": "B"}})
+
+    def test_loose_student_id_needs_an_identifier_keyword(self):
+        self.assertIsNone(extract_entities("Show results of students affected by COVID-19", self.vocab).student_id)
+        self.assertIsNone(extract_entities("Show me results for sem-03 MBA students", self.vocab).student_id)
+        self.assertIsNone(extract_entities("results for semester-3 MBA", self.vocab).student_id)
+        self.assertIsNone(extract_entities("what is the pass percentage of sem 3 students", self.vocab).student_id)
+        self.assertEqual(extract_entities("Show results of student MBA001", self.vocab).student_id, "MBA001")
+        self.assertEqual(extract_entities("Get the results of student number MBA001", self.vocab).student_id, "MBA001")
+        self.assertEqual(extract_entities("results of student sem-03 MBA001", self.vocab).student_id, "MBA001")
+        self.assertEqual(extract_entities("Show marks of usn 1AB21CS001", self.vocab).student_id, "1AB21CS001")
+        covid = self.planner.plan("Show results of students affected by COVID-19", self.tools, self.vocab)
+        self.assertEqual([step.tool for step in covid.steps], ["get_exam_summary"])
+        semester = self.planner.plan("Show me results for sem-03 MBA students", self.tools, self.vocab)
+        self.assertEqual([(step.tool, step.arguments) for step in semester.steps], [("get_exam_summary", {"program": "MBA", "semester": 3})])
+        one = self.planner.plan("Show results of student MBA001", self.tools, self.vocab)
+        self.assertEqual([(step.tool, step.arguments) for step in one.steps], [("get_student_results", {"student_id": "MBA001"})])
+
     def test_clarifications_for_ambiguous_or_unauthorised_commands(self):
         self.assertIn("Who should receive", self.planner.plan("email the fee defaulters list", self.tools, self.vocab).clarification)
         self.assertIn("student ID", self.planner.plan("update the student record", self.tools, self.vocab).clarification)
@@ -74,6 +107,47 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(plan.steps[0].tool, "count_students")
         broken = ModelPlanner(_Model("not json"))
         self.assertEqual(__import__("asyncio").run(broken.plan("how many mba students", self.tools, self.vocab)).planner, "deterministic")
+
+    def test_model_planner_falls_back_on_malformed_shapes(self):
+        import asyncio
+
+        def plan_for(raw):
+            return asyncio.run(ModelPlanner(_Model(raw)).plan("how many mba students", self.tools, self.vocab))
+
+        # Shapes that cannot be a plan: the deterministic plan stands and nothing raises.
+        falls_back = [
+            '{"steps": [{"step_id": "s1", "tool": ["count_students"]}]}',
+            '{"steps": [{"step_id": "s1", "tool": {"name": "count_students"}}]}',
+            '{"steps": [{"step_id": "s1", "tool": null}]}',
+            '{"steps": "count_students"}',
+            '{"steps": [null]}',
+            '{"steps": [{"step_id": "s1", "tool": "count_students", "depends_on": [1, "s0"]}]}',
+            '{"steps": [{"step_id": "s1", "tool": "count_students", "arguments": {"program": ["MBA"]}}]}',
+        ]
+        for raw in falls_back:
+            plan = plan_for(raw)
+            self.assertEqual(plan.planner, "deterministic", raw)
+            self.assertEqual([step.tool for step in plan.steps], ["count_students"], raw)
+        # Shapes with a valid tool but sloppy metadata are coerced to safe defaults.
+        tolerated = [
+            '{"steps": [{"step_id": "s1", "tool": "count_students", "depends_on": null}]}',
+            '{"steps": [{"step_id": "s1", "tool": "count_students", "depends_on": "s0"}]}',
+            '{"steps": [{"step_id": "s1", "tool": "count_students"}], "confidence": [1]}',
+            '{"steps": [{"step_id": "s1", "tool": "count_students"}], "confidence": {"value": 1}}',
+            '{"steps": [{"step_id": "s1", "tool": "count_students"}], "confidence": "NaN"}',
+            '{"steps": [{"step_id": "s1", "tool": "count_students"}], "confidence": "very sure"}',
+            '{"steps": [{"step_id": "s1", "tool": "count_students", "bindings": {"x": null}}]}',
+            '{"steps": [{"step_id": null, "tool": "count_students", "purpose": ["x"]}], "intent": ["a"]}',
+        ]
+        for raw in tolerated:
+            plan = plan_for(raw)
+            self.assertEqual((plan.planner, plan.confidence), ("model", 0.7), raw)
+            self.assertEqual([(step.tool, step.depends_on, step.bindings) for step in plan.steps], [("count_students", (), {})], raw)
+        # A clarification with a non-numeric confidence is still a usable clarification.
+        clarify = plan_for('{"clarification": "which program?", "confidence": "high"}')
+        self.assertEqual((clarify.planner, clarify.clarification, clarify.confidence), ("model", "which program?", 0.5))
+        clamped = plan_for('{"steps": [{"step_id": "s1", "tool": "count_students"}], "confidence": 7}')
+        self.assertEqual((clamped.planner, clamped.confidence), ("model", 1.0))
 
     def test_bindings_and_plan_validation(self):
         results = {"s1": {"data": {"students": [{"student_id": "A", "name": "x"}, {"student_id": "B"}]}}}
@@ -141,6 +215,43 @@ class MasterAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job["result"]["answer"], "8 student(s).")
         inbox = self.fx.notifications.inbox(self.hod, "college_a")
         self.assertEqual(inbox[0]["title"], "Command finished: complete")
+
+    async def test_step_exception_becomes_failed_result_and_is_audited(self):
+        class ExplodingGateway:
+            async def invoke(self, tool_name, arguments, context):
+                raise RuntimeError("postgresql://user:secret@db.internal:5432 connection refused")
+
+        self.fx.agent.specialists = build_specialists(ExplodingGateway())
+        response = await self.run_command("How many students are there?")
+        self.assertEqual(response.status, "failed")
+        self.assertEqual([(step.tool, step.status) for step in response.steps], [("count_students", "failed")])
+        self.assertEqual(response.steps[0].denial_reason, STEP_FAILURE_MESSAGE)
+        self.assertNotIn("secret", response.answer)
+        self.assertNotIn("db.internal", response.answer)
+        self.assertIn("count_students could not run", response.answer)
+        event = self.fx.control.recent_audit(1)[0]
+        self.assertEqual((event.event_type, event.request_id, event.outcome), ("agent.command", "req-1", AuditOutcome.FAILED))
+        run = self.fx.store.list_agent_runs("college_a")[0]
+        self.assertEqual((run["status"], run["tool_names"]), ("failed", ["count_students"]))
+        self.assertNotIn("secret", str(run))
+
+    async def test_step_exception_marks_dependants_and_keeps_partial_results(self):
+        real = self.fx.gateway
+
+        class FlakyGateway:
+            async def invoke(self, tool_name, arguments, context):
+                if tool_name == "generate_report":
+                    raise OSError("object store unreachable")
+                return await real.invoke(tool_name, arguments, context)
+
+        self.fx.agent.specialists = build_specialists(FlakyGateway())
+        response = await self.run_command("Find all MBA students below 75% attendance and send the report to the HOD")
+        self.assertEqual(response.status, "partial")
+        statuses = {step.tool: step.status for step in response.steps}
+        self.assertEqual(statuses["find_low_attendance"], "success")
+        self.assertEqual(statuses["generate_report"], "failed")
+        self.assertNotIn("send_email", statuses, "a step whose dependency failed is skipped")
+        self.assertEqual(self.fx.store.list_agent_runs("college_a")[0]["status"], "partial")
 
     async def test_model_wording_is_guarded(self):
         self.fx.agent.model = _Model("There are exactly ninety students.")

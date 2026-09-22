@@ -105,17 +105,26 @@ def _extract_department(text: str, vocabulary: Vocabulary, program: str | None) 
     return None
 
 
+_SEMESTER_TOKEN = re.compile(r"(?:sem|semester)[-/ ]?\d{1,2}", re.IGNORECASE)
+
+
 def _extract_student_id(text: str) -> str | None:
     match = re.search(r"\b(?:student|usn|roll(?: no| number)?|id)\s*[:#]?\s*([A-Za-z0-9/-]{4,20})\b", text, flags=re.IGNORECASE)
-    if match and any(char.isdigit() for char in match.group(1)):
+    if match and any(char.isdigit() for char in match.group(1)) and not _SEMESTER_TOKEN.fullmatch(match.group(1)):
         return match.group(1).upper()
     match = re.search(r"\b([0-9][A-Za-z0-9]{2,3}[0-9]{2}[A-Za-z]{2,4}[0-9]{3})\b", text)
     if match:
         return match.group(1).upper()
-    # Short institutional IDs such as MBA002 or BCA0017: letters then digits, not a percentage or year.
-    match = re.search(r"\b([A-Za-z]{2,6}[-/]?\d{2,6})\b(?!\s*%)", text)
-    if match and not re.fullmatch(r"(?:sem|semester)\d+", match.group(1).lower()):
-        return match.group(1).upper()
+    # Short institutional IDs such as MBA002 or BCA0017: letters then digits, not a
+    # percentage, a year, or a semester spelling. This loose shape also matches
+    # hyphenated words (COVID-19, SEM-03), so it only applies when the command
+    # names a student, USN, roll number or id explicitly ("students" is a
+    # listing noun, not an identifier cue).
+    if not re.search(r"\b(?:student|usn|roll|id)\b", text, flags=re.IGNORECASE):
+        return None
+    for match in re.finditer(r"\b([A-Za-z]{2,6}[-/]?\d{2,6})\b(?!\s*%)", text):
+        if not _SEMESTER_TOKEN.fullmatch(match.group(1)):
+            return match.group(1).upper()
     return None
 
 
@@ -155,11 +164,20 @@ def _extract_recipients(text: str) -> tuple[list[str], str | None]:
     return [*emails, *names], role
 
 
+_CLAUSE_BOUNDARY = r"(?!(?:and|then|also|but|or)\b)"
+_SINGLE_TOKEN_VALUE = rf"{_CLAUSE_BOUNDARY}([^\s,.;]+)"
+_TWO_TOKEN_VALUE = rf"{_CLAUSE_BOUNDARY}([^\s,.;]+(?:\s+{_CLAUSE_BOUNDARY}[^\s,.;]+)?)"
+_SINGLE_TOKEN_FIELDS = frozenset({"semester", "section", "status", "phone", "email", "guardian_phone", "batch"})
+
+
 def _extract_change(text: str) -> tuple[str, Any] | None:
     lowered = text.lower()
     fields = {"phone": "phone", "mobile": "phone", "contact": "phone", "email": "email", "semester": "semester", "sem": "semester", "section": "section", "status": "status", "address": "address", "guardian phone": "guardian_phone", "parent phone": "guardian_phone", "department": "department", "program": "program", "batch": "batch"}
     for label, field_name in sorted(fields.items(), key=lambda item: len(item[0]), reverse=True):
-        match = re.search(rf"\b{label}\b(?: number| no\.?| id)?\s+(?:of\s+(?:\S+\s+){{1,4}}?)?(?:to|as|=)\s+([^\s,.]+(?:\s+[^\s,.]+)?)", lowered)
+        # The new value is one token for single-valued fields and at most two for
+        # free-text fields; it never runs into a conjunction or the next clause.
+        value_pattern = _SINGLE_TOKEN_VALUE if field_name in _SINGLE_TOKEN_FIELDS else _TWO_TOKEN_VALUE
+        match = re.search(rf"\b{label}\b(?: number| no\.?| id)?\s+(?:of\s+(?:\S+\s+){{1,4}}?)?(?:to|as|=)\s+{value_pattern}", lowered)
         if match:
             value = text[match.start(1):match.end(1)].strip() if len(text) == len(lowered) else match.group(1).strip()
             if field_name == "email":
@@ -438,7 +456,11 @@ class ModelPlanner:
             raw = await self.model.complete(self._prompt(text, tools, vocabulary), max_tokens=self.max_tokens)
         except Exception:  # noqa: BLE001
             return fallback
-        parsed = self._parse(raw, tools)
+        try:
+            parsed = self._parse(raw, tools)
+        except (ValueError, TypeError, KeyError, AttributeError):
+            # A model reply of the wrong shape is never a server error: the deterministic plan stands.
+            return fallback
         if parsed is None:
             return fallback
         parsed.entities = fallback.entities
@@ -457,15 +479,15 @@ class ModelPlanner:
         available = {tool.name: tool for tool in tools}
         clarification = payload.get("clarification")
         if isinstance(clarification, str) and clarification.strip():
-            return AgentPlan(str(payload.get("intent") or "clarify"), clarification=clarification.strip()[:500], planner=self.planner_name, confidence=float(payload.get("confidence") or 0.5))
+            return AgentPlan(str(payload.get("intent") or "clarify"), clarification=clarification.strip()[:500], planner=self.planner_name, confidence=_confidence(payload.get("confidence"), 0.5))
         raw_steps = payload.get("steps")
         if not isinstance(raw_steps, list) or not raw_steps or len(raw_steps) > MAX_PLAN_STEPS:
             return None
         steps: list[PlanStep] = []
         for index, item in enumerate(raw_steps, start=1):
-            if not isinstance(item, dict) or item.get("tool") not in available:
+            if not isinstance(item, dict) or not isinstance(item.get("tool"), str) or item["tool"] not in available:
                 return None
-            tool = available[str(item["tool"])]
+            tool = available[item["tool"]]
             arguments = item.get("arguments") if isinstance(item.get("arguments"), dict) else {}
             bindings = {str(key): str(value) for key, value in (item.get("bindings") or {}).items() if is_reference(str(value))} if isinstance(item.get("bindings"), dict) else {}
             static_arguments = {key: value for key, value in arguments.items() if key not in bindings}
@@ -473,12 +495,27 @@ class ModelPlanner:
                 tool.validate_arguments({key: value for key, value in static_arguments.items() if not is_reference(value)})
             except ToolArgumentError:
                 return None
-            depends = tuple(str(value) for value in item.get("depends_on", []) if isinstance(value, str))
+            raw_depends = item.get("depends_on")
+            depends = tuple(value for value in raw_depends if isinstance(value, str)) if isinstance(raw_depends, list) else ()
             steps.append(PlanStep(str(item.get("step_id") or f"s{index}"), tool.name, static_arguments, str(item.get("purpose") or tool.description)[:200], depends, bindings, _TOOL_GROUP_AGENT.get(tool.group, "data")))
         try:
-            return AgentPlan(str(payload.get("intent") or "model_plan")[:60], steps, summary=" then ".join(step.purpose for step in steps), planner=self.planner_name, confidence=max(0.0, min(1.0, float(payload.get("confidence") or 0.7))))
+            return AgentPlan(str(payload.get("intent") or "model_plan")[:60], steps, summary=" then ".join(step.purpose for step in steps), planner=self.planner_name, confidence=_confidence(payload.get("confidence"), 0.7))
         except ValueError:
             return None
+
+
+def _confidence(value: Any, default: float) -> float:
+    """Coerce a model-supplied confidence to [0, 1]; anything that is not a number keeps the default."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return default
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    if number != number:  # NaN
+        return default
+    return max(0.0, min(1.0, number))
 
 
 def vocabulary_from_registry(registry: PlatformToolRegistry) -> list[str]:
