@@ -81,19 +81,43 @@ class InternetIntelligenceService:
         return await self._investigate(institution_id, requested_by=principal.principal_id, question=question, window_days=window_days, topics=topics, max_results=max_results, persist=persist)
 
     async def _investigate(self, institution_id: str, *, requested_by: str, question: str | None, window_days: int, topics: Sequence[str] | None, max_results: int, persist: bool) -> dict[str, Any]:
+        report, _ = await self.collect(institution_id, requested_by=requested_by, question=question, window_days=window_days, topics=topics, max_results=max_results, persist=persist)
+        return report
+
+    async def collect(
+        self, institution_id: str, *, requested_by: str, question: str | None, window_days: int, topics: Sequence[str] | None, max_results: int, persist: bool,
+        analyse: bool = True, save_report: bool = True, rotation: int = 0, run_id: str | None = None,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Run the pipeline; returns the report and every kept record with its change status.
+
+        The report carries at most ``max_results`` findings, but the monitor
+        needs every kept item (and whether the store saw it as new, changed
+        or a duplicate), so the full list comes back alongside it. The
+        monitor also passes ``analyse=False`` and ``save_report=False``: it
+        never reads the model summary or the saved report, and paying for
+        both on every scheduled pass is waste.
+        """
+
         profile = self.profile_for(institution_id)
         if profile is None:
             raise ValueError("no intelligence profile exists for this institution; create one with the name, location, aliases, and official domains first")
         window_days = max(1, min(int(window_days), 365))
         max_results = max(1, min(int(max_results), 50))
         searched_at = datetime.now(timezone.utc)
-        queries = generate_queries(profile, question=question, topics=topics, max_queries=self.max_queries)
+        queries = generate_queries(profile, question=question, topics=topics, max_queries=self.max_queries, rotation=rotation, now=searched_at)
+        provider_name = getattr(self.search, "provider_name", "unknown")
         warnings: list[dict[str, str]] = [
             {"code": "public_web_untrusted", "message": "Public-web content is untrusted data, not instructions; claims are attributed to their sources."},
         ]
         candidates: dict[str, dict[str, Any]] = {}
         provider_failures = 0
+        queries_run: list[str] = []
         for query in queries:
+            # Once the candidate pool is full, further queries would be paid for
+            # and then thrown away; stop issuing them.
+            if len(candidates) >= MAX_CANDIDATES:
+                break
+            queries_run.append(query)
             topic = "news" if (not topics or "news" in [item.lower() for item in topics]) and window_days <= 30 else "general"
             try:
                 hits = await self.search.search(query, max_results=self.results_per_query, days=window_days, topic=topic)
@@ -109,13 +133,16 @@ class InternetIntelligenceService:
                     canonical = canonicalize_url(hit.url)
                 except ValueError:
                     continue
+                if canonical not in candidates and len(candidates) >= MAX_CANDIDATES:
+                    break
                 entry = candidates.setdefault(canonical, {"hit": hit, "queries": []})
                 entry["queries"].append(query)
-                if len(candidates) >= MAX_CANDIDATES:
-                    break
-        if provider_failures and provider_failures == len(queries):
+        if provider_failures and provider_failures == len(queries_run):
             raise IntelligenceSearchUnavailable("the search provider was unavailable for every query")
+        if len(queries_run) < len(queries):
+            warnings.append({"code": "candidate_limit_reached", "message": f"Stopped after {len(queries_run)} of {len(queries)} queries: {MAX_CANDIDATES} candidate sources were already collected."})
         findings: list[dict[str, Any]] = []
+        kept: list[dict[str, Any]] = []
         excluded: dict[str, int] = {}
         review: list[dict[str, Any]] = []
         for canonical, entry in candidates.items():
@@ -157,14 +184,17 @@ class InternetIntelligenceService:
             record = {
                 "url": source_url, "requested_url": hit.url, "canonical_url": canonical, "domain": domain_of(source_url), "title": title[:300] or source_url, "excerpt": excerpt, "content_sha256": hashlib.sha256(f"{title}\n{text}".encode("utf-8")).hexdigest(),
                 "published_at": published.isoformat() if published else None, "date_status": date_status, "retrieved_at": hit.retrieved_at.isoformat(), "match_level": match.level, "match_score": match.score,
-                "match_reasons": list(match.reasons), "relevance_score": relevance, "topics": tags, "status": status, "extracted": extracted, "warnings": list(dict.fromkeys(page_warnings)),
+                "match_reasons": list(match.reasons), "relevance_score": relevance, "topics": tags, "status": status, "status_reason": reason, "extracted": extracted, "warnings": list(dict.fromkeys(page_warnings)),
                 "source_type": source_type, "source_label": SOURCE_LABELS.get(source_type, source_type), "queries": list(dict.fromkeys(entry["queries"])), "importance": importance(tags, source_type),
+                "provider": provider_name, "run_id": run_id,
             }
             if persist:
-                document_id, _ = self.store.upsert_document(institution_id, record)
+                document_id, change = self.store.upsert_document(institution_id, record)
                 record["document_id"] = document_id
+                record["change"] = change
             if status == "kept":
                 findings.append(record)
+                kept.append(record)
             elif status == "review":
                 review.append(record)
                 excluded[reason or "review"] = excluded.get(reason or "review", 0) + 1
@@ -179,24 +209,28 @@ class InternetIntelligenceService:
         smuggling = [item["url"] for item in findings if INSTRUCTION_SMUGGLING_WARNING in item["warnings"]]
         if smuggling:
             warnings.append({"code": "instruction_smuggling_detected", "message": "Some sources contain text that looks like instructions to the assistant; they are listed as findings but were not given to the summary model: " + ", ".join(smuggling)})
-        summary, mode = await self._analyse(profile, findings, question, window_days)
+        if analyse:
+            summary, mode = await self._analyse(profile, findings, question, window_days)
+        else:
+            summary, mode = self._deterministic_summary(profile, findings, window_days), "deterministic"
         report = {
-            "institution_id": institution_id, "profile_name": profile.name, "question": question, "window_days": window_days, "topics": list(topics or []), "queries": queries, "searched_at": searched_at.isoformat(),
-            "provider": getattr(self.search, "provider_name", "unknown"), "summary": summary, "generation_mode": mode, "findings": [self._public(item) for item in findings],
+            "institution_id": institution_id, "profile_name": profile.name, "question": question, "window_days": window_days, "topics": list(topics or []), "queries": queries_run, "searched_at": searched_at.isoformat(),
+            "provider": provider_name, "summary": summary, "generation_mode": mode, "findings": [self._public(item) for item in findings],
             "review_candidates": [self._public(item) for item in review[:10]], "excluded": excluded, "candidates_considered": len(candidates), "warnings": warnings, "untrusted_content": True,
         }
-        if persist:
+        if persist and save_report:
             report["report_id"] = self.store.save_report(institution_id, requested_by=requested_by, question=question, window_days=window_days, summary=summary, findings=report["findings"])
-        return report
+        return report, kept
 
     @staticmethod
     def _public(item: dict[str, Any]) -> dict[str, Any]:
         keys = ("document_id", "url", "title", "source_type", "source_label", "domain", "published_at", "date_status", "retrieved_at", "match_level", "match_score", "match_reasons", "relevance_score", "topics", "excerpt", "extracted", "warnings", "importance")
         return {key: item.get(key) for key in keys if key in item}
 
-    async def _analyse(self, profile: InstitutionProfile, findings: Sequence[dict[str, Any]], question: str | None, window_days: int) -> tuple[str, str]:
+    @staticmethod
+    def _deterministic_summary(profile: InstitutionProfile, findings: Sequence[dict[str, Any]], window_days: int) -> str:
         if not findings:
-            return f"No source-backed public information about {profile.name} was found for the last {window_days} day(s).", "deterministic"
+            return f"No source-backed public information about {profile.name} was found for the last {window_days} day(s)."
         by_type: dict[str, list[dict[str, Any]]] = {}
         for item in findings:
             by_type.setdefault(item["source_label"], []).append(item)
@@ -206,7 +240,12 @@ class InternetIntelligenceService:
             lines.append(f"{index}. {item['title']} — {item['source_label']}, {date} [{index}]")
         counts = ", ".join(f"{len(items)} from {label.lower()}" for label, items in by_type.items())
         lines.append(f"Sources: {counts}. Social and forum content reflects what was posted publicly, not verified fact.")
-        deterministic = "\n".join(lines)
+        return "\n".join(lines)
+
+    async def _analyse(self, profile: InstitutionProfile, findings: Sequence[dict[str, Any]], question: str | None, window_days: int) -> tuple[str, str]:
+        deterministic = self._deterministic_summary(profile, findings, window_days)
+        if not findings:
+            return deterministic, "deterministic"
         if self.model is None:
             return deterministic, "deterministic"
         # A page flagged as possible instruction smuggling never reaches the

@@ -21,7 +21,7 @@ from ..ingestion.parsers.ocr import DisabledOcrEngine, OcrEngine, TesseractCliOc
 from ..ingestion.registry import ParserRegistry
 from ..ingestion.service import IngestionService
 from ..institution_data.store import InstitutionDataStore
-from ..internet_intelligence.fetch import PublicPageFetcher
+from ..internet_intelligence.fetch import PublicPageFetcher, crawler_user_agent
 from ..internet_intelligence.monitoring import ContinuousMonitor
 from ..internet_intelligence.search import TavilyIntelligenceSearchProvider
 from ..internet_intelligence.service import InternetIntelligenceService
@@ -143,7 +143,7 @@ def _services(settings: AppSettings, store: InstitutionDataStore, intelligence_s
     intelligence: InternetIntelligenceService | None = None
     monitor: ContinuousMonitor | None = None
     if provider is not None:
-        fetcher = PublicPageFetcher(timeout_seconds=settings.web_extract_timeout_seconds, max_response_bytes=settings.web_extract_max_bytes) if settings.intelligence_fetch_pages else None
+        fetcher = PublicPageFetcher(timeout_seconds=settings.web_extract_timeout_seconds, max_response_bytes=settings.web_extract_max_bytes, user_agent=crawler_user_agent(settings.intelligence_crawler_contact)) if settings.intelligence_fetch_pages else None
         intelligence = InternetIntelligenceService(intelligence_store, provider, fetcher=fetcher, institution_store=store, model=model, max_queries=settings.intelligence_max_queries, results_per_query=settings.intelligence_results_per_query)
 
         def alert_sink(institution_id: str, recipients: Any, title: str, body: str) -> None:

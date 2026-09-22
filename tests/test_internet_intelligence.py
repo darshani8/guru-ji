@@ -416,12 +416,12 @@ class IntelligenceServiceTests(unittest.IsolatedAsyncioTestCase):
         hits = hits_from_fixture([{"url": f"https://{official}/go?to=x", "title": "ABC College Bengaluru", "snippet": "ABC College Bengaluru notice.", "published_at": (NOW - timedelta(days=1)).isoformat()}])
         service = InternetIntelligenceService(self.store, StaticSearchProvider(hits), fetcher=fetcher)
         report = await service.investigate(self.pri, "college_a", window_days=7)
-        candidates = [item for item in report["findings"] + list(report.get("review", [])) if isinstance(item, dict) and "url" in item]
+        candidates = [item for item in report["findings"] + list(report["review_candidates"]) if isinstance(item, dict) and "url" in item]
         self.assertTrue(candidates, report)
         for item in candidates:
             self.assertEqual(item["url"], "https://evil.example.org/page", "the content is attributed to the host that served it")
             self.assertEqual(item["domain"], "evil.example.org")
-            self.assertNotEqual(item["source_type"], "official", "a redirect off the official domain does not inherit its standing")
+            self.assertNotEqual(item["source_type"], "official_website", "a redirect off the official domain does not inherit its standing")
             self.assertIn("redirected", item["warnings"])
             self.assertNotIn("official_domain", item.get("match_reasons", []))
 
@@ -487,6 +487,245 @@ class IntelligenceServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, "complete")
         self.assertEqual(response.steps[0].tool, "internet_investigate")
         self.assertTrue(all(source.get("url") for source in response.sources))
+
+
+class _CountingProvider:
+    """Records every query; returns ``per_query`` distinct hits naming the college."""
+
+    provider_name = "counting"
+
+    def __init__(self, per_query: int = 5):
+        self.per_query = per_query
+        self.calls: list[tuple[str, str]] = []
+
+    async def search(self, query, *, max_results, days=None, topic="general"):
+        from app.internet_intelligence.search import SearchHit
+
+        self.calls.append((query, topic))
+        index = len(self.calls)
+        return tuple(
+            SearchHit(url=f"https://citynews.example.com/q{index}/item{n}", title=f"ABC College Bengaluru update {index}-{n}", snippet="ABC College, Bengaluru held an event.", published_at=NOW - timedelta(days=1), source_name="city", retrieved_at=NOW)
+            for n in range(self.per_query)
+        )
+
+
+class LeakFixTests(unittest.IsolatedAsyncioTestCase):
+    """Phase 0: queries, candidates, provenance and change detection no longer leak."""
+
+    def setUp(self):
+        self.store = IntelligenceStore(":memory:")
+        self.pri = principal(PrincipalType.PRINCIPAL)
+
+    def _profile(self, **extra):
+        payload = {**PROFILE.as_dict(), "aliases": ["ABC College Bangalore", "ABCC"], "keywords": ["abc fest"], **extra}
+        return InstitutionProfile.from_dict("college_a", payload)
+
+    def test_identity_queries_survive_a_long_topic_list_and_rotation_covers_every_topic(self):
+        from app.internet_intelligence.query_generator import DEFAULT_TOPICS, topic_term
+
+        profile = self._profile()
+        first = generate_queries(profile, topics=list(DEFAULT_TOPICS), max_queries=8, rotation=0)
+        self.assertEqual(len(first), 8)
+        self.assertIn('"ABC College Bengaluru"', first, "the name-with-location query is never cut")
+        second = generate_queries(profile, topics=list(DEFAULT_TOPICS), max_queries=8, rotation=1)
+        self.assertNotEqual(first, second)
+        covered = {topic for rotation in range(2) for topic in DEFAULT_TOPICS for query in generate_queries(profile, topics=list(DEFAULT_TOPICS), max_queries=8, rotation=rotation) if query.endswith(topic_term(topic, now=NOW))}
+        self.assertEqual(covered, set(DEFAULT_TOPICS), "every topic runs within two passes")
+        aliases = {query for rotation in range(2) for query in generate_queries(profile, topics=list(DEFAULT_TOPICS), max_queries=8, rotation=rotation)}
+        self.assertTrue(any(query.startswith('"ABC College Bangalore"') for query in aliases))
+        self.assertTrue(any("abc fest" in query for query in aliases), "keyword queries get their turn")
+
+    def test_admission_queries_name_the_current_year(self):
+        from app.internet_intelligence.query_generator import topic_term
+
+        self.assertEqual(topic_term("admission", now=datetime(2031, 3, 1, tzinfo=timezone.utc)), "admission 2031")
+        queries = generate_queries(PROFILE, topics=["admission"], now=datetime(2031, 3, 1, tzinfo=timezone.utc))
+        self.assertIn('"ABC College" admission 2031', queries)
+        self.assertFalse(any("2026" in query for query in queries))
+
+    def test_kannada_questions_yield_search_terms(self):
+        from app.internet_intelligence.query_generator import question_terms
+
+        self.assertEqual(question_terms("ಪ್ರವೇಶ ಶುಲ್ಕ ಬಗ್ಗೆ"), ["ಪ್ರವೇಶ", "ಶುಲ್ಕ", "ಬಗ್ಗೆ"])
+
+    def test_topic_tags_match_whole_words(self):
+        self.assertNotIn("controversy", topic_tags("The first batch graduated with courtesy awards"))
+        self.assertIn("controversy", topic_tags("Police registered an FIR after the protest"))
+        self.assertNotIn("campus", topic_tags("Label the answer sheets"))
+        self.assertIn("campus", topic_tags("New labs and a library block"))
+        self.assertIn("event", topic_tags("The minister inaugurated the fest"))
+        self.assertNotIn("fees", topic_tags("Share your feedback"))
+        self.assertIn("results", topic_tags("VTU results announced"))
+
+    async def test_a_full_candidate_pool_stops_further_queries(self):
+        from app.internet_intelligence.service import MAX_CANDIDATES
+
+        provider = _CountingProvider(per_query=25)
+        service = InternetIntelligenceService(self.store, provider, fetcher=None, max_queries=8)
+        service.save_profile(self.pri, "college_a", PROFILE.as_dict())
+        report = await service.investigate(self.pri, "college_a", window_days=7)
+        self.assertEqual(len(provider.calls), -(-MAX_CANDIDATES // 25), "no query is paid for once the pool is full")
+        self.assertEqual(report["queries"], [query for query, _ in provider.calls])
+        self.assertEqual(report["candidates_considered"], MAX_CANDIDATES)
+        self.assertIn("candidate_limit_reached", {warning["code"] for warning in report["warnings"]})
+
+    async def test_monitor_skips_the_model_and_report_and_records_every_kept_item(self):
+        prompts = []
+
+        class Model:
+            provider_id = "fake-model"
+
+            async def complete(self, prompt, *, max_tokens=700):
+                prompts.append(prompt)
+                return "summary [1]"
+
+        provider = _CountingProvider(per_query=5)
+        service = InternetIntelligenceService(self.store, provider, fetcher=None, model=Model(), max_queries=8)
+        service.save_profile(self.pri, "college_a", PROFILE.as_dict())
+        monitor = ContinuousMonitor(service, self.store, window_days=7, max_results=3)
+        result = await monitor.run_for("college_a")
+        self.assertEqual(prompts, [], "the scheduled pass never pays for a summary nobody reads")
+        self.assertEqual(self.store.list_reports("college_a"), [])
+        self.assertEqual(result["new"], 40, "every kept item is compared, not only the top max_results")
+        self.assertEqual(len(self.store.list_events("college_a")), 40)
+        runs = self.store.list_runs("college_a")
+        self.assertEqual(runs[0]["queries"], result["queries"])
+        self.assertEqual(len(runs[0]["queries"]), 8)
+        self.assertEqual(runs[0]["stop_reason"], "completed")
+        stored = self.store.list_documents("college_a", limit=1)[0]
+        self.assertEqual(stored["provider"], "counting")
+        self.assertEqual(stored["last_run_id"], result["run_id"])
+        self.assertTrue(stored["queries"])
+        # A second pass rotates its queries.
+        again = await monitor.run_for("college_a")
+        self.assertNotEqual(again["queries"], result["queries"])
+
+    def test_overlapping_runs_are_refused_and_stale_ones_released(self):
+        first = self.store.try_start_run("college_a")
+        self.assertIsNotNone(first)
+        self.assertIsNone(self.store.try_start_run("college_a"), "a second pass waits for the first")
+        self.assertIsNotNone(self.store.try_start_run("college_b"), "other institutions are unaffected")
+        self.store.backend.execute("UPDATE monitoring_runs SET started_at = ? WHERE run_id = ?", ((NOW - timedelta(hours=2)).isoformat(), first))
+        second = self.store.try_start_run("college_a", lock_seconds=1800)
+        self.assertIsNotNone(second, "a run silent for longer than the lock window lost its process")
+        statuses = {run["run_id"]: run["status"] for run in self.store.list_runs("college_a")}
+        self.assertEqual(statuses[first], "abandoned")
+
+    async def test_monitor_reports_a_skip_while_another_run_holds_the_lock(self):
+        service = InternetIntelligenceService(self.store, _CountingProvider(), fetcher=None)
+        service.save_profile(self.pri, "college_a", PROFILE.as_dict())
+        self.store.try_start_run("college_a")
+        result = await ContinuousMonitor(service, self.store).run_for("college_a")
+        self.assertIsNone(result["run_id"])
+        self.assertIn("in progress", result["skipped"])
+
+    def _record(self, **overrides):
+        record = {
+            "url": "https://citynews.example.com/a", "canonical_url": "https://citynews.example.com/a", "domain": "citynews.example.com", "source_type": "news", "title": "ABC College fest",
+            "excerpt": "full page text", "content_sha256": "page-hash", "published_at": (NOW - timedelta(days=5)).isoformat(), "date_status": "in_window", "match_level": "high", "match_score": 0.9,
+            "status": "kept", "status_reason": None, "extracted": True, "queries": ["q1"], "provider": "tavily",
+        }
+        record.update(overrides)
+        return record
+
+    def test_a_snippet_fallback_is_not_a_change_and_keeps_the_full_copy(self):
+        document_id, change = self.store.upsert_document("college_a", self._record())
+        self.assertEqual(change, "new")
+        _, change = self.store.upsert_document("college_a", self._record(excerpt="snippet", content_sha256="snippet-hash", extracted=False))
+        self.assertEqual(change, "duplicate", "the fetch failing once is not a content change")
+        stored = self.store.get_document("college_a", document_id)
+        self.assertEqual((stored["excerpt"], stored["content_sha256"], stored["extracted"]), ("full page text", "page-hash", True))
+        _, change = self.store.upsert_document("college_a", self._record(excerpt="edited page text", content_sha256="edited-hash"))
+        self.assertEqual(change, "changed", "a real page edit is still reported")
+
+    def test_a_shorter_window_does_not_undo_a_kept_row(self):
+        document_id, _ = self.store.upsert_document("college_a", self._record())
+        self.store.upsert_document("college_a", self._record(status="excluded", status_reason="outside_time_window", date_status="out_of_window"))
+        self.assertEqual(self.store.get_document("college_a", document_id)["status"], "kept")
+        self.store.upsert_document("college_a", self._record(status="excluded", status_reason="entity_not_matched"))
+        stored = self.store.get_document("college_a", document_id)
+        self.assertEqual((stored["status"], stored["status_reason"]), ("excluded", "entity_not_matched"), "other exclusions still apply")
+
+    def test_provenance_columns_are_added_to_databases_that_predate_them(self):
+        import os
+        import tempfile
+
+        from app.persistence.sql_backend import open_backend
+
+        with tempfile.TemporaryDirectory() as directory:
+            backend = open_backend("sqlite:///" + os.path.join(directory, "old.sqlite3"))
+            backend.execute("CREATE TABLE internet_documents (document_id TEXT PRIMARY KEY, institution_id TEXT NOT NULL, canonical_url TEXT NOT NULL, url TEXT NOT NULL, domain TEXT NOT NULL, source_type TEXT NOT NULL, title TEXT NOT NULL, excerpt TEXT NOT NULL, content_sha256 TEXT NOT NULL, published_at TEXT, date_status TEXT NOT NULL DEFAULT 'unknown', first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, retrieved_at TEXT NOT NULL, match_level TEXT NOT NULL, match_score REAL NOT NULL, match_reasons_json TEXT NOT NULL DEFAULT '[]', relevance_score REAL NOT NULL DEFAULT 0, topics_json TEXT NOT NULL DEFAULT '[]', status TEXT NOT NULL, extracted INTEGER NOT NULL DEFAULT 0, warnings_json TEXT NOT NULL DEFAULT '[]', UNIQUE(institution_id, canonical_url))")
+            backend.commit()
+            store = IntelligenceStore(backend=backend)
+            columns = {row["name"] for row in backend.fetchall("PRAGMA table_info(internet_documents)")}
+            self.assertTrue({"status_reason", "provider", "queries_json", "requested_url", "last_run_id"} <= columns)
+            store.upsert_document("college_a", self._record())
+            store.close()
+
+    async def test_the_planner_asks_for_the_results_topic(self):
+        from app.agents.planner import DeterministicPlanner, Vocabulary
+
+        service = InternetIntelligenceService(self.store, StaticSearchProvider(fixture_hits()), fetcher=None)
+        fx = PlatformFixture(intelligence=service)
+        plan = DeterministicPlanner().plan("Any news online about our exam result this week?", fx.registry.for_principal(self.pri), Vocabulary((), ()))
+        self.assertEqual(plan.steps[0].arguments["topics"], ["results"])
+
+
+class RobotsCacheAndIdentityTests(unittest.IsolatedAsyncioTestCase):
+    async def test_robots_answers_expire(self):
+        clock = [1000.0]
+        robots_status = [503]
+        seen = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path == "/robots.txt":
+                seen.append("robots")
+                return httpx.Response(robots_status[0], text="User-agent: *\nAllow: /\n", request=request)
+            return httpx.Response(200, headers={"content-type": "text/html"}, text=PAGE, request=request)
+
+        fetcher = PublicPageFetcher(transport=httpx.MockTransport(handler), resolver=fake_resolver, clock=lambda: clock[0])
+        self.assertIsNone(await fetcher.fetch("https://news.example.com/x"), "a failing robots.txt disallows the site")
+        robots_status[0] = 200
+        self.assertIsNone(await fetcher.fetch("https://news.example.com/x"), "the failure is remembered briefly")
+        clock[0] += fetcher.robots_failure_ttl_seconds + 1
+        self.assertIsNotNone(await fetcher.fetch("https://news.example.com/x"), "and read again once the short failure window passes")
+        self.assertEqual(seen, ["robots", "robots"])
+        self.assertIsNotNone(await fetcher.fetch("https://news.example.com/y"))
+        self.assertEqual(seen, ["robots", "robots"], "a good answer is cached")
+        clock[0] += fetcher.robots_ttl_seconds + 1
+        await fetcher.fetch("https://news.example.com/z")
+        self.assertEqual(seen, ["robots", "robots", "robots"], "and re-read after a day")
+
+    async def test_the_crawler_names_its_operator(self):
+        from app.internet_intelligence.fetch import USER_AGENT, crawler_user_agent
+
+        self.assertEqual(crawler_user_agent(""), USER_AGENT)
+        self.assertEqual(crawler_user_agent("https://bgscet.ac.in/crawler"), "GuruJi-InstitutionIntelligence/1.0 (+https://bgscet.ac.in/crawler)")
+        self.assertEqual(crawler_user_agent("webmaster@bgscet.ac.in"), "GuruJi-InstitutionIntelligence/1.0 (+mailto:webmaster@bgscet.ac.in)")
+        for bad in ("http://insecure.example", "not a contact", "https://x.example/(y)"):
+            with self.assertRaises(ValueError):
+                crawler_user_agent(bad)
+        agents = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            agents.append(request.headers["user-agent"])
+            if request.url.path == "/robots.txt":
+                return httpx.Response(404, request=request)
+            return httpx.Response(200, headers={"content-type": "text/html"}, text=PAGE, request=request)
+
+        fetcher = PublicPageFetcher(transport=httpx.MockTransport(handler), resolver=fake_resolver, user_agent=crawler_user_agent("webmaster@bgscet.ac.in"))
+        await fetcher.fetch("https://news.example.com/x")
+        self.assertTrue(agents and all("mailto:webmaster@bgscet.ac.in" in agent for agent in agents))
+
+    def test_settings_reject_a_malformed_contact(self):
+        import os
+        from unittest import mock
+
+        from app.config.settings import AppSettings
+
+        with mock.patch.dict(os.environ, {"GURU_INTELLIGENCE_CRAWLER_CONTACT": "call me maybe"}):
+            with self.assertRaises(ValueError):
+                AppSettings.from_env().ensure_safe_for_production()
 
 
 if __name__ == "__main__":

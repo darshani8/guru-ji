@@ -103,6 +103,34 @@ services:
       - ../../scripts:/app/scripts:ro
       - guru-ji-objects:/app/data/objects
 
+  # Scheduled internet monitoring. Opt-in: start it with
+  #   docker compose --profile monitor up monitor
+  # after setting GURU_INTELLIGENCE_SEARCH_PROVIDER=tavily and the search key.
+  monitor:
+    build:
+      context: ../..
+      dockerfile: infra/docker/Dockerfile.api
+    command: ["python", "scripts/run_monitor.py", "--every", "3600"]
+    profiles: ["monitor"]
+    environment:
+      GURU_ENVIRONMENT: development
+      GURU_PDP_MODE: local
+      CONTROL_DATABASE_URL: postgresql://guru_ji:guru_ji_dev_only@postgres:5432/guru_ji
+      INSTITUTION_DATABASE_URL: postgresql://guru_ji:guru_ji_dev_only@postgres:5432/guru_ji
+      GURU_OBJECT_STORE: local
+      GURU_OBJECT_STORE_PATH: /app/data/objects
+      GURU_JOB_QUEUE: inline
+      GURU_INTELLIGENCE_SEARCH_PROVIDER: ${GURU_INTELLIGENCE_SEARCH_PROVIDER:-disabled}
+      GURU_WEB_SEARCH_API_KEY: ${GURU_WEB_SEARCH_API_KEY:-}
+      GURU_INTELLIGENCE_CRAWLER_CONTACT: ${GURU_INTELLIGENCE_CRAWLER_CONTACT:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ../../apps:/app/apps:ro
+      - ../../scripts:/app/scripts:ro
+      - guru-ji-objects:/app/data/objects
+
 volumes:
   guru-ji-postgres:
   guru-ji-objects:

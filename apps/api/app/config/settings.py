@@ -145,6 +145,7 @@ class AppSettings:
     intelligence_fetch_pages: bool = True
     intelligence_max_queries: int = 8
     intelligence_results_per_query: int = 5
+    intelligence_crawler_contact: str = ""
     agent_planner: str = "deterministic"
     approval_ttl_seconds: int = 900
     voice_agent_mode: str = "assistant"
@@ -254,6 +255,7 @@ class AppSettings:
             intelligence_fetch_pages=_bool_env("GURU_INTELLIGENCE_FETCH_PAGES", True),
             intelligence_max_queries=int(os.getenv("GURU_INTELLIGENCE_MAX_QUERIES", "8")),
             intelligence_results_per_query=int(os.getenv("GURU_INTELLIGENCE_RESULTS_PER_QUERY", "5")),
+            intelligence_crawler_contact=os.getenv("GURU_INTELLIGENCE_CRAWLER_CONTACT", "").strip(),
             agent_planner=os.getenv("GURU_AGENT_PLANNER", "deterministic").strip().lower(),
             approval_ttl_seconds=int(os.getenv("GURU_APPROVAL_TTL_SECONDS", "900")),
             voice_agent_mode=os.getenv("GURU_VOICE_AGENT_MODE", "assistant").strip().lower(),
@@ -475,6 +477,13 @@ class AppSettings:
             raise ValueError("GURU_WEB_SEARCH_API_KEY is required when GURU_INTELLIGENCE_SEARCH_PROVIDER=tavily")
         if not 1 <= self.intelligence_max_queries <= 20 or not 1 <= self.intelligence_results_per_query <= 20:
             raise ValueError("intelligence query limits must be between 1 and 20")
+        if self.intelligence_crawler_contact:
+            from ..internet_intelligence.fetch import crawler_user_agent
+
+            try:
+                crawler_user_agent(self.intelligence_crawler_contact)
+            except ValueError as exc:
+                raise ValueError("GURU_INTELLIGENCE_CRAWLER_CONTACT must be an https URL or an email address") from exc
         if self.agent_planner not in {"deterministic", "model"}:
             raise ValueError("GURU_AGENT_PLANNER must be deterministic or model")
         if self.agent_planner == "model" and self.model_provider == "deterministic":

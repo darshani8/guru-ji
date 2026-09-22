@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
-from ..persistence.schema_tools import apply_schema, begin_migration, existing_policies, row_level_security_state, tenant_isolation_statements
+from ..persistence.schema_tools import add_missing_columns, apply_schema, begin_migration, existing_policies, row_level_security_state, tenant_isolation_statements
 from ..persistence.sql_backend import SqlBackend, open_backend
 from .profile import InstitutionProfile
 
@@ -100,6 +100,20 @@ _STATEMENTS: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_intelligence_reports_institution ON intelligence_reports(institution_id, created_at)",
 )
+# Provenance added after the tables first shipped: why a row has its status,
+# which provider and queries found it, the URL the provider returned before
+# redirects, and the run that last saw it.
+ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("internet_documents", "status_reason", "TEXT"),
+    ("internet_documents", "provider", "TEXT"),
+    ("internet_documents", "queries_json", "TEXT NOT NULL DEFAULT '[]'"),
+    ("internet_documents", "requested_url", "TEXT"),
+    ("internet_documents", "last_run_id", "TEXT"),
+    ("monitoring_runs", "stop_reason", "TEXT"),
+)
+# A monitoring run still marked running after this long lost its process; it
+# no longer holds the per-institution lock and is closed as abandoned.
+RUN_LOCK_SECONDS = 1800
 # institution_profiles is deliberately not under row-level security: the monitoring
 # scheduler enumerates every profile with monitoring enabled without a tenant
 # context, and the store's own methods always filter profiles by institution_id.
@@ -158,6 +172,7 @@ class IntelligenceStore:
         with self.backend.transaction():
             begin_migration(self.backend)
             apply_schema(self.backend, _STATEMENTS)
+            add_missing_columns(self.backend, ADDED_COLUMNS)
             if self.backend.dialect == "postgresql":
                 for statement in _rls(row_level_security_state(self.backend), existing_policies(self.backend)):
                     self.backend.execute(statement)
@@ -195,37 +210,61 @@ class IntelligenceStore:
 
     # --------------------------------------------------------------- evidence
     def upsert_document(self, institution_id: str, item: Mapping[str, Any]) -> tuple[str, str]:
-        """Insert or refresh evidence; returns (document_id, 'new' | 'changed' | 'duplicate')."""
+        """Insert or refresh evidence; returns (document_id, 'new' | 'changed' | 'duplicate').
+
+        Two refreshes do not count as a change. A page seen once through its
+        full text and once through the search snippet (the fetch failed this
+        time) hashes differently without having changed, so a switch between
+        the two keeps the richer copy and reports a duplicate. And a shorter
+        search window must not undo a longer one: a row another run kept stays
+        kept when this run only excluded it for being outside its window.
+        """
 
         stamp = now_iso()
+        queries = _json(list(dict.fromkeys(item.get("queries", []))))
         with self._tenant(institution_id):
-            existing = self.backend.fetchone("SELECT document_id, content_sha256 FROM internet_documents WHERE institution_id = ? AND canonical_url = ?", (institution_id, item["canonical_url"]))
+            existing = self.backend.fetchone(
+                "SELECT document_id, content_sha256, extracted, status, status_reason, title, excerpt FROM internet_documents WHERE institution_id = ? AND canonical_url = ?",
+                (institution_id, item["canonical_url"]),
+            )
             if existing is None:
                 document_id = f"idoc-{uuid4().hex}"
                 self.backend.execute(
                     """
                     INSERT INTO internet_documents(document_id, institution_id, canonical_url, url, domain, source_type, title, excerpt, content_sha256, published_at, date_status,
-                        first_seen_at, last_seen_at, retrieved_at, match_level, match_score, match_reasons_json, relevance_score, topics_json, status, extracted, warnings_json)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        first_seen_at, last_seen_at, retrieved_at, match_level, match_score, match_reasons_json, relevance_score, topics_json, status, extracted, warnings_json,
+                        status_reason, provider, queries_json, requested_url, last_run_id)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         document_id, institution_id, item["canonical_url"], item["url"], item["domain"], item["source_type"], item["title"][:300], item["excerpt"][:2000], item["content_sha256"],
                         item.get("published_at"), item.get("date_status", "unknown"), stamp, stamp, item.get("retrieved_at", stamp), item["match_level"], float(item["match_score"]),
                         _json(list(item.get("match_reasons", []))), float(item.get("relevance_score", 0.0)), _json(list(item.get("topics", []))), item["status"], 1 if item.get("extracted") else 0, _json(list(item.get("warnings", []))),
+                        item.get("status_reason"), item.get("provider"), queries, item.get("requested_url"), item.get("run_id"),
                     ),
                 )
                 return document_id, "new"
-            changed = existing["content_sha256"] != item["content_sha256"]
+            extracted = bool(item.get("extracted"))
+            was_extracted = bool(existing["extracted"])
+            title, excerpt, digest = item["title"][:300], item["excerpt"][:2000], item["content_sha256"]
+            if was_extracted and not extracted:
+                # The fetch failed this time: keep the full-page copy rather than the snippet.
+                title, excerpt, digest, extracted = existing["title"], existing["excerpt"], existing["content_sha256"], True
+            changed = was_extracted == bool(item.get("extracted")) and existing["content_sha256"] != item["content_sha256"]
+            status, reason = item["status"], item.get("status_reason")
+            if existing["status"] == "kept" and status == "excluded" and reason == "outside_time_window":
+                status, reason = existing["status"], existing["status_reason"]
             self.backend.execute(
                 """
                 UPDATE internet_documents SET url = ?, title = ?, excerpt = ?, content_sha256 = ?, published_at = COALESCE(?, published_at), date_status = ?, last_seen_at = ?, retrieved_at = ?,
-                    match_level = ?, match_score = ?, match_reasons_json = ?, relevance_score = ?, topics_json = ?, status = ?, extracted = ?, warnings_json = ?
+                    match_level = ?, match_score = ?, match_reasons_json = ?, relevance_score = ?, topics_json = ?, status = ?, extracted = ?, warnings_json = ?,
+                    status_reason = ?, provider = COALESCE(?, provider), queries_json = ?, requested_url = COALESCE(?, requested_url), last_run_id = COALESCE(?, last_run_id)
                 WHERE institution_id = ? AND document_id = ?
                 """,
                 (
-                    item["url"], item["title"][:300], item["excerpt"][:2000], item["content_sha256"], item.get("published_at"), item.get("date_status", "unknown"), stamp, item.get("retrieved_at", stamp),
-                    item["match_level"], float(item["match_score"]), _json(list(item.get("match_reasons", []))), float(item.get("relevance_score", 0.0)), _json(list(item.get("topics", []))), item["status"],
-                    1 if item.get("extracted") else 0, _json(list(item.get("warnings", []))), institution_id, existing["document_id"],
+                    item["url"], title, excerpt, digest, item.get("published_at"), item.get("date_status", "unknown"), stamp, item.get("retrieved_at", stamp),
+                    item["match_level"], float(item["match_score"]), _json(list(item.get("match_reasons", []))), float(item.get("relevance_score", 0.0)), _json(list(item.get("topics", []))), status,
+                    1 if extracted else 0, _json(list(item.get("warnings", []))), reason, item.get("provider"), queries, item.get("requested_url"), item.get("run_id"), institution_id, existing["document_id"],
                 ),
             )
             return existing["document_id"], "changed" if changed else "duplicate"
@@ -235,6 +274,7 @@ class IntelligenceStore:
         row["topics"] = _loads(row.pop("topics_json", "[]"), [])
         row["warnings"] = _loads(row.pop("warnings_json", "[]"), [])
         row["extracted"] = bool(row.get("extracted"))
+        row["queries"] = _loads(row.pop("queries_json", "[]"), [])
         return row
 
     def list_documents(self, institution_id: str, *, days: int | None = None, status: str | None = "kept", source_type: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
@@ -265,11 +305,42 @@ class IntelligenceStore:
             self.backend.execute("INSERT INTO monitoring_runs(run_id, institution_id, started_at, status, queries_json) VALUES (?, ?, ?, 'running', ?)", (run_id, institution_id, now_iso(), _json(list(queries))))
         return run_id
 
-    def finish_run(self, institution_id: str, run_id: str, *, status: str, new_count: int, changed_count: int, duplicate_count: int, excluded_count: int, error: str | None = None) -> None:
+    def try_start_run(self, institution_id: str, queries: Sequence[str] = (), *, lock_seconds: int = RUN_LOCK_SECONDS) -> str | None:
+        """Start a run unless one is already in progress for the institution; None when locked.
+
+        A cron pass and a manual "run now" that overlap would otherwise both
+        report the same items as new. A run left 'running' longer than
+        ``lock_seconds`` lost its process: it is closed as abandoned and no
+        longer blocks. The check and the insert are one statement.
+        """
+
+        run_id = f"mrun-{uuid4().hex}"
+        started = datetime.now(timezone.utc)
+        cutoff = (started - timedelta(seconds=lock_seconds)).isoformat()
         with self._tenant(institution_id):
             self.backend.execute(
-                "UPDATE monitoring_runs SET finished_at = ?, status = ?, new_count = ?, changed_count = ?, duplicate_count = ?, excluded_count = ?, error = ? WHERE institution_id = ? AND run_id = ?",
-                (now_iso(), status, new_count, changed_count, duplicate_count, excluded_count, error, institution_id, run_id),
+                "UPDATE monitoring_runs SET status = 'abandoned', finished_at = ?, error = 'no heartbeat: the run lost its process' WHERE institution_id = ? AND status = 'running' AND started_at < ?",
+                (started.isoformat(), institution_id, cutoff),
+            )
+            inserted = self.backend.execute(
+                "INSERT INTO monitoring_runs(run_id, institution_id, started_at, status, queries_json) SELECT CAST(? AS TEXT), CAST(? AS TEXT), CAST(? AS TEXT), 'running', CAST(? AS TEXT) WHERE NOT EXISTS (SELECT 1 FROM monitoring_runs WHERE institution_id = ? AND status = 'running')",
+                (run_id, institution_id, started.isoformat(), _json(list(queries)), institution_id),
+            )
+        return run_id if inserted else None
+
+    def run_count(self, institution_id: str) -> int:
+        with self._tenant(institution_id):
+            row = self.backend.fetchone("SELECT COUNT(*) AS runs FROM monitoring_runs WHERE institution_id = ?", (institution_id,))
+        return int(row["runs"]) if row else 0
+
+    def finish_run(
+        self, institution_id: str, run_id: str, *, status: str, new_count: int, changed_count: int, duplicate_count: int, excluded_count: int, error: str | None = None,
+        queries: Sequence[str] | None = None, stop_reason: str | None = None,
+    ) -> None:
+        with self._tenant(institution_id):
+            self.backend.execute(
+                "UPDATE monitoring_runs SET finished_at = ?, status = ?, new_count = ?, changed_count = ?, duplicate_count = ?, excluded_count = ?, error = ?, queries_json = COALESCE(?, queries_json), stop_reason = COALESCE(?, stop_reason) WHERE institution_id = ? AND run_id = ?",
+                (now_iso(), status, new_count, changed_count, duplicate_count, excluded_count, error, _json(list(queries)) if queries is not None else None, stop_reason, institution_id, run_id),
             )
 
     def add_event(self, institution_id: str, *, run_id: str, document_id: str, event_type: str, importance_level: str, source_type: str, title: str, url: str, summary: str) -> str:
@@ -315,4 +386,4 @@ class IntelligenceStore:
         return rows
 
 
-__all__ = ["IntelligenceStore", "SCHEMA_VERSION"]
+__all__ = ["ADDED_COLUMNS", "RUN_LOCK_SECONDS", "IntelligenceStore", "SCHEMA_VERSION"]

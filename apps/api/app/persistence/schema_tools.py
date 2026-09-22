@@ -58,6 +58,28 @@ def apply_schema(backend: SqlBackend, statements: Iterable[str]) -> None:
         backend.execute(statement)
 
 
+def add_missing_columns(backend: SqlBackend, columns: Iterable[tuple[str, str, str]]) -> None:
+    """Add columns introduced after a table first shipped to databases that predate them.
+
+    ``ADD COLUMN IF NOT EXISTS`` locks the table even when the column is
+    there, so PostgreSQL is asked first and the statement runs only for a
+    column the catalog does not list.
+    """
+
+    for table, column, column_type in columns:
+        if backend.dialect == "postgresql":
+            present = backend.fetchone(
+                "SELECT 1 AS present FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?",
+                (table, column),
+            )
+            if present is None:
+                backend.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {column_type}")
+            continue
+        present_columns = {row["name"] for row in backend.fetchall(f"PRAGMA table_info({table})")}
+        if column not in present_columns:
+            backend.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
+
+
 def row_level_security_state(backend: SqlBackend) -> dict[str, tuple[bool, bool]]:
     """table -> (enabled, forced) for every ordinary table in the current schema."""
 
@@ -99,6 +121,7 @@ def tenant_isolation_statements(tables: Iterable[str], *, state: Mapping[str, tu
 
 __all__ = [
     "MIGRATION_LOCK_TIMEOUT",
+    "add_missing_columns",
     "apply_schema",
     "begin_migration",
     "existing_indexes",

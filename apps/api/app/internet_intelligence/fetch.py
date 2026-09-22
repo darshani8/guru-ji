@@ -14,6 +14,7 @@ import asyncio
 import ipaddress
 import re
 import socket
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -28,6 +29,11 @@ from .relevance import parse_published
 from .urls import domain_of
 
 USER_AGENT = "GuruJi-InstitutionIntelligence/1.0 (+https://example.invalid/robots-respecting)"
+# robots.txt answers are re-read after a day; a failed read (server error,
+# oversize, redirect loop) disallows the site only for a short while, so one
+# outage no longer shuts a site out for the life of the process.
+ROBOTS_TTL_SECONDS = 86_400.0
+ROBOTS_FAILURE_TTL_SECONDS = 900.0
 DEFAULT_SNIPPET_ONLY_DOMAINS = ("facebook.com", "instagram.com", "twitter.com", "x.com", "linkedin.com", "youtube.com", "threads.net", "reddit.com", "quora.com")
 MAX_REDIRECTS = 3
 ROBOTS_MAX_BYTES = 200_000
@@ -41,6 +47,23 @@ _NON_PUBLIC_NETWORKS = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_netw
 _NAT64 = ipaddress.ip_network("64:ff9b::/96")
 
 HostResolver = Callable[[str], Sequence[str]]
+
+
+def crawler_user_agent(contact: str | None) -> str:
+    """The crawler's User-Agent, naming where site owners can reach the operator.
+
+    ``contact`` is an https URL or an email address from deployment settings;
+    without one the placeholder contact is used.
+    """
+
+    value = (contact or "").strip()
+    if not value:
+        return USER_AGENT
+    if value.startswith("https://") and " " not in value and "(" not in value and ")" not in value:
+        return f"GuruJi-InstitutionIntelligence/1.0 (+{value})"
+    if re.fullmatch(r"[^@\s()]+@[^@\s()]+\.[a-zA-Z]{2,}", value):
+        return f"GuruJi-InstitutionIntelligence/1.0 (+mailto:{value})"
+    raise ValueError("the crawler contact must be an https URL or an email address")
 
 
 def resolve_host(hostname: str) -> tuple[str, ...]:
@@ -93,10 +116,11 @@ class _Target:
     pinned_url: str
     host_header: str
     sni_hostname: str | None
+    user_agent: str = USER_AGENT
 
     @property
     def headers(self) -> dict[str, str]:
-        return {"User-Agent": USER_AGENT, "Host": self.host_header}
+        return {"User-Agent": self.user_agent, "Host": self.host_header}
 
     @property
     def extensions(self) -> dict[str, str]:
@@ -112,7 +136,11 @@ class PublicPageFetcher:
     max_redirects: int = MAX_REDIRECTS
     transport: httpx.AsyncBaseTransport | None = field(default=None, repr=False)
     resolver: HostResolver = field(default=resolve_host, repr=False)
-    _robots_cache: dict[str, robotparser.RobotFileParser | None] = field(default_factory=dict, repr=False)
+    user_agent: str = USER_AGENT
+    robots_ttl_seconds: float = ROBOTS_TTL_SECONDS
+    robots_failure_ttl_seconds: float = ROBOTS_FAILURE_TTL_SECONDS
+    clock: Callable[[], float] = field(default=time.monotonic, repr=False)
+    _robots_cache: dict[str, tuple[float, robotparser.RobotFileParser | None]] = field(default_factory=dict, repr=False)
 
     def allowed_domain(self, url: str) -> bool:
         domain = domain_of(url)
@@ -134,8 +162,7 @@ class PublicPageFetcher:
             return None
         return str(addresses[0])
 
-    @staticmethod
-    def _pin(url: str, address: str) -> _Target | None:
+    def _pin(self, url: str, address: str) -> _Target | None:
         """Bind a URL to the address it will be sent to; the Host header and TLS name keep the hostname."""
 
         parsed = urlparse(url)
@@ -148,7 +175,7 @@ class PublicPageFetcher:
         literal = f"[{address}]" if ":" in address else address
         netloc = literal if port is None else f"{literal}:{port}"
         host_header = parsed.hostname if port is None else f"{parsed.hostname}:{port}"
-        return _Target(url=url, pinned_url=parsed._replace(netloc=netloc).geturl(), host_header=host_header, sni_hostname=parsed.hostname if parsed.scheme == "https" else None)
+        return _Target(url=url, pinned_url=parsed._replace(netloc=netloc).geturl(), host_header=host_header, sni_hostname=parsed.hostname if parsed.scheme == "https" else None, user_agent=self.user_agent)
 
     async def _vet(self, url: str, *, check_domain: bool = True) -> _Target | None:
         """Resolve and check one URL; the returned target is pinned to the vetted address."""
@@ -204,12 +231,17 @@ class PublicPageFetcher:
         url = target.url
         parsed = urlparse(url)
         origin = f"{parsed.scheme}://{parsed.netloc}"
-        if origin not in self._robots_cache:
-            self._robots_cache[origin] = await self._load_robots(client, origin, urlparse(target.pinned_url).hostname or "")
-        parser = self._robots_cache[origin]
+        now = self.clock()
+        cached = self._robots_cache.get(origin)
+        if cached is None or cached[0] <= now:
+            loaded = await self._load_robots(client, origin, urlparse(target.pinned_url).hostname or "")
+            ttl = self.robots_ttl_seconds if loaded is not None else self.robots_failure_ttl_seconds
+            cached = (now + ttl, loaded)
+            self._robots_cache[origin] = cached
+        parser = cached[1]
         if parser is None:
             return False
-        return parser.can_fetch(USER_AGENT, url)
+        return parser.can_fetch(self.user_agent, url)
 
     async def fetch(self, url: str) -> FetchedPage | None:
         warnings: list[str] = []
@@ -257,4 +289,4 @@ class PublicPageFetcher:
         return FetchedPage(url=current, title=parser.title[:300], text=parser.text[:40_000], published_at=published, warnings=tuple(warnings))
 
 
-__all__ = ["DEFAULT_SNIPPET_ONLY_DOMAINS", "MAX_REDIRECTS", "ROBOTS_MAX_BYTES", "FetchedPage", "PublicPageFetcher", "USER_AGENT", "is_public_address", "resolve_host"]
+__all__ = ["DEFAULT_SNIPPET_ONLY_DOMAINS", "MAX_REDIRECTS", "ROBOTS_FAILURE_TTL_SECONDS", "ROBOTS_MAX_BYTES", "ROBOTS_TTL_SECONDS", "FetchedPage", "PublicPageFetcher", "USER_AGENT", "crawler_user_agent", "is_public_address", "resolve_host"]
