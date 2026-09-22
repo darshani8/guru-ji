@@ -19,6 +19,7 @@ from uuid import uuid4
 from ..domain.principals import Capability, InstitutionScope, Principal
 from ..institution_data.store import InstitutionDataStore
 from ..storage.object_store import ObjectStore
+from .reports import ReportService
 
 _EMAIL = re.compile(r"^[^@\s]+@([^@\s]+\.[A-Za-z]{2,})$")
 MAX_RECIPIENTS = 25
@@ -190,11 +191,13 @@ class EmailService:
             raise ValueError("no recipient could be resolved from the institution directory or allowed domains: " + ", ".join(unresolved[:5]))
         attachments: list[EmailAttachment] = []
         attachment_meta: list[dict[str, Any]] = []
+        reports = ReportService(self.store, self.objects)
         for report_id in report_ids:
-            record = self.store.get_report(institution_id, report_id)
-            if record is None:
-                raise ValueError(f"report not found: {report_id}")
-            content = self.objects.get(record["object_key"])
+            # Attachments follow the same read policy as report downloads.
+            try:
+                record, content = reports.fetch(principal, institution_id, report_id)
+            except KeyError as exc:
+                raise ValueError(f"report not found: {report_id}") from exc
             if len(content) > MAX_ATTACHMENT_BYTES:
                 raise ValueError("report attachment exceeds the email size limit")
             file_name = record["object_key"].rsplit("/", 1)[-1]

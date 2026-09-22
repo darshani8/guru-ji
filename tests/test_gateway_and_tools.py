@@ -1,3 +1,4 @@
+import asyncio
 import csv
 import io
 import json
@@ -6,7 +7,7 @@ import zipfile
 from unittest.mock import patch
 
 from app.actions.files import render_csv, render_xlsx
-from app.actions.reports import ACCESS_RECORD_NAME, required_capabilities_for
+from app.actions.reports import DATA_CAPABILITIES, ReportService, required_capabilities_for
 from app.data_access.service import InstitutionDataService
 from app.domain.principals import InstitutionScope, PrincipalType
 from app.gateway.gateway import HANDLER_FAILURE_MESSAGE
@@ -226,32 +227,90 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn(b"9876543210", content)
         self.assertNotIn(b"s1@x.com", content)
         self.assertTrue(content.decode("utf-8-sig").startswith("student_id,name\n"))
-        self.assertEqual(self.fx.reports.required_capabilities(record), ())
+        # A report requires every data capability its creator held, whatever the headers say.
+        faculty_held = tuple(sorted(capability.value for capability in DATA_CAPABILITIES if faculty.has_capability(capability)))
+        self.assertTrue(faculty_held, "the faculty role holds at least one data capability in this fixture")
+        self.assertEqual(self.fx.reports.required_capabilities(record), faculty_held)
+        self.assertEqual(ReportService.required_capabilities_for_creator(faculty, ["student_id", "name"]), faculty_held)
         staff = principal(PrincipalType.STAFF)
-        self.assertEqual(self.fx.reports.fetch(staff, "college_a", faculty_report.data["report_id"])[0]["report_id"], faculty_report.data["report_id"])
-        contact_only = await self.fx.gateway.invoke("generate_report", {"title": "Phones", "format": "csv", "columns": ["phone"], "rows": students}, faculty_ctx)
-        self.assertEqual(contact_only.status, "failed")
-        # Attendance columns require attendance:read for anyone but the creator.
-        low = (await self.fx.gateway.invoke("find_low_attendance", {"program": "MBA"}, self.ctx)).data["students"]
-        attendance_report = await self.fx.gateway.invoke("generate_report", {"title": "Low attendance", "format": "xlsx", "rows": low}, self.ctx)
-        with self.assertRaises(PermissionError):
-            self.fx.reports.fetch(staff, "college_a", attendance_report.data["report_id"])
-        self.assertEqual(self.fx.reports.fetch(faculty, "college_a", attendance_report.data["report_id"])[0]["report_id"], attendance_report.data["report_id"])
-        # A report whose access record is missing is visible to its creator only.
-        self.assertTrue(self.fx.objects.delete(record["object_key"].rsplit("/", 1)[0] + "/" + ACCESS_RECORD_NAME))
-        self.assertIsNone(self.fx.reports.required_capabilities(record))
         with self.assertRaises(PermissionError):
             self.fx.reports.fetch(staff, "college_a", faculty_report.data["report_id"])
+        self.assertEqual(self.fx.reports.fetch(self.hod, "college_a", faculty_report.data["report_id"])[0]["report_id"], faculty_report.data["report_id"])
+        contact_only = await self.fx.gateway.invoke("generate_report", {"title": "Phones", "format": "csv", "columns": ["phone"], "rows": students}, faculty_ctx)
+        self.assertEqual(contact_only.status, "failed")
+        # A HOD's report requires the HOD's contact clearance even when its rows carry no contact data.
+        low = (await self.fx.gateway.invoke("find_low_attendance", {"program": "MBA"}, self.ctx)).data["students"]
+        attendance_report = await self.fx.gateway.invoke("generate_report", {"title": "Low attendance", "format": "xlsx", "rows": low}, self.ctx)
+        for other in (staff, faculty):
+            with self.assertRaises(PermissionError):
+                self.fx.reports.fetch(other, "college_a", attendance_report.data["report_id"])
+        self.assertEqual(self.fx.reports.fetch(principal(PrincipalType.PRINCIPAL), "college_a", attendance_report.data["report_id"])[0]["report_id"], attendance_report.data["report_id"])
+        # Contact data under free-text headers is protected by the creator's clearance, not by header names.
+        relabelled = await self.fx.gateway.invoke("generate_report", {"title": "MBA contacts", "format": "csv", "columns": ["student_id", "Name", "Phone Number", "Email Address"], "rows": [{"student_id": "MBA001", "Name": "Student 1", "Phone Number": "9876543210", "Email Address": "s1@x.com"}]}, self.ctx)
+        self.assertEqual(relabelled.status, "success")
+        self.assertIn("students:read_contact", self.fx.reports.required_capabilities(self.fx.store.get_report("college_a", relabelled.data["report_id"])))
+        with self.assertRaises(PermissionError):
+            self.fx.reports.fetch(faculty, "college_a", relabelled.data["report_id"])
+        self.assertNotIn(relabelled.data["report_id"], [row["report_id"] for row in self.fx.reports.list(faculty, "college_a")])
+        # Listing consults the report records only, never the object store.
+        reads = {"n": 0}
+        original_get = type(self.fx.objects).get
+
+        def counting_get(store_self, key):
+            reads["n"] += 1
+            return original_get(store_self, key)
+
+        with patch.object(type(self.fx.objects), "get", counting_get):
+            listed_for_principal = self.fx.reports.list(principal(PrincipalType.PRINCIPAL), "college_a", limit=50)
+        self.assertGreaterEqual(len(listed_for_principal), 3)
+        self.assertEqual(reads["n"], 0)
+        # A record whose requirements were never recorded is visible to its creator only.
+        self.fx.store.backend.execute("UPDATE generated_reports SET required_capabilities_json = NULL WHERE report_id = ?", (faculty_report.data["report_id"],))
+        legacy = self.fx.store.get_report("college_a", faculty_report.data["report_id"])
+        self.assertIsNone(self.fx.reports.required_capabilities(legacy))
+        with self.assertRaises(PermissionError):
+            self.fx.reports.fetch(self.hod, "college_a", faculty_report.data["report_id"])
         self.assertEqual(self.fx.reports.fetch(faculty, "college_a", faculty_report.data["report_id"])[0]["report_id"], faculty_report.data["report_id"])
+        # Email attachments follow the same policy as downloads.
+        other_hod = principal(PrincipalType.HOD, "hod-2")
+        sent = self.fx.email.send(other_hod, "college_a", recipients=["dean@abc.edu.in"], subject="Contacts", body="Attached", report_ids=[report_id])
+        self.assertEqual(sent["attachments"][0]["report_id"], report_id, "a peer holding the same clearance may attach the report")
+        with self.assertRaises(PermissionError):
+            self.fx.email.send(other_hod, "college_a", recipients=["dean@abc.edu.in"], subject="Roster", body="Attached", report_ids=[faculty_report.data["report_id"]])
+        with self.assertRaises(ValueError):
+            self.fx.email.send(self.hod, "college_a", recipients=["dean@abc.edu.in"], subject="Missing", body="Attached", report_ids=["rpt-missing"])
+
+    async def test_concurrent_calls_with_one_approval_execute_once(self):
+        calls = {"n": 0}
+
+        async def slow(context, args):
+            calls["n"] += 1
+            await asyncio.sleep(0.05)
+            return ToolOutput(data={"ok": True}, summary="done")
+
+        self.fx.registry.register(PlatformToolSpec(name="slow_high_risk", description="d", group="g", required_capability=Capability.RECORDS_WRITE, risk=RiskLevel.HIGH_RISK, handler=slow))
+        pri = principal(PrincipalType.PRINCIPAL)
+        first = await self.fx.gateway.invoke("slow_high_risk", {}, ToolCallContext("r1", pri, InstitutionScope("college_a")))
+        self.assertEqual(first.status, "approval_required")
+        approval_id = first.approval["approval_id"]
+        self.fx.gateway.decide_approval(pri, "college_a", approval_id, approve=True)
+        results = await asyncio.gather(*[
+            self.fx.gateway.invoke("slow_high_risk", {}, ToolCallContext(f"c{i}", pri, InstitutionScope("college_a"), approval_id=approval_id)) for i in range(3)
+        ])
+        self.assertEqual(calls["n"], 1, "one confirmation runs the action exactly once")
+        self.assertEqual(sorted(result.status for result in results), ["approval_required", "approval_required", "success"])
+        self.assertEqual(self.fx.store.get_approval("college_a", approval_id)["status"], "consumed")
+        self.assertIsNone(self.fx.store.claim_approval("college_a", approval_id, principal_id=pri.principal_id))
 
     def test_csv_cells_cannot_start_a_formula(self):
         rows = [
-            {"name": "=HYPERLINK(\"http://evil\")", "note": "+cmd|' /C calc'!A0", "amount": -5, "ratio": -0.5, "flag": True, "at": "@SUM(1)", "tab": "\tx", "cr": "\rx", "plain": "-dash text", "empty": None, "safe": "Student 1"},
+            {"name": "=HYPERLINK(\"http://evil\")", "note": "+cmd|' /C calc'!A0", "amount": -5, "ratio": -0.5, "flag": True, "at": "@SUM(1)", "tab": "\tx", "cr": "\rx", "plain": "-dash text", "empty": None, "safe": "Student 1", "phone": "+919876543210", "balance": "-1500.50"},
         ]
-        columns = ["name", "note", "amount", "ratio", "flag", "at", "tab", "cr", "plain", "empty", "safe", "=header"]
+        columns = ["name", "note", "amount", "ratio", "flag", "at", "tab", "cr", "plain", "empty", "safe", "=header", "phone", "balance"]
         parsed = list(csv.reader(io.StringIO(render_csv(columns, rows).decode("utf-8-sig"))))
-        self.assertEqual(parsed[0], ["name", "note", "amount", "ratio", "flag", "at", "tab", "cr", "plain", "empty", "safe", "'=header"])
-        self.assertEqual(parsed[1], ["'=HYPERLINK(\"http://evil\")", "'+cmd|' /C calc'!A0", "-5", "-0.5", "Yes", "'@SUM(1)", "'\tx", "'\rx", "'-dash text", "", "Student 1", ""])
+        self.assertEqual(parsed[0], ["name", "note", "amount", "ratio", "flag", "at", "tab", "cr", "plain", "empty", "safe", "'=header", "phone", "balance"])
+        # Numeric strings such as phone numbers with a country code cannot be formulas and keep their value.
+        self.assertEqual(parsed[1], ["'=HYPERLINK(\"http://evil\")", "'+cmd|' /C calc'!A0", "-5", "-0.5", "Yes", "'@SUM(1)", "'\tx", "'\rx", "'-dash text", "", "Student 1", "", "+919876543210", "-1500.50"])
         sheet = zipfile.ZipFile(io.BytesIO(render_xlsx(columns, rows))).read("xl/worksheets/sheet1.xml")
         self.assertIn(b'<t xml:space="preserve">=HYPERLINK("http://evil")</t>', sheet, "xlsx inline strings are already inert and stay unchanged")
 

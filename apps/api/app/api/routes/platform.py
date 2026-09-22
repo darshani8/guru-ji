@@ -62,7 +62,7 @@ async def list_reports(request: Request, institution_id: str | None = None, limi
     principal = require_principal(request)
     target = resolve_institution(principal, institution_id)
     try:
-        return {"reports": platform.reports.list(principal, target, limit=min(max(limit, 1), 200))}
+        return {"reports": await run_in_threadpool(platform.reports.list, principal, target, limit=min(max(limit, 1), 200))}
     except PermissionError as exc:
         raise translate(exc) from exc
 

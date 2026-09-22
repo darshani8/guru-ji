@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import re
 import zipfile
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timezone
@@ -26,6 +27,9 @@ def _cell_text(value: Any) -> str:
 _FORMULA_TRIGGERS = ("=", "+", "-", "@", "\t", "\r")
 
 
+_NUMERIC_LITERAL = re.compile(r"[+-]?\d+(?:\.\d+)?")
+
+
 def _csv_cell_text(value: Any) -> str:
     """CSV cells are text; a leading formula trigger is neutralised with a quote.
 
@@ -37,6 +41,8 @@ def _csv_cell_text(value: Any) -> str:
     text = _cell_text(value)
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         return text
+    if _NUMERIC_LITERAL.fullmatch(text):
+        return text  # "+919876543210" or "-1500.50" cannot be a formula; keep the value intact
     if text.startswith(_FORMULA_TRIGGERS):
         return "'" + text
     return text

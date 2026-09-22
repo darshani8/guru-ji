@@ -214,7 +214,8 @@ def portable_statements() -> tuple[str, ...]:
             row_count INTEGER NOT NULL DEFAULT 0,
             tool_name TEXT NOT NULL,
             created_by TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            required_capabilities_json TEXT
         )
         """,
         "CREATE INDEX IF NOT EXISTS idx_generated_reports_institution ON generated_reports(institution_id, created_at)",
@@ -326,6 +327,13 @@ def postgres_row_level_security() -> tuple[str, ...]:
     return tuple(statements)
 
 
+# Columns added after a table first shipped; ``CREATE TABLE IF NOT EXISTS`` does
+# not add them to an existing table, so the store adds each one when missing.
+ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("generated_reports", "required_capabilities_json", "TEXT"),
+)
+
+
 def postgres_numeric_columns() -> frozenset[tuple[str, str]]:
     """(table, column) pairs that must be DOUBLE PRECISION on PostgreSQL.
 
@@ -353,6 +361,7 @@ def render_sql_migration() -> str:
 
 __all__ = [
     "LINEAGE_COLUMNS",
+    "ADDED_COLUMNS",
     "SCHEMA_VERSION",
     "TENANT_TABLES",
     "column_type",

@@ -111,6 +111,12 @@ class ToolGateway:
             return None
         return record
 
+    def _release_approval(self, context: ToolCallContext, approval: Mapping[str, Any] | None) -> None:
+        """Return a claimed approval to ``approved`` after the handler failed, so a retry needs no new confirmation."""
+
+        if approval is not None:
+            self.store.decide_approval(context.institution_id, approval["approval_id"], status="approved", decided_by=context.principal.principal_id)
+
     def request_approval(self, context: ToolCallContext, tool: PlatformToolSpec, arguments: Mapping[str, Any], reason: str) -> dict[str, Any]:
         approval_id = f"apr-{uuid4().hex}"
         record = self.store.create_approval(
@@ -174,6 +180,11 @@ class ToolGateway:
         approval: dict[str, Any] | None = None
         if tool.risk is RiskLevel.HIGH_RISK:
             approval = self._approval_state(context, tool, validated)
+            # Claiming is atomic (status approved -> executing), so concurrent calls
+            # carrying the same approval id cannot both run the handler; the loser
+            # sees no usable approval and is asked to confirm again.
+            if approval is not None:
+                approval = self.store.claim_approval(context.institution_id, approval["approval_id"], principal_id=context.principal.principal_id)
             if approval is None:
                 pending = self.request_approval(context, tool, validated, reason=f"{tool.name} changes institutional records and needs your confirmation")
                 self._audit(context, tool_name, AuditOutcome.PARTIAL, started=started, decision=decision, extra={"reason": "approval_required", "approval_id": pending["approval_id"]})
@@ -181,20 +192,23 @@ class ToolGateway:
         try:
             output = await tool.handler(context, validated)
         except (PermissionError,) as exc:
+            self._release_approval(context, approval)
             self._audit(context, tool_name, AuditOutcome.DENIED, started=started, decision=decision, extra={"reason": "handler_denied"})
             return ToolInvocation(tool_name, "denied", denial_reason=str(exc), decision_id=decision.decision_id, risk=tool.risk.value)
         except (ValueError, KeyError, LookupError) as exc:
+            self._release_approval(context, approval)
             self._audit(context, tool_name, AuditOutcome.FAILED, started=started, decision=decision, extra={"reason": "handler_error"})
             return ToolInvocation(tool_name, "failed", denial_reason=str(exc)[:500], decision_id=decision.decision_id, risk=tool.risk.value)
         except Exception:  # noqa: BLE001 - every invocation must leave an audit event, whatever the handler raised
             # Database, object-store and provider errors carry connection details
             # and raw SQL; they go to the log, never to the caller. The approval
-            # (if any) stays approved so the user does not have to confirm again.
+            # (if any) goes back to approved so the user does not have to confirm again.
             logger.exception("tool handler failed: tool=%s request_id=%s principal=%s", tool.name, context.request_id, context.principal.principal_id)
+            self._release_approval(context, approval)
             self._audit(context, tool_name, AuditOutcome.FAILED, started=started, decision=decision, extra={"reason": "handler_exception"})
             return ToolInvocation(tool_name, "failed", denial_reason=HANDLER_FAILURE_MESSAGE, decision_id=decision.decision_id, risk=tool.risk.value)
         if approval is not None:
-            # A high-risk approval is single use, but only a completed action consumes it.
+            # A high-risk approval is single use: the completed action consumes it.
             self.store.decide_approval(context.institution_id, approval["approval_id"], status="consumed", decided_by=context.principal.principal_id)
         if not isinstance(output, ToolOutput):
             output = ToolOutput(data=output)

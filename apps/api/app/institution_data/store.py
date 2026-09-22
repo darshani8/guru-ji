@@ -17,7 +17,7 @@ from uuid import uuid4
 from ..normalization.canonical import CANONICAL_ENTITIES, CanonicalEntity, CanonicalField, FieldType, entity as canonical_entity
 from ..persistence.sql_backend import SqlBackend, open_backend
 from .models import CanonicalRecord, ImportSummary
-from .schema import SCHEMA_VERSION, portable_statements, postgres_numeric_columns, postgres_row_level_security
+from .schema import ADDED_COLUMNS, SCHEMA_VERSION, portable_statements, postgres_numeric_columns, postgres_row_level_security
 
 MAX_QUERY_ROWS = 5_000
 # Rows written per transaction by bulk imports; the backend lock is released
@@ -98,6 +98,7 @@ class InstitutionDataStore:
     # ------------------------------------------------------------------ lifecycle
     def _migrate(self) -> None:
         self.backend.executescript(portable_statements())
+        self._add_missing_columns()
         if self.backend.dialect == "postgresql":
             self.backend.executescript(postgres_row_level_security())
             self._upgrade_postgres_numeric_columns()
@@ -106,6 +107,19 @@ class InstitutionDataStore:
                 "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?) ON CONFLICT (version) DO NOTHING",
                 (SCHEMA_VERSION, now_iso()),
             )
+
+    def _add_missing_columns(self) -> None:
+        """Add columns introduced after a table first shipped to databases that predate them."""
+
+        for table, column, column_type in ADDED_COLUMNS:
+            if self.backend.dialect == "postgresql":
+                with self.backend.transaction():
+                    self.backend.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {column_type}")
+                continue
+            present = {row["name"] for row in self.backend.fetchall(f"PRAGMA table_info({table})")}
+            if column not in present:
+                with self.backend.transaction():
+                    self.backend.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
 
     def _upgrade_postgres_numeric_columns(self) -> None:
         """Widen NUMBER/PERCENT columns created as REAL (float4) to DOUBLE PRECISION.
@@ -825,21 +839,32 @@ class InstitutionDataStore:
         return rows
 
     # ------------------------------------------------------------------ reports
-    def add_report(self, institution_id: str, *, report_id: str, title: str, format_name: str, object_key: str, size_bytes: int, sha256: str, row_count: int, tool_name: str, created_by: str) -> dict[str, Any]:
+    def add_report(self, institution_id: str, *, report_id: str, title: str, format_name: str, object_key: str, size_bytes: int, sha256: str, row_count: int, tool_name: str, created_by: str, required_capabilities: Sequence[str] = ()) -> dict[str, Any]:
         with self._tenant(institution_id):
             self.backend.execute(
-                "INSERT INTO generated_reports(report_id, institution_id, title, format, object_key, size_bytes, sha256, row_count, tool_name, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (report_id, institution_id, title, format_name, object_key, size_bytes, sha256, row_count, tool_name, created_by, now_iso()),
+                "INSERT INTO generated_reports(report_id, institution_id, title, format, object_key, size_bytes, sha256, row_count, tool_name, created_by, created_at, required_capabilities_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (report_id, institution_id, title, format_name, object_key, size_bytes, sha256, row_count, tool_name, created_by, now_iso(), _json(sorted({str(item) for item in required_capabilities}))),
             )
         return self.get_report(institution_id, report_id) or {}
 
+    @staticmethod
+    def _decode_report(row: dict[str, Any]) -> dict[str, Any]:
+        raw = row.pop("required_capabilities_json", None)
+        decoded = _loads(raw, None) if raw not in (None, "") else None
+        # None means the requirements were never recorded (a row that predates
+        # the column); the report service then shows the report to its creator only.
+        row["required_capabilities"] = [str(item) for item in decoded] if isinstance(decoded, list) else None
+        return row
+
     def get_report(self, institution_id: str, report_id: str) -> dict[str, Any] | None:
         with self._tenant(institution_id):
-            return self.backend.fetchone("SELECT * FROM generated_reports WHERE institution_id = ? AND report_id = ?", (institution_id, report_id))
+            row = self.backend.fetchone("SELECT * FROM generated_reports WHERE institution_id = ? AND report_id = ?", (institution_id, report_id))
+        return self._decode_report(row) if row is not None else None
 
     def list_reports(self, institution_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
         with self._tenant(institution_id):
-            return self.backend.fetchall("SELECT * FROM generated_reports WHERE institution_id = ? ORDER BY created_at DESC LIMIT ?", (institution_id, _clamp_limit(limit, 500)))
+            rows = self.backend.fetchall("SELECT * FROM generated_reports WHERE institution_id = ? ORDER BY created_at DESC LIMIT ?", (institution_id, _clamp_limit(limit, 500)))
+        return [self._decode_report(row) for row in rows]
 
     # ------------------------------------------------------------ notifications
     def add_notification(self, institution_id: str, *, recipient_id: str, title: str, body: str, created_by: str, channel: str = "in_app", reference_type: str | None = None, reference_id: str | None = None) -> str:
@@ -926,6 +951,21 @@ class InstitutionDataStore:
         if row:
             row["arguments"] = _loads(row.pop("arguments_json", "{}"), {})
         return row
+
+    def claim_approval(self, institution_id: str, approval_id: str, *, principal_id: str) -> dict[str, Any] | None:
+        """Atomically move one approved, unexpired approval to ``executing``.
+
+        Exactly one caller wins when several carry the same approval id, so a
+        high-risk action can never run twice on one confirmation. Returns the
+        record when this call claimed it, otherwise ``None``.
+        """
+
+        with self._tenant(institution_id):
+            claimed = self.backend.execute(
+                "UPDATE approvals SET status = 'executing', decided_at = ?, decided_by = ? WHERE institution_id = ? AND approval_id = ? AND principal_id = ? AND status = 'approved' AND expires_at > ?",
+                (now_iso(), principal_id, institution_id, approval_id, principal_id, now_iso()),
+            )
+        return self.get_approval(institution_id, approval_id) if claimed else None
 
     def decide_approval(self, institution_id: str, approval_id: str, *, status: str, decided_by: str) -> dict[str, Any] | None:
         if status not in {"approved", "rejected", "consumed"}:
