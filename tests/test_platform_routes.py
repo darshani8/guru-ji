@@ -28,6 +28,21 @@ class PlatformRouteTests(unittest.TestCase):
         cls.job_id = upload.json()["job"]["job_id"]
         cls.client.post("/v1/ingestion/uploads", headers=cls.principal, files={"file": ("attendance.csv", ATTENDANCE, "text/csv")})
 
+    def test_readiness_reports_an_unreachable_store_as_not_ready(self):
+        platform = app.state.runtime.platform
+
+        def broken():
+            raise RuntimeError("connection refused")
+
+        with mock.patch.object(platform.store, "ping", broken):
+            response = self.client.get("/v1/health/ready")
+        self.assertEqual(response.status_code, 503)
+        body = response.json()
+        self.assertEqual(body["status"], "not_ready")
+        self.assertFalse(body["platform"]["institution_database_ok"])
+        self.assertTrue(body["database_ok"])
+        self.assertEqual(self.client.get("/v1/health/ready").status_code, 200)
+
     def test_failed_jobs_can_be_retried_and_finished_jobs_cannot(self):
         platform = app.state.runtime.platform
         done = self.client.post(f"/v1/ingestion/jobs/{self.job_id}/retry", headers=self.principal)

@@ -23,7 +23,11 @@ def principal_from_snapshot(snapshot: Mapping[str, Any]) -> Principal:
 def register_handlers(queue: JobQueue, *, ingestion: IngestionService | None = None, agent: MasterAgent | None = None, monitor: ContinuousMonitor | None = None, notifications: NotificationService | None = None) -> None:
     if ingestion is not None:
         async def process_ingestion(payload: dict[str, Any]) -> dict[str, Any]:
-            job = await ingestion.process(str(payload["institution_id"]), str(payload["job_id"]))
+            # A re-dispatched attempt means the queue established that the previous
+            # worker died, so an interrupted run may be restarted even if its
+            # heartbeat looks recent; an operator retry may also force it.
+            force = bool(payload.get("force")) or int(payload.get("_attempt") or 1) > 1
+            job = await ingestion.process(str(payload["institution_id"]), str(payload["job_id"]), force=force)
             if notifications is not None and payload.get("requested_by"):
                 report = job.get("report", {}).get("import") or {}
                 body = f"Import job {job['job_id']} finished with status {job['status']} ({job['stage']})."
@@ -35,6 +39,13 @@ def register_handlers(queue: JobQueue, *, ingestion: IngestionService | None = N
             return {"job_id": job["job_id"], "status": job["status"], "stage": job["stage"]}
 
         queue.register("ingestion.process", process_ingestion)
+
+        def ingestion_abandoned(job: Mapping[str, Any], error: str) -> None:
+            payload = job.get("payload") or {}
+            if payload.get("institution_id") and payload.get("job_id"):
+                ingestion.store.update_job(str(payload["institution_id"]), str(payload["job_id"]), status="failed", error=f"processing could not be scheduled: {error}"[:500])
+
+        queue.register_failure_hook("ingestion.process", ingestion_abandoned)
 
     if agent is not None:
         async def run_command(payload: dict[str, Any]) -> dict[str, Any]:

@@ -36,6 +36,8 @@ paths:
                 additionalProperties: true
                 type: object
                 title: Response Readiness V1 Health Ready Get
+        '503':
+          description: A store is unreachable
   /v1/auth/config:
     get:
       tags:
@@ -587,7 +589,7 @@ paths:
       - ingestion
       summary: Re-run a failed or interrupted ingestion job
       description: Queue the job again; a run that is still alive (fresh heartbeat)
-        is left untouched.
+        is left untouched unless ``force`` is set.
       operationId: retry_job_v1_ingestion_jobs__job_id__retry_post
       parameters:
       - name: job_id
@@ -604,6 +606,13 @@ paths:
           - type: string
           - type: 'null'
           title: Institution Id
+      - name: force
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: false
+          title: Force
       responses:
         '202':
           description: Successful Response

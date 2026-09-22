@@ -1013,9 +1013,10 @@ class InstitutionDataStore:
         with self.backend.transaction():
             rows = self.backend.fetchall("SELECT job_id FROM background_jobs WHERE status = 'queued' ORDER BY created_at LIMIT ?", (_clamp_limit(limit, 100),))
             for row in rows:
+                stamp = now_iso()
                 updated = self.backend.execute(
-                    "UPDATE background_jobs SET status = 'running', started_at = ?, attempts = attempts + 1 WHERE job_id = ? AND status = 'queued'",
-                    (now_iso(), row["job_id"]),
+                    "UPDATE background_jobs SET status = 'running', started_at = ?, heartbeat_at = ?, attempts = attempts + 1 WHERE job_id = ? AND status = 'queued'",
+                    (stamp, stamp, row["job_id"]),
                 )
                 if updated:
                     job = self.get_background_job(row["job_id"])
@@ -1030,26 +1031,41 @@ class InstitutionDataStore:
         ``None`` when it does not exist or was already claimed or finished.
         """
 
+        stamp = now_iso()
         with self.backend.transaction():
             updated = self.backend.execute(
-                "UPDATE background_jobs SET status = 'running', started_at = ?, attempts = attempts + 1 WHERE job_id = ? AND status = 'queued'",
-                (now_iso(), job_id),
+                "UPDATE background_jobs SET status = 'running', started_at = ?, heartbeat_at = ?, attempts = attempts + 1 WHERE job_id = ? AND status = 'queued'",
+                (stamp, stamp, job_id),
             )
         return self.get_background_job(job_id) if updated else None
 
-    def requeue_stale_background_jobs(self, *, older_than_seconds: int, max_attempts: int = 3) -> list[dict[str, Any]]:
-        """Return interrupted ``running`` jobs to ``queued`` so a worker restart resumes them.
+    def heartbeat_background_job(self, job_id: str) -> bool:
+        """Record that the worker running this job is still alive."""
 
-        A job whose claim is older than ``older_than_seconds`` and that has not
-        exhausted ``max_attempts`` goes back to ``queued``; older exhausted jobs
-        are marked ``failed`` so nothing loops forever.
+        with self.backend.transaction():
+            return self.backend.execute("UPDATE background_jobs SET heartbeat_at = ? WHERE job_id = ? AND status = 'running'", (now_iso(), job_id)) > 0
+
+    def requeue_background_job(self, job_id: str) -> bool:
+        """Hand a running job back to the queue (a worker is shutting down mid-job)."""
+
+        with self.backend.transaction():
+            return self.backend.execute("UPDATE background_jobs SET status = 'queued', started_at = NULL, heartbeat_at = NULL WHERE job_id = ? AND status = 'running'", (job_id,)) > 0
+
+    def requeue_stale_background_jobs(self, *, older_than_seconds: float, max_attempts: int = 3) -> list[dict[str, Any]]:
+        """Return ``running`` jobs whose worker stopped reporting to ``queued`` so another worker resumes them.
+
+        A running worker refreshes ``heartbeat_at`` while it works; a job whose
+        last heartbeat (or claim) is older than ``older_than_seconds`` has no
+        live worker and goes back to ``queued`` unless it has exhausted
+        ``max_attempts``, in which case it is marked ``failed`` so nothing
+        loops forever. A job whose heartbeat is fresh is never touched.
         """
 
-        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=max(1, int(older_than_seconds)))).isoformat()
+        cutoff = (datetime.now(timezone.utc) - timedelta(seconds=max(0.001, float(older_than_seconds)))).isoformat()
         requeued: list[dict[str, Any]] = []
         with self.backend.transaction():
             rows = self.backend.fetchall(
-                "SELECT job_id, attempts FROM background_jobs WHERE status = 'running' AND COALESCE(started_at, created_at) < ? ORDER BY created_at LIMIT 500",
+                "SELECT job_id, attempts FROM background_jobs WHERE status = 'running' AND COALESCE(heartbeat_at, started_at, created_at) < ? ORDER BY created_at LIMIT 500",
                 (cutoff,),
             )
             for row in rows:
@@ -1060,7 +1076,7 @@ class InstitutionDataStore:
                     )
                     continue
                 updated = self.backend.execute(
-                    "UPDATE background_jobs SET status = 'queued', started_at = NULL WHERE job_id = ? AND status = 'running'",
+                    "UPDATE background_jobs SET status = 'queued', started_at = NULL, heartbeat_at = NULL WHERE job_id = ? AND status = 'running'",
                     (row["job_id"],),
                 )
                 if updated:
@@ -1069,14 +1085,24 @@ class InstitutionDataStore:
                         requeued.append(job)
         return requeued
 
-    def finish_background_job(self, job_id: str, *, status: str, result: Mapping[str, Any] | None = None, error: str | None = None) -> None:
+    def finish_background_job(self, job_id: str, *, status: str, result: Mapping[str, Any] | None = None, error: str | None = None, attempt: int | None = None) -> bool:
+        """Record a job's outcome; with ``attempt`` only that attempt's outcome counts.
+
+        A run that was handed back to the queue and claimed again has a higher
+        attempt number, so the abandoned run finishing late cannot overwrite it.
+        """
+
         if status not in {"succeeded", "failed"}:
             raise ValueError("background job status must be succeeded or failed")
+        clause = "" if attempt is None else " AND attempts = ?"
+        params: list[Any] = [status, now_iso(), _json(dict(result or {})), error, job_id]
+        if attempt is not None:
+            params.append(int(attempt))
         with self.backend.transaction():
-            self.backend.execute(
-                "UPDATE background_jobs SET status = ?, finished_at = ?, result_json = ?, error = ? WHERE job_id = ?",
-                (status, now_iso(), _json(dict(result or {})), error, job_id),
-            )
+            return self.backend.execute(
+                f"UPDATE background_jobs SET status = ?, finished_at = ?, result_json = ?, error = ? WHERE job_id = ? AND status IN ('queued', 'running'){clause}",
+                tuple(params),
+            ) > 0
 
     def list_background_jobs(self, institution_id: str, *, limit: int = 50) -> list[dict[str, Any]]:
         rows = self.backend.fetchall("SELECT * FROM background_jobs WHERE institution_id = ? ORDER BY created_at DESC LIMIT ?", (institution_id, _clamp_limit(limit, 500)))

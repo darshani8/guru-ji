@@ -49,7 +49,7 @@ CREATE TABLE IF NOT EXISTS agent_runs ( run_id TEXT PRIMARY KEY, institution_id 
 CREATE INDEX IF NOT EXISTS idx_agent_runs_institution ON agent_runs(institution_id, created_at);
 CREATE TABLE IF NOT EXISTS approvals ( approval_id TEXT PRIMARY KEY, institution_id TEXT NOT NULL, principal_id TEXT NOT NULL, tool_name TEXT NOT NULL, arguments_json TEXT NOT NULL, arguments_sha256 TEXT NOT NULL, status TEXT NOT NULL, reason TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, expires_at TEXT NOT NULL, decided_at TEXT, decided_by TEXT );
 CREATE INDEX IF NOT EXISTS idx_approvals_institution ON approvals(institution_id, status, created_at);
-CREATE TABLE IF NOT EXISTS background_jobs ( job_id TEXT PRIMARY KEY, institution_id TEXT NOT NULL, job_type TEXT NOT NULL, payload_json TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, result_json TEXT NOT NULL DEFAULT '{}', error TEXT );
+CREATE TABLE IF NOT EXISTS background_jobs ( job_id TEXT PRIMARY KEY, institution_id TEXT NOT NULL, job_type TEXT NOT NULL, payload_json TEXT NOT NULL, status TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, created_at TEXT NOT NULL, started_at TEXT, finished_at TEXT, result_json TEXT NOT NULL DEFAULT '{}', error TEXT, heartbeat_at TEXT );
 CREATE INDEX IF NOT EXISTS idx_background_jobs_status ON background_jobs(status, created_at);
 -- PostgreSQL row-level security (skipped on SQLite)
 ALTER TABLE students ENABLE ROW LEVEL SECURITY;

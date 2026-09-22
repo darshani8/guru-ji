@@ -122,7 +122,7 @@ class AppSettings:
     sqs_queue_url: str | None = None
     # A background job still ``running`` after this many seconds is treated as
     # interrupted (worker restart) and returned to the queue at boot.
-    job_stale_seconds: int = 900
+    job_stale_seconds: int = 180  # a running job whose heartbeat is older than this lost its worker
     max_upload_bytes: int = 25_000_000
     ingestion_max_rows: int = 50_000
     ingestion_auto_commit: bool = True
@@ -231,7 +231,7 @@ class AppSettings:
             s3_prefix=os.getenv("GURU_S3_PREFIX", "").strip(),
             job_queue=os.getenv("GURU_JOB_QUEUE", "inline").strip().lower(),
             sqs_queue_url=os.getenv("GURU_SQS_QUEUE_URL") or None,
-            job_stale_seconds=int(os.getenv("GURU_JOB_STALE_SECONDS", "900")),
+            job_stale_seconds=int(os.getenv("GURU_JOB_STALE_SECONDS", "180")),
             max_upload_bytes=int(os.getenv("GURU_MAX_UPLOAD_BYTES", "25000000")),
             ingestion_max_rows=int(os.getenv("GURU_INGESTION_MAX_ROWS", "50000")),
             ingestion_auto_commit=_bool_env("GURU_INGESTION_AUTO_COMMIT", True),

@@ -300,7 +300,8 @@ def portable_statements() -> tuple[str, ...]:
             started_at TEXT,
             finished_at TEXT,
             result_json TEXT NOT NULL DEFAULT '{}',
-            error TEXT
+            error TEXT,
+            heartbeat_at TEXT
         )
         """,
         "CREATE INDEX IF NOT EXISTS idx_background_jobs_status ON background_jobs(status, created_at)",
@@ -331,6 +332,7 @@ def postgres_row_level_security() -> tuple[str, ...]:
 # not add them to an existing table, so the store adds each one when missing.
 ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("generated_reports", "required_capabilities_json", "TEXT"),
+    ("background_jobs", "heartbeat_at", "TEXT"),
 )
 
 

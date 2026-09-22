@@ -22,7 +22,15 @@ async def _loop(runtime, once: bool) -> None:
         raise SystemExit("the data platform is disabled; nothing to process")
     queue = platform.jobs
     consume = getattr(queue, "consume_once", None)
+    sweep_seconds = float(os.getenv("GURU_WORKER_SWEEP_SECONDS", "60"))
+    last_sweep = 0.0
     while True:
+        if time.monotonic() - last_sweep >= sweep_seconds:
+            # Hand back jobs whose worker stopped reporting (crash, restart).
+            last_sweep = time.monotonic()
+            requeued = queue.recover_stale()
+            if requeued:
+                print(f"worker: requeued {len(requeued)} stale job(s)", flush=True)
         if callable(consume):
             handled = await consume(wait_seconds=10)
         else:

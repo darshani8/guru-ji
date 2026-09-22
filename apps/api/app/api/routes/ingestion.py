@@ -43,8 +43,18 @@ class SheetImportBody(BaseModel):
 # loop keeps serving other requests (and the request timeout can still fire).
 
 
-def _enqueue_processing(platform: Any, target: str, job_id: str, requested_by: str) -> str:
-    return platform.jobs.enqueue(target, "ingestion.process", {"institution_id": target, "job_id": job_id, "requested_by": requested_by})
+def _enqueue_processing(platform: Any, target: str, job_id: str, requested_by: str, *, force: bool = False) -> str:
+    payload: dict[str, Any] = {"institution_id": target, "job_id": job_id, "requested_by": requested_by}
+    if force:
+        payload["force"] = True
+    try:
+        return platform.jobs.enqueue(target, "ingestion.process", payload)
+    except RuntimeError as exc:
+        # The queue transport refused the job (for example SQS): the ingestion
+        # job would otherwise look queued forever, so record the failure and
+        # tell the caller which job to retry.
+        platform.store.update_job(target, job_id, status="failed", error=f"processing could not be scheduled: {exc}"[:500])
+        raise HTTPException(status_code=503, detail=f"ingestion job {job_id} was created but could not be scheduled: {exc}; retry it once the job queue is available") from exc
 
 
 def _entity_or_422(entity: str | None) -> str | None:
@@ -195,8 +205,8 @@ async def commit_job(job_id: str, request: Request, institution_id: str | None =
 
 
 @router.post("/jobs/{job_id}/retry", summary="Re-run a failed or interrupted ingestion job", status_code=202)
-async def retry_job(job_id: str, request: Request, institution_id: str | None = None) -> dict[str, Any]:
-    """Queue the job again; a run that is still alive (fresh heartbeat) is left untouched."""
+async def retry_job(job_id: str, request: Request, institution_id: str | None = None, force: bool = False) -> dict[str, Any]:
+    """Queue the job again; a run that is still alive (fresh heartbeat) is left untouched unless ``force`` is set."""
 
     platform = platform_from_request(request)
     principal = require_principal(request, Capability.DATA_INGEST)
@@ -206,7 +216,7 @@ async def retry_job(job_id: str, request: Request, institution_id: str | None = 
         raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
     if job["status"] not in {"failed", "processing"}:
         raise HTTPException(status_code=409, detail=f"job cannot be retried from status {job['status']}")
-    await run_in_threadpool(_enqueue_processing, platform, target, job_id, principal.principal_id)
+    await run_in_threadpool(_enqueue_processing, platform, target, job_id, principal.principal_id, force=force)
     return {"job": _public_job(await run_in_threadpool(platform.store.get_job, target, job_id) or job)}
 
 

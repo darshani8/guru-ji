@@ -42,7 +42,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.runtime.close()
 
 app = FastAPI(title=settings.app_name, description="AI-powered institutional intelligence platform: ingestion, canonical data, policy-bound agents, and internet intelligence", version=settings.version, lifespan=lifespan)
-app.state.runtime = build_runtime(settings)
+app.state.runtime = build_runtime(settings, start_workers=True)  # the API process runs the thread queue, if configured
 atexit.register(app.state.runtime.close)
 app.add_exception_handler(GuruJiError, guruji_error_handler)  # type: ignore[arg-type]
 app.add_exception_handler(HTTPException, http_exception_handler)  # type: ignore[arg-type]

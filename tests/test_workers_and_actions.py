@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import threading
 import time
 import unittest
 import zipfile
@@ -44,10 +45,12 @@ class FakeSqsClient:
         self.deleted.append(ReceiptHandle)
 
 
-def _age_running_job(store: InstitutionDataStore, job_id: str, seconds: int) -> None:
+def _age_running_job(store: InstitutionDataStore, job_id: str, seconds: float) -> None:
+    """Make a running job look like its worker stopped reporting ``seconds`` ago."""
+
     started = (datetime.now(timezone.utc) - timedelta(seconds=seconds)).isoformat()
     with store.backend.transaction():
-        store.backend.execute("UPDATE background_jobs SET started_at = ? WHERE job_id = ?", (started, job_id))
+        store.backend.execute("UPDATE background_jobs SET started_at = ?, heartbeat_at = ? WHERE job_id = ?", (started, started, job_id))
 
 
 async def _ok(payload):
@@ -117,7 +120,7 @@ class EmailAndQueueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(queue.status(queue.enqueue("college_a", "t.bad", {}))["error"], "boom")
         with self.assertRaises(ValueError):
             queue.enqueue("college_a", "t.unknown", {})
-        self.assertEqual(seen, [{"n": 1}])
+        self.assertEqual(seen, [{"n": 1, "_attempt": 1}], "handlers learn which attempt they are running")
 
     async def test_thread_queue_processes_in_background(self):
         queue = ThreadJobQueue(self.fx.store, poll_seconds=0.05)
@@ -245,7 +248,11 @@ class EmailAndQueueTests(unittest.IsolatedAsyncioTestCase):
         young = pending.enqueue("college_a", "intelligence.monitor", {"institution_id": "college_a"})
         store.claim_background_job(young)
         settings = AppSettings(control_database_url=":memory:", object_store_backend="memory", job_queue="thread", job_stale_seconds=60)
-        runtime = build_platform(settings, control_store=InMemoryControlStore(), pdp=LocalPolicyDecisionPoint(), tracer=TraceRecorder(), model=None, institution_store=store, objects=InMemoryObjectStore())
+        # A process that does not run workers (scripts, one-off commands) neither polls nor sweeps.
+        passive = build_platform(settings, control_store=InMemoryControlStore(), pdp=LocalPolicyDecisionPoint(), tracer=TraceRecorder(), model=None, institution_store=store, objects=InMemoryObjectStore())
+        self.assertIsNone(passive.jobs._thread, "only processes meant to run jobs start the polling thread")
+        self.assertEqual(passive.jobs.status(interrupted)["status"], "running", "a passive process never touches jobs")
+        runtime = build_platform(settings, control_store=InMemoryControlStore(), pdp=LocalPolicyDecisionPoint(), tracer=TraceRecorder(), model=None, institution_store=store, objects=InMemoryObjectStore(), start_workers=True)
         try:
             self.assertIsInstance(runtime.jobs, ThreadJobQueue)
             self.assertTrue(runtime.jobs._thread is not None and runtime.jobs._thread.is_alive(), "thread queue must start at boot, not on first enqueue")
@@ -259,6 +266,82 @@ class EmailAndQueueTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(runtime.jobs.status(young)["status"], "running")
         finally:
             runtime.close()
+
+    async def test_heartbeats_keep_a_live_job_from_being_requeued(self):
+        store = self.fx.store
+        queue = JobQueue(store, stale_seconds=0.3, heartbeat_seconds=0.05)
+        release = threading.Event()
+
+        async def slow(payload):
+            await asyncio.get_running_loop().run_in_executor(None, release.wait, 5)
+            return {"attempt": payload["_attempt"]}
+
+        queue.register("t.slow", slow)
+        job_id = queue.enqueue("college_a", "t.slow", {})
+        job = store.claim_background_job(job_id)
+        first_beat = job["heartbeat_at"]
+        task = asyncio.create_task(queue.run_job(job))
+        await asyncio.sleep(0.6)
+        self.assertEqual(queue.recover_stale(), [], "a job whose worker heartbeats is never handed back")
+        self.assertEqual(store.get_background_job(job_id)["status"], "running")
+        self.assertGreater(store.get_background_job(job_id)["heartbeat_at"], first_beat)
+        release.set()
+        await task
+        self.assertEqual(store.get_background_job(job_id)["status"], "succeeded")
+        self.assertEqual(store.get_background_job(job_id)["result"]["attempt"], 1)
+        # A job whose heartbeat stopped is handed back within the stale window, and the re-run is attempt 2.
+        stale = queue.enqueue("college_a", "t.slow", {})
+        store.claim_background_job(stale)
+        _age_running_job(store, stale, 1.0)
+        self.assertEqual([item["job_id"] for item in queue.recover_stale()], [stale])
+        self.assertEqual(store.get_background_job(stale)["status"], "queued")
+        release.clear()
+        job = store.claim_background_job(stale)
+        self.assertEqual(job["attempts"], 2)
+        release.set()
+        await queue.run_job(job)
+        self.assertEqual(store.get_background_job(stale)["result"]["attempt"], 2)
+
+    async def test_stopping_the_thread_queue_hands_back_the_job_in_flight(self):
+        store = self.fx.store
+        queue = ThreadJobQueue(store, poll_seconds=0.05, heartbeat_seconds=0.05)
+        release = threading.Event()
+
+        async def slow(payload):
+            await asyncio.get_running_loop().run_in_executor(None, release.wait, 10)
+            return {"ok": True}
+
+        queue.register("t.slow", slow)
+        job_id = queue.enqueue("college_a", "t.slow", {})
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline and queue.status(job_id)["status"] != "running":
+            await asyncio.sleep(0.02)
+        self.assertEqual(queue.status(job_id)["status"], "running")
+        queue.stop(timeout=0.2)
+        self.assertEqual(queue.status(job_id)["status"], "queued", "an unfinished job goes straight back to the queue on shutdown")
+        self.assertIsNone(queue.status(job_id)["started_at"])
+        # The abandoned run finishing later cannot overwrite a job that was handed back and re-claimed.
+        store.claim_background_job(job_id)
+        release.set()
+        await asyncio.sleep(0.3)
+        self.assertEqual(queue.status(job_id)["status"], "running")
+
+    def test_abandoned_ingestion_jobs_are_marked_failed_through_the_failure_hook(self):
+        from app.workers.handlers import register_handlers
+
+        client = FakeSqsClient()
+        queue = SqsJobQueue(self.fx.store, "https://sqs.example.com/q", client=client)
+        register_handlers(queue, ingestion=self.fx.ingestion)
+        job = self.fx.ingestion.upload("college_a", "staff-1", file_name="s.csv", content=b"Name,USN\nRavi,MBA001\n", content_type="text/csv")
+        background = queue.enqueue("college_a", "ingestion.process", {"institution_id": "college_a", "job_id": job["job_id"], "requested_by": "staff-1"})
+        self.fx.store.claim_background_job(background)
+        _age_running_job(self.fx.store, background, 3600)
+        client.fail_sends = True
+        queue.recover_stale()
+        self.assertEqual(self.fx.store.get_background_job(background)["status"], "failed")
+        ingestion_job = self.fx.store.get_job("college_a", job["job_id"])
+        self.assertEqual(ingestion_job["status"], "failed")
+        self.assertIn("could not be scheduled", ingestion_job["error"])
 
     def test_principal_snapshot_round_trip(self):
         original = principal(PrincipalType.HOD)

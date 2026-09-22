@@ -206,10 +206,16 @@ class InstitutionStoreTests(unittest.TestCase):
         for job_id in ("bg-stale", "bg-fresh", "bg-exhausted", "bg-no-start"):
             self.assertIsNotNone(self.store.claim_background_job(job_id))
         with self.store.backend.transaction():
-            self.store.backend.execute("UPDATE background_jobs SET started_at = ? WHERE job_id IN (?, ?)", (old, "bg-stale", "bg-exhausted"))
+            # Staleness is judged by the last heartbeat (falling back to the claim, then the enqueue time).
+            self.store.backend.execute("UPDATE background_jobs SET started_at = ?, heartbeat_at = ? WHERE job_id IN (?, ?)", (old, old, "bg-stale", "bg-exhausted"))
             self.store.backend.execute("UPDATE background_jobs SET attempts = 3 WHERE job_id = ?", ("bg-exhausted",))
-            self.store.backend.execute("UPDATE background_jobs SET started_at = NULL, created_at = ? WHERE job_id = ?", (old, "bg-no-start"))
+            self.store.backend.execute("UPDATE background_jobs SET started_at = NULL, heartbeat_at = NULL, created_at = ? WHERE job_id = ?", (old, "bg-no-start"))
         self.assertEqual(self.store.requeue_stale_background_jobs(older_than_seconds=3600), [], "claims younger than the window are live")
+        # A heartbeat newer than the claim keeps a long-running job alive.
+        with self.store.backend.transaction():
+            self.store.backend.execute("UPDATE background_jobs SET started_at = ? WHERE job_id = ?", (old, "bg-fresh"))
+        self.assertTrue(self.store.heartbeat_background_job("bg-fresh"))
+        self.assertFalse(self.store.heartbeat_background_job("bg-missing"))
         requeued = self.store.requeue_stale_background_jobs(older_than_seconds=60, max_attempts=3)
         self.assertEqual(sorted(item["job_id"] for item in requeued), ["bg-no-start", "bg-stale"])
         stale = self.store.get_background_job("bg-stale")
@@ -221,6 +227,13 @@ class InstitutionStoreTests(unittest.TestCase):
         self.assertIsNotNone(exhausted["finished_at"])
         self.assertEqual(self.store.requeue_stale_background_jobs(older_than_seconds=60), [], "requeueing is idempotent")
         self.assertEqual(self.store.claim_background_job("bg-stale")["attempts"], 2)
+        # An earlier attempt finishing late cannot overwrite the re-claimed run; the current attempt can.
+        self.assertFalse(self.store.finish_background_job("bg-stale", status="succeeded", attempt=1))
+        self.assertEqual(self.store.get_background_job("bg-stale")["status"], "running")
+        self.assertTrue(self.store.finish_background_job("bg-stale", status="succeeded", attempt=2))
+        self.assertEqual(self.store.get_background_job("bg-stale")["status"], "succeeded")
+        self.assertTrue(self.store.requeue_background_job("bg-fresh"))
+        self.assertEqual(self.store.get_background_job("bg-fresh")["status"], "queued")
 
 
 class _FakeCursor:

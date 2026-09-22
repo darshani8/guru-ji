@@ -188,7 +188,7 @@ def _build_connectors(settings: AppSettings) -> ConnectorRegistry:
     return ConnectorRegistry(tuple(connectors))
 
 
-def build_runtime(settings: AppSettings | None = None) -> Runtime:
+def build_runtime(settings: AppSettings | None = None, *, start_workers: bool = False) -> Runtime:
     settings = settings or AppSettings.from_env()
     settings.ensure_safe_for_production()
     sources = _build_sources(settings)
@@ -219,7 +219,7 @@ def build_runtime(settings: AppSettings | None = None) -> Runtime:
         pdp=pdp,
         tracer=tracer,
     )
-    platform = build_platform(settings, control_store=store, pdp=pdp, tracer=tracer, model=model) if settings.platform_enabled else None
+    platform = build_platform(settings, control_store=store, pdp=pdp, tracer=tracer, model=model, start_workers=start_workers) if settings.platform_enabled else None
     return Runtime(
         settings=settings,
         sources=sources,

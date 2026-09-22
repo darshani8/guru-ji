@@ -59,11 +59,15 @@ class PlatformRuntime:
     intelligence: InternetIntelligenceService | None = None
     monitor: ContinuousMonitor | None = None
     sheets: GoogleSheetsCsvConnector | None = None
+    worker_store: InstitutionDataStore | None = None
 
-    def close(self) -> None:
+    def close(self, *, worker_timeout: float = 30.0) -> None:
         stop = getattr(self.jobs, "stop", None)
         if callable(stop):
-            stop()
+            # Let the job in flight finish (bounded) before its store goes away.
+            stop(timeout=worker_timeout)
+        if self.worker_store is not None and self.worker_store is not self.store:
+            self.worker_store.close()
         self.store.close()
         if self.intelligence_store.backend is not self.store.backend:
             self.intelligence_store.close()
@@ -101,27 +105,36 @@ def _embeddings(settings: AppSettings) -> EmbeddingProvider:
     return HashingEmbeddingProvider()
 
 
-def _job_queue(settings: AppSettings, store: InstitutionDataStore) -> JobQueue:
-    # The worker shares the request path's store (one connection guarded by a
-    # process-wide lock). Request handlers call the store off the event loop,
-    # so an import holds the lock for its (atomic) transaction without ever
-    # blocking the loop: readiness and job listings wait for that transaction
-    # instead of stalling the API. Production runs the SQS worker in its own
-    # process with its own connection, where nothing waits.
+def _job_queue(settings: AppSettings, store: InstitutionDataStore, worker_store: InstitutionDataStore | None) -> JobQueue:
+    # The in-process worker gets its own store (connection and lock) whenever
+    # the database allows a second connection, so a long import transaction
+    # never delays request-path store calls; an in-memory SQLite database is
+    # shared because a second connection would be a different database.
     if settings.job_queue == "thread":
-        return ThreadJobQueue(store)
+        return ThreadJobQueue(store, worker_store=worker_store, stale_seconds=settings.job_stale_seconds)
     if settings.job_queue == "sqs":
-        return SqsJobQueue(store, settings.sqs_queue_url or "", region=settings.s3_region)
-    return InlineJobQueue(store)
+        return SqsJobQueue(store, settings.sqs_queue_url or "", region=settings.s3_region, stale_seconds=settings.job_stale_seconds)
+    return InlineJobQueue(store, stale_seconds=settings.job_stale_seconds)
 
 
-def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: PolicyDecisionPoint, tracer: TraceRecorder, model: TextModel | None, institution_store: InstitutionDataStore | None = None, objects: ObjectStore | None = None, search_provider: Any | None = None) -> PlatformRuntime:
-    store = institution_store or InstitutionDataStore(settings.resolved_institution_database_url())
-    intelligence_store = IntelligenceStore(backend=store.backend)
-    objects = objects or _object_store(settings)
-    parsers = ParserRegistry(ocr_engine=_ocr_engine(settings), max_bytes=settings.max_upload_bytes)
-    mapping = MappingEngine(threshold=settings.mapping_confidence_threshold, model=model)
-    ingestion = IngestionService(store=store, objects=objects, parsers=parsers, mapping=mapping, max_upload_bytes=settings.max_upload_bytes, max_rows=settings.ingestion_max_rows, auto_commit=settings.ingestion_auto_commit, restart_after_seconds=settings.job_stale_seconds)
+@dataclass(slots=True)
+class _Services:
+    ingestion: IngestionService
+    data: InstitutionDataService
+    reports: ReportService
+    email: EmailService
+    notifications: NotificationService
+    documents: DocumentRagService
+    intelligence: InternetIntelligenceService | None
+    monitor: ContinuousMonitor | None
+    registry: PlatformToolRegistry
+    gateway: ToolGateway
+
+
+def _services(settings: AppSettings, store: InstitutionDataStore, intelligence_store: IntelligenceStore, *, objects: ObjectStore, parsers: ParserRegistry, mapping: MappingEngine, control_store: ControlStore, pdp: PolicyDecisionPoint, tracer: TraceRecorder, model: TextModel | None, provider: Any | None) -> _Services:
+    """The service graph bound to one store; built twice when the worker has its own connection."""
+
+    ingestion = IngestionService(store=store, objects=objects, parsers=parsers, mapping=mapping, max_upload_bytes=settings.max_upload_bytes, max_rows=settings.ingestion_max_rows, auto_commit=settings.ingestion_auto_commit, restart_after_seconds=max(settings.job_stale_seconds, 900))
     data = InstitutionDataService(store)
     reports = ReportService(store, objects)
     email = EmailService(store, objects, _email_sender(settings), allowed_domains=settings.email_allowed_domains)
@@ -129,9 +142,6 @@ def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: P
     documents = DocumentRagService(store, objects, parsers, embeddings=_embeddings(settings), model=model, max_document_bytes=settings.max_upload_bytes)
     intelligence: InternetIntelligenceService | None = None
     monitor: ContinuousMonitor | None = None
-    provider = search_provider
-    if provider is None and settings.intelligence_search_provider == "tavily":
-        provider = TavilyIntelligenceSearchProvider(api_key=settings.web_search_api_key or "", endpoint=settings.web_search_endpoint, timeout_seconds=settings.web_search_timeout_seconds)
     if provider is not None:
         fetcher = PublicPageFetcher(timeout_seconds=settings.web_extract_timeout_seconds, max_response_bytes=settings.web_extract_max_bytes) if settings.intelligence_fetch_pages else None
         intelligence = InternetIntelligenceService(intelligence_store, provider, fetcher=fetcher, institution_store=store, model=model, max_queries=settings.intelligence_max_queries, results_per_query=settings.intelligence_results_per_query)
@@ -143,20 +153,57 @@ def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: P
     services = PlatformServices(store=store, data=data, reports=reports, email=email, notifications=notifications, documents=documents, intelligence=intelligence, ingestion=ingestion)
     registry = build_platform_registry(services)
     gateway = ToolGateway(registry, store, control_store, pdp=pdp, tracer=tracer, approval_ttl_seconds=settings.approval_ttl_seconds)
+    return _Services(ingestion, data, reports, email, notifications, documents, intelligence, monitor, registry, gateway)
+
+
+_SHARED_ONLY_URLS = frozenset({":memory:", "sqlite:///:memory:", ""})
+
+
+def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: PolicyDecisionPoint, tracer: TraceRecorder, model: TextModel | None, institution_store: InstitutionDataStore | None = None, objects: ObjectStore | None = None, search_provider: Any | None = None, start_workers: bool = False) -> PlatformRuntime:
+    """Assemble the platform.
+
+    ``start_workers`` is set only by processes meant to run background jobs
+    (the API with the thread queue, the worker script): it starts the polling
+    thread and the stale-job sweep. Scripts and one-off commands leave it off
+    so they never claim jobs they will not finish.
+    """
+
+    database_url = settings.resolved_institution_database_url()
+    store = institution_store or InstitutionDataStore(database_url)
+    intelligence_store = IntelligenceStore(backend=store.backend)
+    objects = objects or _object_store(settings)
+    parsers = ParserRegistry(ocr_engine=_ocr_engine(settings), max_bytes=settings.max_upload_bytes)
+    mapping = MappingEngine(threshold=settings.mapping_confidence_threshold, model=model)
+    provider = search_provider
+    if provider is None and settings.intelligence_search_provider == "tavily":
+        provider = TavilyIntelligenceSearchProvider(api_key=settings.web_search_api_key or "", endpoint=settings.web_search_endpoint, timeout_seconds=settings.web_search_timeout_seconds)
+    build = dict(objects=objects, parsers=parsers, mapping=mapping, control_store=control_store, pdp=pdp, tracer=tracer, model=model, provider=provider)
+    request = _services(settings, store, intelligence_store, **build)
+    # The in-process worker works on its own connection when the database can
+    # open one, so its transactions never hold the request path's lock.
+    worker_store: InstitutionDataStore | None = None
+    if settings.job_queue == "thread" and start_workers and institution_store is None and database_url not in _SHARED_ONLY_URLS:
+        worker_store = InstitutionDataStore(database_url)
+    jobs = _job_queue(settings, store, worker_store)
     model_planner = ModelPlanner(model) if (settings.agent_planner == "model" and model is not None) else None
-    jobs = _job_queue(settings, store)
-    agent = MasterAgent(gateway, registry, data, store, control_store, planner=DeterministicPlanner(), model_planner=model_planner, model=model, model_max_tokens=settings.model_max_tokens, tracer=tracer, background=jobs)
-    register_handlers(jobs, ingestion=ingestion, agent=agent, monitor=monitor, notifications=notifications)
-    # The thread queue only wakes on enqueue, so start it at boot rather than on
-    # the first upload, then hand back jobs a previous process left ``running``.
-    start = getattr(jobs, "start", None)
-    if callable(start):
-        start()
-    jobs.recover_stale(older_than_seconds=settings.job_stale_seconds)
+    agent = MasterAgent(request.gateway, request.registry, request.data, store, control_store, planner=DeterministicPlanner(), model_planner=model_planner, model=model, model_max_tokens=settings.model_max_tokens, tracer=tracer, background=jobs)
+    if worker_store is not None:
+        worker = _services(settings, worker_store, IntelligenceStore(backend=worker_store.backend), **build)
+        worker_agent = MasterAgent(worker.gateway, worker.registry, worker.data, worker_store, control_store, planner=DeterministicPlanner(), model_planner=model_planner, model=model, model_max_tokens=settings.model_max_tokens, tracer=tracer, background=jobs)
+        register_handlers(jobs, ingestion=worker.ingestion, agent=worker_agent, monitor=worker.monitor, notifications=worker.notifications)
+    else:
+        register_handlers(jobs, ingestion=request.ingestion, agent=agent, monitor=request.monitor, notifications=request.notifications)
+    if start_workers:
+        # The thread queue only wakes on enqueue, so start it at boot rather than
+        # on the first upload, then hand back jobs whose worker stopped reporting.
+        start = getattr(jobs, "start", None)
+        if callable(start):
+            start()
+        jobs.recover_stale()
     return PlatformRuntime(
-        store=store, intelligence_store=intelligence_store, objects=objects, parsers=parsers, ingestion=ingestion, data=data, reports=reports, email=email,
-        notifications=notifications, documents=documents, registry=registry, gateway=gateway, agent=agent, jobs=jobs, intelligence=intelligence, monitor=monitor,
-        sheets=GoogleSheetsCsvConnector(max_bytes=settings.max_upload_bytes),
+        store=store, intelligence_store=intelligence_store, objects=objects, parsers=parsers, ingestion=request.ingestion, data=request.data, reports=request.reports, email=request.email,
+        notifications=request.notifications, documents=request.documents, registry=request.registry, gateway=request.gateway, agent=agent, jobs=jobs, intelligence=request.intelligence, monitor=request.monitor,
+        sheets=GoogleSheetsCsvConnector(max_bytes=settings.max_upload_bytes), worker_store=worker_store,
     )
 
 

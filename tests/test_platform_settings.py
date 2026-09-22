@@ -76,7 +76,7 @@ class PlatformSettingsTests(unittest.TestCase):
             self.assertFalse(AppSettings.from_env().platform_enabled)
 
     def test_stale_job_age_is_configurable_and_positive(self):
-        self.assertEqual(AppSettings().job_stale_seconds, 900)
+        self.assertEqual(AppSettings().job_stale_seconds, 180)
         with mock.patch.dict(os.environ, {"CONTROL_DATABASE_URL": ":memory:", "GURU_JOB_STALE_SECONDS": "120"}, clear=False):
             self.assertEqual(AppSettings.from_env().job_stale_seconds, 120)
         with self.assertRaisesRegex(ValueError, "GURU_JOB_STALE_SECONDS"):
