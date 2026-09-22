@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import json
+import os
 import sys
 import unittest
 from types import SimpleNamespace
@@ -12,7 +13,7 @@ from app.api.dependencies import build_runtime
 from app.config.settings import AppSettings
 from app.domain.errors import ErrorCode, GuruJiError, PublicError
 from app.orchestration.answer_synthesizer import AssistantAnswer, apply_model_wording
-from app.providers.anthropic import FALLBACK_BETA, LATENCY_SENSITIVE_SYSTEM, MIN_MAX_TOKENS, AnthropicProvider
+from app.providers.anthropic import BEDROCK_FALLBACK_MODEL, FALLBACK_BETA, LATENCY_SENSITIVE_SYSTEM, MIN_MAX_TOKENS, AnthropicProvider
 from app.providers.ollama import OllamaProvider
 
 ANTHROPIC_SDK_AVAILABLE = importlib.util.find_spec("anthropic") is not None
@@ -212,9 +213,10 @@ class ClaudeProviderTests(unittest.IsolatedAsyncioTestCase):
 
         request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
         cases = (
-            (anthropic.AuthenticationError("invalid x-api-key", response=httpx2.Response(401, request=request), body=None), "the API key was rejected"),
-            (anthropic.NotFoundError("model: claude-x", response=httpx2.Response(404, request=request), body=None), "the model ID is not available"),
+            (anthropic.AuthenticationError("invalid x-api-key", response=httpx2.Response(401, request=request), body=None), "authentication failed: invalid x-api-key"),
+            (anthropic.NotFoundError("model: claude-x", response=httpx2.Response(404, request=request), body=None), "model not found: model: claude-x"),
             (anthropic.APIConnectionError(request=request), "the API could not be reached"),
+            (RuntimeError("Could not resolve AWS credentials from session"), "RuntimeError: Could not resolve AWS credentials"),
         )
         for error, reason in cases:
             with self.subTest(reason=reason):
@@ -294,6 +296,98 @@ class ClaudeProviderTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((answers.effort, answers.system), ("low", LATENCY_SENSITIVE_SYSTEM))
             self.assertIsInstance(planner, AnthropicProvider)
             self.assertEqual((planner.effort, planner.system), ("medium", None))
+        finally:
+            runtime.close()
+
+
+def _bedrock_reply(model, *, refused=False):
+    return {
+        "id": "msg_bedrock", "type": "message", "role": "assistant", "model": model,
+        "content": [] if refused else [{"type": "text", "text": "There are 1240 active students."}],
+        "stop_reason": "refusal" if refused else "end_turn", "stop_sequence": None,
+        "stop_details": {"type": "refusal", "category": "cyber", "explanation": None, "fallback_credit_token": "tok_test", "fallback_has_prefill_claim": False} if refused else None,
+        "usage": {"input_tokens": 50, "output_tokens": 0 if refused else 9},
+    }
+
+
+@unittest.skipUnless(ANTHROPIC_SDK_AVAILABLE, "the anthropic extra is not installed")
+class ClaudeOnBedrockTests(unittest.IsolatedAsyncioTestCase):
+    """Claude in Amazon Bedrock through the real SDK client over a mock transport.
+
+    A Bedrock bearer token stands in for the AWS credential chain so no request
+    needs SigV4 signing.
+    """
+
+    def setUp(self):
+        patcher = patch.dict(os.environ, {"AWS_BEARER_TOKEN_BEDROCK": "bedrock-test-token"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def _provider(self, handler, **options):
+        import httpx2
+
+        return AnthropicProvider(platform="bedrock", aws_region="ap-south-1", transport=httpx2.MockTransport(handler), **options)
+
+    def test_bedrock_ids_carry_the_provider_prefix(self):
+        self.assertEqual(AnthropicProvider(platform="bedrock").model_id, "anthropic.claude-opus-5")
+        self.assertEqual(AnthropicProvider(platform="bedrock", model_id="global.anthropic.claude-opus-5").model_id, "global.anthropic.claude-opus-5")
+        self.assertEqual(AnthropicProvider(platform="bedrock").provider_id, "bedrock")
+        with self.assertRaises(ValueError):
+            AnthropicProvider(platform="vertex")
+
+    async def test_a_declined_request_is_retried_client_side_on_the_fallback_model(self):
+        import httpx2
+
+        sent = []
+
+        def handler(request):
+            body = json.loads(request.content)
+            sent.append((request.url, body))
+            return httpx2.Response(200, json=_bedrock_reply(body["model"], refused=body["model"] == "anthropic.claude-opus-5"))
+
+        answer = AssistantAnswer(request_id="req-bedrock", status="complete", answer="The source reports 1240 active students.")
+        with self.assertNoLogs("anthropic.lib.middleware", "WARNING"):
+            result = await apply_model_wording(answer, self._provider(handler, system=LATENCY_SENSITIVE_SYSTEM))
+        self.assertEqual((result.generation_mode, result.answer), ("bedrock", "There are 1240 active students."))
+        (first_url, first), (_, second) = sent
+        self.assertEqual((first_url.host, first_url.path), ("bedrock-mantle.ap-south-1.api.aws", "/anthropic/v1/messages"))
+        # Bedrock has no server-side fallbacks: the first request carries none.
+        self.assertNotIn("fallbacks", first)
+        self.assertEqual(first["output_config"], {"effort": "low"})
+        self.assertEqual(second["model"], BEDROCK_FALLBACK_MODEL)
+
+    async def test_an_account_without_model_access_is_named_in_the_log(self):
+        import httpx2
+
+        def handler(request):
+            del request
+            return httpx2.Response(403, json={"message": "anthropic.claude-opus-5 is not available for this account."})
+
+        with self.assertLogs("app.providers.anthropic", "WARNING") as logs, self.assertRaises(GuruJiError) as context:
+            await self._provider(handler).complete("approved answer")
+        self.assertIn("access denied", logs.output[0])
+        self.assertIn("not available for this account", logs.output[0])
+        self.assertEqual(context.exception.public_error.message, "The configured Claude model is unavailable.")
+
+    def test_bedrock_needs_a_region_and_the_runtime_wires_both_roles(self):
+        with self.assertRaises(ValueError):
+            AppSettings(model_provider="bedrock").ensure_safe_for_production()
+        with patch.dict(os.environ, {"GURU_MODEL_PROVIDER": "bedrock", "AWS_REGION": "ap-south-1"}):
+            self.assertEqual(AppSettings.from_env().bedrock_region, "ap-south-1")
+        settings = AppSettings(
+            environment="test",
+            control_database_url=":memory:",
+            model_provider="bedrock",
+            bedrock_region="ap-south-1",
+            agent_planner="model",
+            platform_enabled=True,
+        )
+        runtime = build_runtime(settings)
+        try:
+            answers = runtime.assistant.model
+            planner = runtime.platform.agent.model_planner.model
+            self.assertEqual((answers.platform, answers.model_id, answers.aws_region, answers.effort), ("bedrock", "anthropic.claude-opus-5", "ap-south-1", "low"))
+            self.assertEqual((planner.platform, planner.effort, planner.system), ("bedrock", "medium", None))
         finally:
             runtime.close()
 

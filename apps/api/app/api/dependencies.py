@@ -115,29 +115,33 @@ def _build_model(settings: AppSettings):
             api_key=settings.litellm_api_key,
             timeout_seconds=settings.model_timeout_seconds,
         )
-    if settings.model_provider == "anthropic":
+    if settings.model_provider in _CLAUDE_PROVIDERS:
         # Voice and chat answers are what a person waits on: low effort and the
         # latency instruction keep the reply quick.
-        return AnthropicProvider(
-            model_id=settings.anthropic_model_id,
-            api_key=settings.anthropic_api_key,
-            effort=settings.anthropic_effort,
-            system=LATENCY_SENSITIVE_SYSTEM,
-            timeout_seconds=settings.model_timeout_seconds,
-        )
+        return _claude(settings, effort=settings.anthropic_effort, system=LATENCY_SENSITIVE_SYSTEM)
     return None
+
+
+_CLAUDE_PROVIDERS = frozenset({"anthropic", "bedrock"})
+
+
+def _claude(settings: AppSettings, *, effort: str, system: str | None = None) -> AnthropicProvider:
+    return AnthropicProvider(
+        model_id=settings.anthropic_model_id,
+        api_key=settings.anthropic_api_key,
+        effort=effort,
+        system=system,
+        timeout_seconds=settings.model_timeout_seconds,
+        platform=settings.model_provider,
+        aws_region=settings.bedrock_region,
+    )
 
 
 def _build_planner_model(settings: AppSettings, model):
     """The model that plans agent actions; other providers reuse the answer model."""
 
-    if settings.model_provider == "anthropic":
-        return AnthropicProvider(
-            model_id=settings.anthropic_model_id,
-            api_key=settings.anthropic_api_key,
-            effort=settings.anthropic_planner_effort,
-            timeout_seconds=settings.model_timeout_seconds,
-        )
+    if settings.model_provider in _CLAUDE_PROVIDERS:
+        return _claude(settings, effort=settings.anthropic_planner_effort)
     return model
 
 
