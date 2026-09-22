@@ -2642,6 +2642,160 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/incidents:
+    get:
+      tags:
+      - intelligence-map
+      summary: What went wrong with the institution's own presence, with what to do
+        about it (managers only)
+      operationId: incidents_v1_intelligence_map_incidents_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: status
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Status
+      - name: severity
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Severity
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 100
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Incidents V1 Intelligence Map Incidents Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/incidents/{incident_id}/{action}:
+    post:
+      tags:
+      - intelligence-map
+      summary: Acknowledge or resolve an incident
+      operationId: incident_action_v1_intelligence_map_incidents__incident_id___action__post
+      parameters:
+      - name: incident_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Incident Id
+      - name: action
+        in: path
+        required: true
+        schema:
+          enum:
+          - acknowledge
+          - resolve
+          type: string
+          title: Action
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IncidentBody'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Incident Action V1 Intelligence Map Incidents  Incident
+                  Id   Action  Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/digest:
+    get:
+      tags:
+      - intelligence-map
+      summary: Preview the map's daily digest (managers only)
+      operationId: map_digest_v1_intelligence_map_digest_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Map Digest V1 Intelligence Map Digest Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    post:
+      tags:
+      - intelligence-map
+      summary: Send the map's daily digest to the alert recipients now (normally scheduled)
+      operationId: send_map_digest_v1_intelligence_map_digest_post
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MapInstitutionBody'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Send Map Digest V1 Intelligence Map Digest Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /v1/intelligence/map/connectors:
     get:
       tags:
@@ -3233,6 +3387,21 @@ components:
           title: Institution Id
       type: object
       title: HarvestBody
+    IncidentBody:
+      properties:
+        note:
+          type: string
+          maxLength: 500
+          title: Note
+          default: ''
+        institution_id:
+          anyOf:
+          - type: string
+            maxLength: 128
+          - type: 'null'
+          title: Institution Id
+      type: object
+      title: IncidentBody
     InstitutionBody:
       properties:
         name:

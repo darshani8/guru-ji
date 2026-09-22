@@ -20,7 +20,7 @@ def principal_from_snapshot(snapshot: Mapping[str, Any]) -> Principal:
     return Principal(str(snapshot["principal_id"]), PrincipalType(str(snapshot.get("principal_type", "student"))), capabilities, scopes, authenticated=True, consent_verified=bool(snapshot.get("consent_verified", False)))
 
 
-def register_handlers(queue: JobQueue, *, ingestion: IngestionService | None = None, agent: MasterAgent | None = None, monitor: ContinuousMonitor | None = None, notifications: NotificationService | None = None, map_engine: Any | None = None) -> None:
+def register_handlers(queue: JobQueue, *, ingestion: IngestionService | None = None, agent: MasterAgent | None = None, monitor: ContinuousMonitor | None = None, notifications: NotificationService | None = None, map_engine: Any | None = None, map_desk: Any | None = None) -> None:
     if ingestion is not None:
         async def process_ingestion(payload: dict[str, Any]) -> dict[str, Any]:
             # A re-dispatched attempt means the queue established that the previous
@@ -76,6 +76,13 @@ def register_handlers(queue: JobQueue, *, ingestion: IngestionService | None = N
             return await map_engine.tick(str(payload["institution_id"]))
 
         queue.register("intelligence.map_tick", run_map_tick)
+
+    if map_desk is not None:
+        async def send_map_digest(payload: dict[str, Any]) -> dict[str, Any]:
+            digest = map_desk.send_digest(str(payload["institution_id"]))
+            return {"sent": digest["sent"], "incidents": len(digest["incidents"]), "found": digest["found"]}
+
+        queue.register("intelligence.map_digest", send_map_digest)
 
 
 __all__ = ["principal_from_snapshot", "register_handlers"]

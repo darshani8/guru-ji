@@ -33,6 +33,7 @@ from ..fetch import PublicPageFetcher
 from ..profile import InstitutionProfile
 from .connectors.base import ConnectorContext, ConnectorRegistry, ConnectorResult, Lead
 from .gate import guard_canaries
+from .incidents import IncidentDesk
 from .metrics import map_metrics
 from .pipeline import regrade, sync_profile
 from .store import MapStore
@@ -66,6 +67,7 @@ class MapEngine:
     profile_loader: Callable[[str], InstitutionProfile | None] | None = None
     clock: Callable[[], datetime] = field(default=lambda: datetime.now(timezone.utc))
     extras: Mapping[str, Any] = field(default_factory=dict)
+    incidents: IncidentDesk | None = None
 
     # ------------------------------------------------------------ scheduling
     def ensure_recurring(self, institution_id: str, profile: InstitutionProfile | None) -> int:
@@ -201,6 +203,8 @@ class MapEngine:
             counts["review_full"] = queued.count("full")
             stop_reason = "budget" if counts["deferred_budget"] else ("dry" if counts["sources"] and not (counts["new_assets"] or counts["raised"]) else ("idle" if not counts["sources"] else "completed"))
             metrics = map_metrics(self.store, institution_id)
+            if self.incidents is not None and incidents:
+                counts["incidents_new"] = self.incidents.record(institution_id, incidents, run_id=run_id)["new"]
             self.store.finish_map_run(institution_id, run_id, status="succeeded", stop_reason=stop_reason, gate="canary_held" if leaks else "passed", spend=spend, counts=counts, metrics=metrics)
         except Exception as exc:
             self.store.finish_map_run(institution_id, run_id, status="failed", counts=counts, spend=spend, error=str(exc)[:300])

@@ -220,6 +220,34 @@ _STATEMENTS: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_intel_review_items_open ON intel_review_items(institution_id, status, created_at)",
+    """
+    CREATE TABLE IF NOT EXISTS intel_incidents (
+        incident_id TEXT PRIMARY KEY,
+        institution_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        target TEXT NOT NULL,
+        fingerprint TEXT NOT NULL,
+        severity TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'open',
+        title TEXT NOT NULL,
+        signals_json TEXT NOT NULL DEFAULT '[]',
+        examples_json TEXT NOT NULL DEFAULT '[]',
+        guidance TEXT NOT NULL DEFAULT '',
+        connector TEXT NOT NULL DEFAULT '',
+        run_id TEXT,
+        first_seen_at TEXT NOT NULL,
+        last_seen_at TEXT NOT NULL,
+        times_seen INTEGER NOT NULL DEFAULT 1,
+        notified_at TEXT,
+        acknowledged_by TEXT,
+        acknowledged_at TEXT,
+        resolved_by TEXT,
+        resolved_at TEXT,
+        note TEXT NOT NULL DEFAULT '',
+        UNIQUE(institution_id, fingerprint)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_intel_incidents_open ON intel_incidents(institution_id, status, severity)",
     # Global tables: public-web metadata and platform-wide spend, never tenant
     # data, so they stay outside row-level security and a tick can use them
     # for every institution.
@@ -248,7 +276,7 @@ ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("intel_assets", "last_activity_at", "TEXT"),
     ("intel_assets", "registration_expires_at", "TEXT"),
 )
-TENANT_TABLES: tuple[str, ...] = ("intel_entities", "intel_assets", "intel_evidence", "intel_gold_items", "intel_suppression", "intel_map_runs", "intel_sources", "intel_quota", "intel_review_items")
+TENANT_TABLES: tuple[str, ...] = ("intel_entities", "intel_assets", "intel_evidence", "intel_gold_items", "intel_suppression", "intel_map_runs", "intel_sources", "intel_quota", "intel_review_items", "intel_incidents")
 GLOBAL_TABLES: tuple[str, ...] = ("intel_budget_ledger", "intel_fetch_state")
 SOURCE_CLASSES = frozenset({"rotation", "recheck", "explore"})
 REVIEW_KINDS = frozenset({"impersonation_candidate", "court_record", "dispute", "canary_leak", "run_gate", "candidate_account"})
@@ -614,7 +642,99 @@ class MapStoreReview:
             return self.backend.execute("UPDATE intel_assets SET proposed_grade = NULL, updated_at = ? WHERE institution_id = ? AND proposed_grade IS NOT NULL", (now_iso(), institution_id))
 
 
-class MapStore(MapStoreScheduling, MapStoreReview):
+class MapStoreIncidents:
+    """Incidents: things that went wrong with the institution's own presence (mixed into MapStore)."""
+
+    backend: SqlBackend
+
+    def _tenant(self, institution_id: str):  # pragma: no cover - provided by MapStore
+        raise NotImplementedError
+
+    def upsert_incident(
+        self, institution_id: str, *, kind: str, target: str, severity: str, title: str, signals: Sequence[str] = (), examples: Sequence[str] = (), guidance: str = "",
+        connector: str = "", run_id: str | None = None, now: str | None = None,
+    ) -> tuple[dict[str, Any], str]:
+        """Record an incident once per (kind, target); returns (row, 'new' | 'repeat' | 'reopened').
+
+        Seeing it again only moves last_seen_at and counts it; a resolved
+        incident that comes back is reopened (and will be notified again).
+        """
+
+        if severity not in {"low", "medium", "high"}:
+            raise ValueError("severity must be low, medium or high")
+        stamp = now or now_iso()
+        fingerprint = hashlib.sha256(f"{kind}|{target.lower()}".encode("utf-8")).hexdigest()
+        with self._tenant(institution_id):
+            existing = self.backend.fetchone("SELECT * FROM intel_incidents WHERE institution_id = ? AND fingerprint = ?", (institution_id, fingerprint))
+            if existing is None:
+                incident_id = f"iinc-{uuid4().hex}"
+                self.backend.execute(
+                    "INSERT INTO intel_incidents(incident_id, institution_id, kind, target, fingerprint, severity, title, signals_json, examples_json, guidance, connector, run_id, first_seen_at, last_seen_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (incident_id, institution_id, kind[:60], target[:300], fingerprint, severity, title[:300], _json(list(signals)[:20]), _json(list(examples)[:10]), guidance[:2000], connector[:40], run_id, stamp, stamp),
+                )
+                verdict = "new"
+            else:
+                incident_id = str(existing["incident_id"])
+                reopened = existing["status"] == "resolved"
+                self.backend.execute(
+                    "UPDATE intel_incidents SET last_seen_at = ?, times_seen = times_seen + 1, signals_json = ?, examples_json = ?, run_id = COALESCE(?, run_id), "
+                    "severity = CASE WHEN ? = 'high' THEN 'high' ELSE severity END, status = CASE WHEN status = 'resolved' THEN 'open' ELSE status END, "
+                    "notified_at = CASE WHEN status = 'resolved' THEN NULL ELSE notified_at END WHERE institution_id = ? AND incident_id = ?",
+                    (stamp, _json(list(signals)[:20]), _json(list(examples)[:10]), run_id, severity, institution_id, incident_id),
+                )
+                verdict = "reopened" if reopened else "repeat"
+            row = self.backend.fetchone("SELECT * FROM intel_incidents WHERE institution_id = ? AND incident_id = ?", (institution_id, incident_id))
+        return self._incident_row(row), verdict
+
+    @staticmethod
+    def _incident_row(row: dict[str, Any]) -> dict[str, Any]:
+        row["signals"] = _loads(row.pop("signals_json", "[]"), [])
+        row["examples"] = _loads(row.pop("examples_json", "[]"), [])
+        return row
+
+    def get_incident(self, institution_id: str, incident_id: str) -> dict[str, Any] | None:
+        with self._tenant(institution_id):
+            row = self.backend.fetchone("SELECT * FROM intel_incidents WHERE institution_id = ? AND incident_id = ?", (institution_id, incident_id))
+        return self._incident_row(row) if row else None
+
+    def list_incidents(self, institution_id: str, *, status: str | None = None, severity: str | None = None, since: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        clauses, params = ["institution_id = ?"], [institution_id]
+        for column, value in (("status", status), ("severity", severity)):
+            if value:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        if since:
+            clauses.append("last_seen_at >= ?")
+            params.append(since)
+        with self._tenant(institution_id):
+            rows = self.backend.fetchall(
+                f"SELECT * FROM intel_incidents WHERE {' AND '.join(clauses)} ORDER BY CASE severity WHEN 'high' THEN 0 WHEN 'medium' THEN 1 ELSE 2 END, last_seen_at DESC LIMIT ?",
+                (*params, max(1, min(limit, 500))),
+            )
+        return [self._incident_row(row) for row in rows]
+
+    def set_incident_status(self, institution_id: str, incident_id: str, *, status: str, by: str, note: str = "") -> bool:
+        if status not in {"acknowledged", "resolved"}:
+            raise ValueError("an incident can be acknowledged or resolved")
+        stamp = now_iso()
+        column = "acknowledged" if status == "acknowledged" else "resolved"
+        with self._tenant(institution_id):
+            return bool(self.backend.execute(
+                f"UPDATE intel_incidents SET status = ?, {column}_by = ?, {column}_at = ?, note = CASE WHEN ? = '' THEN note ELSE ? END WHERE institution_id = ? AND incident_id = ? AND status <> 'resolved'",
+                (status, by, stamp, note[:500], note[:500], institution_id, incident_id),
+            ))
+
+    def mark_incidents_notified(self, institution_id: str, incident_ids: Sequence[str]) -> None:
+        if not incident_ids:
+            return
+        stamp = now_iso()
+        with self._tenant(institution_id):
+            for chunk in iter_chunks(list(incident_ids), 200):
+                self.backend.execute(f"UPDATE intel_incidents SET notified_at = ? WHERE institution_id = ? AND incident_id IN ({', '.join('?' for _ in chunk)})", (stamp, institution_id, *chunk))
+
+
+class MapStore(MapStoreScheduling, MapStoreReview, MapStoreIncidents):
     def __init__(self, database_url: str | None = None, backend: SqlBackend | None = None, *, suppression_key: bytes = b"guru-ji-development-only") -> None:
         self.backend = backend or open_backend(database_url)
         self.suppression_key = suppression_key

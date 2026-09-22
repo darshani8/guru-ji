@@ -13,6 +13,7 @@ from ..profile import InstitutionProfile
 from .engine import MapEngine
 from .export import export_tsv
 from .gate import rescore
+from .incidents import IncidentDesk
 from .harvest import OfficialSiteHarvester
 from .metrics import map_metrics, record_baseline
 from .pipeline import regrade, sync_profile
@@ -40,6 +41,7 @@ class MapService:
     engine: MapEngine | None = None
     # institution -> the sweep groups that are its own (operator configuration)
     seed_groups: Mapping[str, Sequence[str]] = field(default_factory=dict)
+    desk: IncidentDesk | None = None
 
     @staticmethod
     def guard(principal: Principal, institution_id: str, capability: Capability) -> None:
@@ -212,6 +214,8 @@ class MapService:
             effect["sources_pruned"] = self.store.prune_sources_for(institution_id, asset_id=asset["asset_id"], url=asset["url"])
             if decision == "impersonation":
                 effect["incident"] = {"kind": "impersonation_confirmed", "target": asset["asset_key"], "signals": [detail], "severity": "high"}
+                if self.desk is not None:
+                    self.desk.record(institution_id, [effect["incident"]])
         elif decision == "personal":
             # A person's account leaves the map: only a keyed fingerprint stays, so it never comes back.
             self.store.suppress(institution_id, asset["asset_key"], reason="personal account (review decision)")
@@ -227,6 +231,24 @@ class MapService:
         if not self.store.decide_review_item(institution_id, review_id, decision=decision, decided_by=principal.principal_id, note=note, redact=decision == "personal"):
             raise ValueError("this item was decided by someone else just now")
         return {"review_id": review_id, "kind": item["kind"], **effect}
+
+    # --------------------------------------------------------------- incidents
+    def incidents(self, principal: Principal, institution_id: str, *, status: str | None = None, severity: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        self.guard(principal, institution_id, Capability.INTELLIGENCE_MANAGE)
+        return self.store.list_incidents(institution_id, status=status, severity=severity, limit=limit)
+
+    def set_incident(self, principal: Principal, institution_id: str, incident_id: str, *, status: str, note: str = "") -> dict[str, Any]:
+        self.guard(principal, institution_id, Capability.INTELLIGENCE_MANAGE)
+        if self.store.get_incident(institution_id, incident_id) is None:
+            raise KeyError("incident not found")
+        if not self.store.set_incident_status(institution_id, incident_id, status=status, by=principal.principal_id, note=note):
+            raise ValueError("this incident is already resolved; it reopens by itself if it is seen again")
+        return self.store.get_incident(institution_id, incident_id) or {}
+
+    def digest(self, principal: Principal, institution_id: str, *, send: bool = False) -> dict[str, Any]:
+        self.guard(principal, institution_id, Capability.INTELLIGENCE_MANAGE)
+        desk = self.desk or IncidentDesk(self.store)
+        return desk.send_digest(institution_id) if send else {**desk.digest(institution_id), "sent": False}
 
     def rescore(self, principal: Principal, institution_id: str) -> dict[str, Any]:
         """Recompute every grade under the current rule; publish only if the ground truth does not get worse."""

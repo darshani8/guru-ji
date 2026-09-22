@@ -85,6 +85,22 @@ class PostgresMapStoreTests(unittest.TestCase):
         self.assertEqual(store.apply_proposed(institution), 0)
         self.assertEqual(store.list_review_items(institution, status=None)[0]["url"], "")
 
+    def test_incidents_recur_and_reopen(self):
+        from app.internet_intelligence.map.incidents import IncidentDesk
+        from app.internet_intelligence.map.store import MapStore
+
+        store = MapStore(POSTGRES_URL, suppression_key=b"k")
+        institution = f"pgt-{uuid4().hex[:10]}"
+        sent: list[str] = []
+        desk = IncidentDesk(store, recipients=lambda _: ("p",), notify=lambda *args: sent.append(args[4]))
+        self.assertEqual(desk.record(institution, [{"kind": "site_hijacked", "target": "x.in", "run_id": None}])["notified"], 1)
+        self.assertEqual(desk.record(institution, [{"kind": "site_hijacked", "target": "x.in"}], run_id="r2")["repeat"], 1)
+        [incident] = store.list_incidents(institution)
+        self.assertTrue(store.set_incident_status(institution, incident["incident_id"], status="resolved", by="p"))
+        self.assertEqual(desk.record(institution, [{"kind": "site_hijacked", "target": "x.in"}])["reopened"], 1)
+        self.assertEqual(len(sent), 2)
+        self.assertTrue(desk.send_digest(institution)["sent"])
+
     def test_investigation_quota(self):
         from app.internet_intelligence.store import IntelligenceStore
 

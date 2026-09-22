@@ -275,6 +275,61 @@ async def rescore(request: Request, body: MapInstitutionBody) -> dict[str, Any]:
     return result
 
 
+class IncidentBody(BaseModel):
+    note: str = Field(default="", max_length=500)
+    institution_id: str | None = Field(default=None, max_length=128)
+
+
+@router.get("/incidents", summary="What went wrong with the institution's own presence, with what to do about it (managers only)")
+async def incidents(request: Request, institution_id: str | None = None, status: str | None = None, severity: str | None = None, limit: int = 100) -> dict[str, Any]:
+    service = map_service(request)
+    principal = require_principal(request, Capability.INTELLIGENCE_MANAGE)
+    target = resolve_institution(principal, institution_id)
+    try:
+        return {"incidents": service.incidents(principal, target, status=status, severity=severity, limit=min(max(limit, 1), 500))}
+    except (ValueError, PermissionError) as exc:
+        raise translate(exc) from exc
+
+
+@router.post("/incidents/{incident_id}/{action}", summary="Acknowledge or resolve an incident")
+async def incident_action(incident_id: str, action: Literal["acknowledge", "resolve"], body: IncidentBody, request: Request) -> dict[str, Any]:
+    service = map_service(request)
+    principal = require_principal(request, Capability.INTELLIGENCE_MANAGE)
+    target = resolve_institution(principal, body.institution_id)
+    try:
+        result = service.set_incident(principal, target, incident_id, status="acknowledged" if action == "acknowledge" else "resolved", note=body.note)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail="incident not found") from exc
+    except (ValueError, PermissionError) as exc:
+        raise translate(exc) from exc
+    audit_map_action(request, principal, f"incident_{action}", metadata={"institution_id": target, "incident_id": incident_id, "kind": result.get("kind")})
+    return {"incident": result}
+
+
+@router.get("/digest", summary="Preview the map's daily digest (managers only)")
+async def map_digest(request: Request, institution_id: str | None = None) -> dict[str, Any]:
+    service = map_service(request)
+    principal = require_principal(request, Capability.INTELLIGENCE_MANAGE)
+    target = resolve_institution(principal, institution_id)
+    try:
+        return service.digest(principal, target)
+    except (ValueError, PermissionError) as exc:
+        raise translate(exc) from exc
+
+
+@router.post("/digest", summary="Send the map's daily digest to the alert recipients now (normally scheduled)")
+async def send_map_digest(request: Request, body: MapInstitutionBody) -> dict[str, Any]:
+    service = map_service(request)
+    principal = require_principal(request, Capability.INTELLIGENCE_MANAGE)
+    target = resolve_institution(principal, body.institution_id)
+    try:
+        result = service.digest(principal, target, send=True)
+    except (ValueError, PermissionError) as exc:
+        raise translate(exc) from exc
+    audit_map_action(request, principal, "digest_sent", metadata={"institution_id": target, "sent": bool(result["sent"])})
+    return result
+
+
 @router.get("/connectors", summary="The connectors the engine may use and how each reaches the web")
 async def connectors(request: Request, institution_id: str | None = None) -> dict[str, Any]:
     service = map_service(request)

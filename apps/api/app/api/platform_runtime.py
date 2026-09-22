@@ -32,6 +32,7 @@ from ..internet_intelligence.map.connectors.infrastructure import CertificateCon
 from ..internet_intelligence.map.connectors.search import SearchConnector, SpamProbeConnector
 from ..internet_intelligence.map.connectors.web import LeadPageConnector, OfficialSiteConnector, RecheckConnector
 from ..internet_intelligence.map.engine import EngineConfig, MapEngine
+from ..internet_intelligence.map.incidents import IncidentDesk
 from ..internet_intelligence.map.service import MapService
 from ..internet_intelligence.map.store import MapStore
 from ..internet_intelligence.monitoring import ContinuousMonitor
@@ -175,14 +176,24 @@ def _services(settings: AppSettings, store: InstitutionDataStore, intelligence_s
 _SHARED_ONLY_URLS = frozenset({":memory:", "sqlite:///:memory:", ""})
 
 
-def _map_service(settings: AppSettings, backend: Any, intelligence_store: IntelligenceStore, provider: Any | None) -> MapService:
+def _map_service(settings: AppSettings, backend: Any, intelligence_store: IntelligenceStore, provider: Any | None, notifications: NotificationService | None = None) -> MapService:
     fetcher = PublicPageFetcher(timeout_seconds=settings.web_extract_timeout_seconds, max_response_bytes=settings.web_extract_max_bytes, user_agent=crawler_user_agent(settings.intelligence_crawler_contact)) if settings.intelligence_fetch_pages else None
     store = MapStore(backend=backend, suppression_key=(settings.intelligence_suppression_key or "guru-ji-development-only").encode("utf-8"))
+
+    def recipients(institution_id: str) -> tuple[str, ...]:
+        profile = intelligence_store.get_profile(institution_id)
+        return profile.alert_recipients if profile else ()
+
+    def notify(institution_id: str, recipient_ids: Any, title: str, body: str, incident_id: str) -> None:
+        if notifications is not None:
+            notifications.system_notify(institution_id, recipient_ids=list(recipient_ids), title=title, body=body, reference_type="internet_map", reference_id=incident_id or None)
+
+    desk = IncidentDesk(store, recipients=recipients, notify=notify)
     engine = MapEngine(
         store, map_connectors(settings), EngineConfig(sources_per_tick=settings.intelligence_sources_per_tick, budgets=settings.intelligence_budget_caps(), tenant_share=settings.intelligence_tenant_share),
-        fetcher=fetcher, search=provider, profile_loader=intelligence_store.get_profile,
+        fetcher=fetcher, search=provider, profile_loader=intelligence_store.get_profile, incidents=desk,
     )
-    return MapService(store, fetcher=fetcher, engine=engine, seed_groups=settings.intelligence_seed_group_map())
+    return MapService(store, fetcher=fetcher, engine=engine, seed_groups=settings.intelligence_seed_group_map(), desk=desk)
 
 
 def map_connectors(settings: AppSettings, *, transport: Any | None = None) -> ConnectorRegistry:
@@ -223,9 +234,9 @@ def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: P
     provider = search_provider
     if provider is None and settings.intelligence_search_provider == "tavily":
         provider = TavilyIntelligenceSearchProvider(api_key=settings.web_search_api_key or "", endpoint=settings.web_search_endpoint, timeout_seconds=settings.web_search_timeout_seconds)
-    intelligence_map = _map_service(settings, store.backend, intelligence_store, provider) if settings.intelligence_map_enabled else None
     build = dict(objects=objects, parsers=parsers, mapping=mapping, control_store=control_store, pdp=pdp, tracer=tracer, model=model, provider=provider)
     request = _services(settings, store, intelligence_store, **build)
+    intelligence_map = _map_service(settings, store.backend, intelligence_store, provider, request.notifications) if settings.intelligence_map_enabled else None
     # The in-process worker works on its own connection when the database can
     # open one, so its transactions never hold the request path's lock.
     worker_store: InstitutionDataStore | None = None
@@ -237,11 +248,11 @@ def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: P
     if worker_store is not None:
         worker_intelligence_store = IntelligenceStore(backend=worker_store.backend)
         worker = _services(settings, worker_store, worker_intelligence_store, **build)
-        worker_map = _map_service(settings, worker_store.backend, worker_intelligence_store, provider) if settings.intelligence_map_enabled else None
+        worker_map = _map_service(settings, worker_store.backend, worker_intelligence_store, provider, worker.notifications) if settings.intelligence_map_enabled else None
         worker_agent = MasterAgent(worker.gateway, worker.registry, worker.data, worker_store, control_store, planner=DeterministicPlanner(), model_planner=model_planner, model=model, model_max_tokens=settings.model_max_tokens, tracer=tracer, background=jobs)
-        register_handlers(jobs, ingestion=worker.ingestion, agent=worker_agent, monitor=worker.monitor, notifications=worker.notifications, map_engine=worker_map.engine if worker_map else None)
+        register_handlers(jobs, ingestion=worker.ingestion, agent=worker_agent, monitor=worker.monitor, notifications=worker.notifications, map_engine=worker_map.engine if worker_map else None, map_desk=worker_map.desk if worker_map else None)
     else:
-        register_handlers(jobs, ingestion=request.ingestion, agent=agent, monitor=request.monitor, notifications=request.notifications, map_engine=intelligence_map.engine if intelligence_map else None)
+        register_handlers(jobs, ingestion=request.ingestion, agent=agent, monitor=request.monitor, notifications=request.notifications, map_engine=intelligence_map.engine if intelligence_map else None, map_desk=intelligence_map.desk if intelligence_map else None)
     if start_workers:
         # The thread queue only wakes on enqueue, so start it at boot rather than
         # on the first upload, then hand back jobs whose worker stopped reporting.
