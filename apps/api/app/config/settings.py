@@ -6,6 +6,10 @@ import os
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
+from ..config.institution_connectors import (
+    InstitutionConnectorDefinition,
+    parse_institution_connectors,
+)
 from ..web_research.domain_allowlist import DEFAULT_ALLOWED_DOMAINS
 
 
@@ -41,6 +45,7 @@ class AppSettings:
     institution_connector_institution_id: str = "college_a"
     institution_connector_display_name: str = "Configured institution connector"
     institution_connector_auth_token: str | None = field(default=None, repr=False)
+    institution_connectors: tuple[InstitutionConnectorDefinition, ...] = ()
     connector_timeout_seconds: float = 5.0
     connector_max_response_bytes: int = 1_000_000
     connector_scope_attestation_required: bool = False
@@ -103,6 +108,10 @@ class AppSettings:
             institution_connector_institution_id=os.getenv("GURU_INSTITUTION_CONNECTOR_INSTITUTION_ID", "college_a").strip(),
             institution_connector_display_name=os.getenv("GURU_INSTITUTION_CONNECTOR_DISPLAY_NAME", "Configured institution connector").strip(),
             institution_connector_auth_token=os.getenv("GURU_INSTITUTION_CONNECTOR_AUTH_TOKEN") or None,
+            institution_connectors=parse_institution_connectors(
+                os.getenv("GURU_INSTITUTION_CONNECTORS"),
+                environment=os.environ,
+            ),
             connector_timeout_seconds=float(os.getenv("GURU_CONNECTOR_TIMEOUT_SECONDS", "5")),
             connector_max_response_bytes=int(os.getenv("GURU_CONNECTOR_MAX_RESPONSE_BYTES", "1000000")),
             connector_scope_attestation_required=_bool_env("GURU_CONNECTOR_SCOPE_ATTESTATION_REQUIRED", environment == "production"),
@@ -135,6 +144,29 @@ class AppSettings:
             openfga_url=os.getenv("GURU_OPENFGA_URL") or None,
             livekit_url=os.getenv("GURU_LIVEKIT_URL") or None,
         )
+
+    def configured_institution_connectors(self) -> tuple[InstitutionConnectorDefinition, ...]:
+        """Return all connector definitions, including the legacy single entry.
+
+        The original single-connector environment variables remain supported so
+        existing deployments do not change behavior when the multi-connector
+        registry is not configured.
+        """
+
+        definitions = list(self.institution_connectors)
+        if self.institution_connector_base_url:
+            legacy = InstitutionConnectorDefinition(
+                source_id=self.institution_connector_source_id,
+                institution_id=self.institution_connector_institution_id,
+                display_name=self.institution_connector_display_name,
+                base_url=self.institution_connector_base_url,
+                auth_token=self.institution_connector_auth_token,
+                scope_attestation_required=self.connector_scope_attestation_required,
+            )
+            if any(item.source_id == legacy.source_id for item in definitions):
+                raise ValueError(f"institution connector source ID is duplicated: {legacy.source_id}")
+            definitions.append(legacy)
+        return tuple(definitions)
 
     def ensure_safe_for_production(self) -> None:
         if self.max_request_bytes <= 0:
@@ -210,6 +242,7 @@ class AppSettings:
             parsed_connector_url = urlparse(self.institution_connector_base_url)
             if parsed_connector_url.scheme not in {"http", "https"} or not parsed_connector_url.netloc:
                 raise ValueError("GURU_INSTITUTION_CONNECTOR_BASE_URL must be an absolute HTTP(S) URL")
+        self.configured_institution_connectors()
         if self.edge_adapter not in {"disabled", "openedx", "moodle"}:
             raise ValueError("GURU_EDGE_ADAPTER must be disabled, openedx, or moodle")
         if self.edge_adapter != "disabled" and not self.edge_adapter_base_url:
@@ -241,12 +274,16 @@ class AppSettings:
             raise ValueError("production requires an explicit safe OIDC signing algorithm")
         if self.demo_data_enabled:
             raise ValueError("production cannot enable deterministic demo data")
-        if not self.institution_connector_base_url:
-            raise ValueError("production requires GURU_INSTITUTION_CONNECTOR_BASE_URL")
-        if urlparse(self.institution_connector_base_url).scheme != "https":
-            raise ValueError("production requires the institutional connector to use HTTPS")
-        if not self.institution_connector_auth_token:
-            raise ValueError("production requires GURU_INSTITUTION_CONNECTOR_AUTH_TOKEN")
+        configured_connectors = self.configured_institution_connectors()
+        if not configured_connectors:
+            raise ValueError("production requires GURU_INSTITUTION_CONNECTOR_BASE_URL or GURU_INSTITUTION_CONNECTORS")
+        for connector in configured_connectors:
+            if urlparse(connector.base_url).scheme != "https":
+                raise ValueError("production requires institutional connectors to use HTTPS")
+            if not connector.auth_token:
+                raise ValueError(f"production requires an auth token for connector {connector.source_id}")
+            if not connector.scope_attestation_required:
+                raise ValueError(f"production requires scope attestation for connector {connector.source_id}")
         if self.pdp_mode != "cerbos" or not self.cerbos_url:
             raise ValueError("production requires a Cerbos PDP")
         if urlparse(self.cerbos_url).scheme != "https":
