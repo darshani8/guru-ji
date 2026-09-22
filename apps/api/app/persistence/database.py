@@ -11,6 +11,7 @@ from uuid import uuid4
 from ..domain.audit import AuditEvent, AuditOutcome
 from ..domain.source_health import Freshness, SourceHealth, SourceHealthStatus
 from .control_plane import AnswerEnvelopeMetadata, ModelAttemptMetadata, OutboxRecord, now_utc
+from .sql_backend import open_postgres_connection
 
 
 class InMemoryControlStore:
@@ -534,7 +535,7 @@ class PostgresControlStore:
         # is its own transaction, so a read never leaves the connection idle
         # in transaction holding table locks. Before this, a running instance
         # blocked the next release's start-up DDL until the deploy timed out.
-        self._connection = psycopg.connect(database_url, row_factory=dict_row, autocommit=True)
+        self._connection = open_postgres_connection(psycopg, database_url, row_factory=dict_row, autocommit=True)
         self._closed = False
         self._migrate()
 
@@ -933,6 +934,9 @@ class PostgresControlStore:
             raise ValueError("retention_days must be positive")
         cutoff = (now_utc() - timedelta(days=retention_days)).isoformat()
         with self._lock, self._connection.transaction(), self._connection.cursor() as cursor:
+            # Pruning runs at start-up too: a lock it cannot get promptly (a
+            # queued exclusive request from a dead client) must fail, not hang.
+            cursor.execute(f"SET LOCAL lock_timeout = '{self.MIGRATION_LOCK_TIMEOUT}'")
             total = 0
             for table in ("audit_events", "answer_envelopes", "model_attempts", "control_outbox", "briefing_runs"):
                 column = "occurred_at" if table == "audit_events" else "created_at"

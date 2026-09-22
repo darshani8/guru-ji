@@ -316,7 +316,8 @@ class _FakePsycopg(types.ModuleType):
         self.rows = types.ModuleType("psycopg.rows")
         self.rows.dict_row = object()
 
-    def connect(self, url, row_factory=None):
+    def connect(self, url, row_factory=None, **options):
+        self.connect_options = dict(options)
         if self.refuse:
             raise self.OperationalError("connection refused")
         connection = _FakeConnection(self)
@@ -356,6 +357,10 @@ class PostgresBackendReconnectTests(unittest.TestCase):
         self.assertEqual(len(self.fake.connections), 3)
         self.assertEqual(self.fake.connections[2].statements, [("DELETE FROM t WHERE id = %s", (1,))])
         self.assertEqual(self.fake.connections[2].commits, 1)
+
+    def test_connections_are_opened_with_a_connect_timeout_and_the_client_check(self):
+        self.assertEqual(self.fake.connect_options.get("connect_timeout"), 15)
+        self.assertEqual(self.fake.connect_options.get("options"), "-c client_connection_check_interval=10s")
 
     def test_ping_commits_and_recovers(self):
         self.assertTrue(self.backend.ping())
