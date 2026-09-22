@@ -7,7 +7,7 @@ from typing import Any
 
 from ..models import FileKind, IntermediateRecord, ParseResult, ParsedTable, ParsedText, ParserError
 from .csv_parser import decode_text
-from .tabular import MAX_ROWS, dedupe_headers
+from .tabular import MAX_COLUMNS, MAX_ROWS, dedupe_headers
 
 
 def _rows(value: Any) -> list[dict[str, Any]]:
@@ -27,14 +27,27 @@ def parse_json(file_name: str, content: bytes) -> ParseResult:
         payload = json.loads(text)
     except ValueError as exc:
         raise ParserError("JSON could not be decoded") from exc
+    except RecursionError as exc:
+        raise ParserError("JSON is nested too deeply to be read") from exc
     rows = _rows(payload)[:MAX_ROWS]
     result = ParseResult(file_name=file_name, file_kind=FileKind.JSON, page_count=1)
     if not rows:
         result.warnings.append("no_object_rows_found")
         return result
-    headers = dedupe_headers(list(dict.fromkeys(key for row in rows for key in row)))
+    # The header set is the union of keys, capped so a file whose rows each
+    # carry their own keys cannot grow rows x keys in memory.
+    raw_keys: dict[str, None] = {}
+    for row in rows:
+        for key in row:
+            if key not in raw_keys:
+                raw_keys[key] = None
+                if len(raw_keys) > MAX_COLUMNS:
+                    raise ParserError(f"JSON rows use more than {MAX_COLUMNS} distinct keys; export a flat table instead")
+    headers = dedupe_headers(list(raw_keys))
+    rename = dict(zip(raw_keys, headers))
+    # Each record keeps only the keys present in that row; absent keys are absent, not padded.
     records = [
-        IntermediateRecord(source_file=file_name, locator=f"json;index={index}", row_number=index, fields={key: row.get(key) for key in headers})
+        IntermediateRecord(source_file=file_name, locator=f"json;index={index}", row_number=index, fields={rename[key]: value for key, value in row.items()})
         for index, row in enumerate(rows, start=1)
     ]
     result.tables.append(ParsedTable(name="data", headers=headers, records=records))

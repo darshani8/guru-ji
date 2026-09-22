@@ -16,6 +16,7 @@ from typing import Any
 from xml.etree import ElementTree
 
 from ..models import FileKind, ParseResult, ParsedTable, ParserError, ParserUnavailable
+from .archive import check_archive_limits, open_entry, read_entry
 from .tabular import MAX_ROWS, grid_to_table
 
 _NS = {
@@ -51,19 +52,39 @@ def _excel_serial_to_date(value: float) -> Any:
 
 
 def _shared_strings(archive: zipfile.ZipFile) -> list[str]:
+    """Stream the shared string table; it can be as large as the sheets themselves."""
+
     try:
-        root = ElementTree.fromstring(archive.read("xl/sharedStrings.xml"))
+        source = open_entry(archive, "xl/sharedStrings.xml")
     except KeyError:
         return []
     strings: list[str] = []
-    for item in root.findall("m:si", _NS):
-        strings.append("".join(node.text or "" for node in item.iter(f"{{{_NS['m']}}}t")))
+    item_tag = f"{{{_NS['m']}}}si"
+    text_tag = f"{{{_NS['m']}}}t"
+    try:
+        with source:
+            for _, element in ElementTree.iterparse(source, events=("end",)):
+                if element.tag != item_tag:
+                    continue
+                strings.append("".join(node.text or "" for node in element.iter(text_tag)))
+                element.clear()
+    except (ElementTree.ParseError, zipfile.BadZipFile) as exc:
+        raise ParserError("workbook shared strings could not be read") from exc
     return strings
+
+
+def _read_xml(archive: zipfile.ZipFile, name: str) -> ElementTree.Element:
+    """Parse one small part of the package; ``KeyError`` when it is absent."""
+
+    try:
+        return ElementTree.fromstring(read_entry(archive, name))
+    except ElementTree.ParseError as exc:
+        raise ParserError(f"workbook part {name} is not well-formed XML") from exc
 
 
 def _date_styles(archive: zipfile.ZipFile) -> set[int]:
     try:
-        root = ElementTree.fromstring(archive.read("xl/styles.xml"))
+        root = _read_xml(archive, "xl/styles.xml")
     except KeyError:
         return set()
     custom_date_formats: set[int] = set()
@@ -87,8 +108,11 @@ def _date_styles(archive: zipfile.ZipFile) -> set[int]:
 
 
 def _sheet_paths(archive: zipfile.ZipFile) -> list[tuple[str, str]]:
-    workbook = ElementTree.fromstring(archive.read("xl/workbook.xml"))
-    rels = ElementTree.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+    try:
+        workbook = _read_xml(archive, "xl/workbook.xml")
+        rels = _read_xml(archive, "xl/_rels/workbook.xml.rels")
+    except KeyError as exc:
+        raise ParserError("workbook is missing its sheet index (xl/workbook.xml)") from exc
     targets = {rel.get("Id"): rel.get("Target", "") for rel in rels.findall("rel:Relationship", _NS)}
     sheets: list[tuple[str, str]] = []
     for sheet in workbook.iterfind("m:sheets/m:sheet", _NS):
@@ -140,34 +164,49 @@ def _cell_value(cell: ElementTree.Element, shared: list[str], date_styles: set[i
 
 
 def _read_sheet(archive: zipfile.ZipFile, path: str, shared: list[str], date_styles: set[int]) -> list[list[Any]]:
+    """Stream a worksheet row by row so the whole XML tree is never held in memory."""
+
     rows: list[list[Any]] = []
-    root = ElementTree.fromstring(archive.read(path))
-    for row in root.iterfind("m:sheetData/m:row", _NS):
-        values: list[Any] = []
-        for cell in row.findall("m:c", _NS):
-            index = _column_index(cell.get("r", ""))
-            while len(values) < index:
-                values.append("")
-            values.append(_cell_value(cell, shared, date_styles))
-        rows.append(values)
-        if len(rows) > MAX_ROWS + 20:
-            break
+    row_tag = f"{{{_NS['m']}}}row"
+    with open_entry(archive, path) as source:
+        for _, row in ElementTree.iterparse(source, events=("end",)):
+            if row.tag != row_tag:
+                continue
+            values: list[Any] = []
+            for cell in row.findall("m:c", _NS):
+                index = _column_index(cell.get("r", ""))
+                while len(values) < index:
+                    values.append("")
+                values.append(_cell_value(cell, shared, date_styles))
+            rows.append(values)
+            row.clear()
+            if len(rows) > MAX_ROWS + 20:
+                break
     return rows
 
 
-def _parse_with_stdlib(file_name: str, content: bytes) -> ParseResult:
+def _open_archive(content: bytes) -> zipfile.ZipFile:
     try:
         archive = zipfile.ZipFile(BytesIO(content))
     except zipfile.BadZipFile as exc:
         raise ParserError("workbook is not a valid .xlsx archive") from exc
-    with archive:
+    try:
+        check_archive_limits(archive)
+    except ParserError:
+        archive.close()
+        raise
+    return archive
+
+
+def _parse_with_stdlib(file_name: str, content: bytes) -> ParseResult:
+    with _open_archive(content) as archive:
         shared = _shared_strings(archive)
         date_styles = _date_styles(archive)
         result = ParseResult(file_name=file_name, file_kind=FileKind.XLSX, metadata={"engine": "stdlib"})
         for sheet_name, path in _sheet_paths(archive):
             try:
                 rows = _read_sheet(archive, path, shared, date_styles)
-            except (KeyError, ElementTree.ParseError):
+            except (KeyError, ElementTree.ParseError, zipfile.BadZipFile):
                 result.warnings.append(f"sheet_unreadable:{sheet_name}")
                 continue
             table = grid_to_table(rows, name=sheet_name, source_file=file_name, sheet=sheet_name)
@@ -198,6 +237,8 @@ def _parse_with_openpyxl(file_name: str, content: bytes) -> ParseResult:
 
 
 def parse_xlsx(file_name: str, content: bytes) -> ParseResult:
+    # The inflated-size check runs before either engine touches an entry.
+    _open_archive(content).close()
     try:
         import openpyxl  # noqa: F401
     except ImportError:

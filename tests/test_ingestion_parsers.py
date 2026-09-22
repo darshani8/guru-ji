@@ -5,7 +5,8 @@ import zipfile
 
 from app.ingestion import parsers
 from app.ingestion.detector import detect_file_kind
-from app.ingestion.models import FileKind, ParserUnavailable
+from app.ingestion.models import FileKind, ParserError, ParserUnavailable
+from app.ingestion.parsers import archive as archive_guard
 from app.ingestion.parsers import pdf_parser
 from app.ingestion.parsers.csv_parser import parse_csv
 from app.ingestion.parsers.docx_parser import parse_docx
@@ -63,6 +64,18 @@ def build_docx(paragraphs: list[str], table: list[list[str]] | None = None) -> b
     with zipfile.ZipFile(buffer, "w") as archive:
         archive.writestr("[Content_Types].xml", '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="xml" ContentType="application/xml"/></Types>')
         archive.writestr("word/document.xml", f'<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>{body}</w:body></w:document>')
+    return buffer.getvalue()
+
+
+def rewrite_entry(content: bytes, name: str, transform) -> bytes:
+    """Rebuild a zip archive (deflated) with one entry's bytes transformed."""
+
+    source = zipfile.ZipFile(io.BytesIO(content))
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as out:
+        for info in source.infolist():
+            data = source.read(info.filename)
+            out.writestr(info.filename, transform(data) if info.filename == name else data)
     return buffer.getvalue()
 
 
@@ -183,6 +196,69 @@ class ParserTests(unittest.TestCase):
             registry.parse("x.csv", b"a,b\n" * 10)
         self.assertIn(FileKind.IMAGE, registry.supported_kinds())
         self.assertTrue(parsers.__doc__)
+
+    def test_parsers_raise_parser_error_for_their_own_failure_modes(self):
+        # An unbalanced quote swallows the rest of the file into one field (csv.Error).
+        with self.assertRaises(ParserError):
+            parse_csv("bad.csv", b"a,b\n\"" + b"x" * 200_000 + b"\n1,2\n")
+        # A zip with xl/ entries but no workbook index (KeyError before).
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w") as bad:
+            bad.writestr("xl/other.xml", "<x/>")
+        with self.assertRaises(ParserError):
+            parse_xlsx("bad.xlsx", buffer.getvalue())
+        # Malformed workbook parts are reported, not raised as ElementTree.ParseError.
+        broken = rewrite_entry(build_xlsx({"S": [["a", "b"], [1, 2]]}), "xl/sharedStrings.xml", lambda data: b"<sst><si><t>unterminated")
+        with self.assertRaises(ParserError):
+            parse_xlsx("broken.xlsx", broken)
+        broken_sheet = rewrite_entry(build_xlsx({"S": [["a", "b"], [1, 2]]}), "xl/worksheets/sheet1.xml", lambda data: data[: len(data) // 2])
+        self.assertIn("sheet_unreadable:S", parse_xlsx("broken.xlsx", broken_sheet).warnings)
+        with self.assertRaises(ParserError):
+            parse_docx("bad.docx", rewrite_entry(build_docx(["hi"]), "word/document.xml", lambda data: data[:20]))
+        # Deeply nested JSON (RecursionError before).
+        with self.assertRaises(ParserError):
+            parse_json("deep.json", b"[" * 100_000 + b"]" * 100_000)
+
+    def test_zip_bombs_are_rejected_before_inflating(self):
+        base = build_xlsx({"S": [["a", "b"], [1, 2]]})
+        # 1.5 MB of padding deflates to a few KB: ratio far above 100:1.
+        pad = lambda data: data.replace(b"</sheetData>", b"<!--" + b" " * 1_500_000 + b"--></sheetData>")
+        bomb = rewrite_entry(base, "xl/worksheets/sheet1.xml", pad)
+        self.assertLess(len(bomb), 20_000)
+        with self.assertRaises(ParserError) as raised:
+            parse_xlsx("bomb.xlsx", bomb)
+        self.assertIn("compression ratio", str(raised.exception))
+        with self.assertRaises(ParserError):
+            parse_xlsx("bomb.xlsx", rewrite_entry(base, "xl/sharedStrings.xml", lambda data: data.replace(b"</sst>", b"<!--" + b" " * 1_500_000 + b"--></sst>")))
+        doc_bomb = rewrite_entry(build_docx(["hi"]), "word/document.xml", lambda data: data.replace(b"</w:body>", b"<!--" + b" " * 1_500_000 + b"--></w:body>"))
+        with self.assertRaises(ParserError):
+            parse_docx("bomb.docx", doc_bomb)
+        # Below the ratio floor the total inflated size cap still applies.
+        small = rewrite_entry(base, "xl/worksheets/sheet1.xml", lambda data: data.replace(b"</sheetData>", b"<!--" + b"y" * 300_000 + b"--></sheetData>"))
+        original = archive_guard.MAX_INFLATED_BYTES
+        archive_guard.MAX_INFLATED_BYTES = 200_000
+        try:
+            with self.assertRaises(ParserError):
+                parse_xlsx("large.xlsx", small)
+            with self.assertRaises(ParserError):
+                parse_docx("large.docx", rewrite_entry(build_docx(["hi"]), "word/document.xml", lambda data: data.replace(b"</w:body>", b"<!--" + b"y" * 300_000 + b"--></w:body>")))
+        finally:
+            archive_guard.MAX_INFLATED_BYTES = original
+        self.assertEqual(parse_xlsx("ok.xlsx", small).tables[0].row_count, 1)
+        # The byte budget is enforced on delivered bytes, not only on declared sizes.
+        reader = archive_guard.BoundedReader(io.BytesIO(b"z" * 1000), budget=500)
+        with self.assertRaises(ParserError):
+            while reader.read(200):
+                pass
+
+    def test_json_parser_caps_distinct_keys_and_keeps_only_present_keys(self):
+        result = parse_json("sparse.json", json.dumps([{"a": 1}, {"b": 2, "a": 3}]).encode())
+        self.assertEqual(result.tables[0].headers, ("a", "b"))
+        self.assertEqual([record.fields for record in result.tables[0].records], [{"a": 1}, {"b": 2, "a": 3}])
+        wide = [{f"k{i}": i} for i in range(201)]
+        with self.assertRaises(ParserError):
+            parse_json("wide.json", json.dumps(wide).encode())
+        self.assertEqual(len(parse_json("ok.json", json.dumps(wide[:200]).encode()).tables[0].headers), 200)
 
     def test_disabled_ocr_engine_reports_configuration(self):
         from app.ingestion.parsers.ocr import DisabledOcrEngine

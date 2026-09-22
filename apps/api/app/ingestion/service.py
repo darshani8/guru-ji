@@ -8,6 +8,7 @@ source row produced which canonical record.
 from __future__ import annotations
 
 import hashlib
+import logging
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -41,9 +42,15 @@ STAGE_READY = "ready"
 STAGE_IMPORTING = "importing"
 STAGE_DONE = "done"
 
+logger = logging.getLogger(__name__)
+
 
 class IngestionError(ValueError):
     """A job-level failure that is safe to show to the requesting user."""
+
+
+class CommitError(IngestionError):
+    """The import step failed; the job was returned to ``ready`` with the error recorded."""
 
 
 @dataclass(slots=True)
@@ -91,9 +98,18 @@ class IngestionService:
 
     # ----------------------------------------------------------------- process
     async def process(self, institution_id: str, job_id: str) -> dict[str, Any]:
+        """Run the pipeline for a queued job.
+
+        A job still ``processing`` was interrupted (a worker restart); it is
+        restarted from the beginning, discarding whatever the interrupted run
+        left behind, so the re-queued background job can pick it up again.
+        """
+
         job = self._job(institution_id, job_id)
-        if job["status"] not in {JOB_QUEUED, JOB_FAILED}:
+        if job["status"] not in {JOB_QUEUED, JOB_FAILED, JOB_PROCESSING}:
             return job
+        if job["status"] == JOB_PROCESSING:
+            job = self._reset_interrupted(institution_id, job)
         try:
             self.store.update_job(institution_id, job_id, status=JOB_PROCESSING, stage=STAGE_PARSING, error=None)
             if job.get("file_id"):
@@ -103,8 +119,36 @@ class IngestionService:
             if not records:
                 raise IngestionError("no tabular rows were found; upload the file through the documents API if it is a policy or circular")
             return await self._map(institution_id, job, records)
+        except CommitError:
+            # commit() already recorded the error and returned the job to ready.
+            return self._job(institution_id, job_id)
         except (IngestionError, ParserError, ValueError) as exc:
             return self.store.update_job(institution_id, job_id, status=JOB_FAILED, stage=job.get("stage", STAGE_PARSING), error=str(exc)[:500])
+        except Exception as exc:  # noqa: BLE001 - a stuck job is worse than a generic failure
+            logger.exception("ingestion job %s for institution %s failed unexpectedly", job_id, institution_id)
+            message = f"the job failed unexpectedly ({type(exc).__name__}); the error has been logged for the operators"
+            return self.store.update_job(institution_id, job_id, status=JOB_FAILED, stage=job.get("stage", STAGE_PARSING), error=message)
+
+    def _reset_interrupted(self, institution_id: str, job: dict[str, Any]) -> dict[str, Any]:
+        """Discard the partial state of an interrupted run before it is restarted.
+
+        Review items the interrupted run created are closed (the restart will
+        raise them again if they still apply). Rows are re-staged from the
+        file when there is one; a pull-source job keeps its staged rows since
+        they are the only copy of the source, and ``_normalize`` rebuilds
+        their normalised state from ``raw``.
+        """
+
+        job_id = job["job_id"]
+        for item in self.store.list_review_items(institution_id, job_id=job_id, status="pending"):
+            self.store.resolve_review_item(institution_id, item["review_id"], status="rejected", resolved_by="system", resolution={"note": "superseded: the job was restarted after an interruption"})
+        if job.get("file_id"):
+            self.store.replace_job_records(institution_id, job_id, [])
+        report = dict(job.get("report") or {})
+        report.pop("normalization", None)
+        report.pop("import", None)
+        report["restarted"] = {"from_stage": job.get("stage"), "reason": "the previous run was interrupted"}
+        return self.store.update_job(institution_id, job_id, report=report, mapping={})
 
     def _job(self, institution_id: str, job_id: str) -> dict[str, Any]:
         job = self.store.get_job(institution_id, job_id)
@@ -164,10 +208,16 @@ class IngestionService:
         signature = header_signature(headers)
         profile = self.store.find_mapping_profile(institution_id, detected_entity, signature)
         proposal = await self.mapping.propose(headers, samples, entity_hint=entity_hint or detected_entity, saved_profile=profile["mapping"] if profile else None)
+        profile_incomplete = bool(profile) and bool(proposal.missing_required())
+        if profile_incomplete:
+            # The remembered profile no longer covers the entity's required fields:
+            # propose afresh and let a human decide rather than importing nothing.
+            proposal = await self.mapping.propose(headers, samples, entity_hint=entity_hint or detected_entity)
         mapping_state = proposal.as_dict()
         mapping_state["header_signature"] = signature
+        mapping_state["profile_incomplete"] = profile_incomplete
         needs_review = bool(proposal.review_required() or proposal.missing_required())
-        if needs_review and not profile:
+        if needs_review:
             review_payload = {
                 "entity": proposal.entity,
                 "entity_confidence": mapping_state["entity_confidence"],
@@ -257,7 +307,7 @@ class IngestionService:
             )
             for key, value in people.items():
                 existing.setdefault(key, value)
-        candidates, actions = find_duplicates(records, existing)
+        candidates, actions, duplicate_warnings = find_duplicates(records, existing)
         updated_rows: list[dict[str, Any]] = []
         for index, (row, record) in enumerate(prepared):
             action = actions.get(index, "insert")
@@ -295,6 +345,7 @@ class IngestionService:
             "duplicate_candidates": [item.as_dict() for item in candidates[:100]],
             "normalizations_applied": sorted({note.split(":", 1)[1] if ":" in note else note for record in records for note in record.normalizations}),
             "identifier_pattern": pattern,
+            "warnings": list(duplicate_warnings),
         }
         if review_items:
             return self.store.update_job(institution_id, job["job_id"], status=JOB_NEEDS_REVIEW, stage=STAGE_DUPLICATE_REVIEW, report=report)
@@ -304,6 +355,13 @@ class IngestionService:
         return job
 
     def resolve_review(self, institution_id: str, review_id: str, *, decision: str, resolved_by: str, note: str = "") -> dict[str, Any]:
+        """Resolve a pending duplicate review item; mapping items go through ``apply_mapping``."""
+
+        pending_item = next((entry for entry in self.store.list_review_items(institution_id, status="pending", limit=2000) if entry["review_id"] == review_id), None)
+        if pending_item is None:
+            raise KeyError(f"pending review item not found: {review_id}")
+        if pending_item["kind"] != "duplicate":
+            raise IngestionError("a mapping review is resolved by submitting the mapping decision, not by approving the item")
         item = self.store.resolve_review_item(institution_id, review_id, status=decision, resolved_by=resolved_by, resolution={"note": note})
         if item is None:
             raise KeyError(f"review item not found: {review_id}")
@@ -320,9 +378,14 @@ class IngestionService:
         job = self._job(institution_id, job_id)
         if job["status"] not in {JOB_READY, JOB_NEEDS_REVIEW}:
             raise IngestionError(f"job cannot be committed from status {job['status']}")
+        if job["stage"] not in {STAGE_READY, STAGE_DUPLICATE_REVIEW}:
+            raise IngestionError(f"job cannot be committed from stage {job['stage']}")
         pending = self.store.list_review_items(institution_id, job_id=job_id, status="pending")
         if any(item["kind"] == "mapping" for item in pending):
             raise IngestionError("the mapping still needs review before the job can be committed")
+        pending_duplicates = sum(1 for item in pending if item["kind"] == "duplicate")
+        if pending_duplicates:
+            raise IngestionError(f"{pending_duplicates} duplicate review item(s) are still pending; resolve them before committing")
         entity = CANONICAL_ENTITIES[job["entity"]]
         resolved = {item["review_id"]: item for item in self.store.list_review_items(institution_id, job_id=job_id, status=None)}
         skip_locators: set[str] = set()
@@ -335,7 +398,17 @@ class IngestionService:
             elif item["status"] == "approved":
                 # Reviewer confirmed it is the same record/person: the newer row is not imported.
                 skip_locators.add(str(payload.get("left_locator")))
-        self.store.update_job(institution_id, job_id, status=JOB_PROCESSING, stage=STAGE_IMPORTING)
+        self.store.update_job(institution_id, job_id, status=JOB_PROCESSING, stage=STAGE_IMPORTING, error=None)
+        try:
+            return self._import(institution_id, job, entity, skip_locators, committed_by=committed_by)
+        except Exception as exc:  # noqa: BLE001 - the job must not stay in importing
+            logger.exception("ingestion job %s for institution %s failed while importing", job_id, institution_id)
+            message = f"the import failed ({type(exc).__name__}); the job can be committed again once the cause is fixed"
+            self.store.update_job(institution_id, job_id, status=JOB_READY, stage=STAGE_READY, error=message)
+            raise CommitError(message) from exc
+
+    def _import(self, institution_id: str, job: dict[str, Any], entity: CanonicalEntity, skip_locators: set[str], *, committed_by: str) -> dict[str, Any]:
+        job_id = job["job_id"]
         staged = self.store.job_records(institution_id, job_id, limit=self.max_rows)
         records: list[CanonicalRecord] = []
         skipped = 0
@@ -383,6 +456,6 @@ class IngestionService:
 
 
 __all__ = [
-    "IngestionError", "IngestionService", "JOB_FAILED", "JOB_IMPORTED", "JOB_NEEDS_REVIEW", "JOB_PROCESSING", "JOB_QUEUED", "JOB_READY",
+    "CommitError", "IngestionError", "IngestionService", "JOB_FAILED", "JOB_IMPORTED", "JOB_NEEDS_REVIEW", "JOB_PROCESSING", "JOB_QUEUED", "JOB_READY",
     "STAGE_DONE", "STAGE_DUPLICATE_REVIEW", "STAGE_MAPPING", "STAGE_MAPPING_REVIEW", "STAGE_NORMALIZING", "STAGE_PARSING", "STAGE_READY",
 ]

@@ -1,7 +1,21 @@
+import time
 import unittest
 
 from app.ingestion.registry import ParserRegistry
-from app.ingestion.service import JOB_IMPORTED, JOB_NEEDS_REVIEW, STAGE_DUPLICATE_REVIEW, STAGE_MAPPING_REVIEW, IngestionError, IngestionService
+from app.ingestion.service import (
+    JOB_FAILED,
+    JOB_IMPORTED,
+    JOB_NEEDS_REVIEW,
+    JOB_PROCESSING,
+    JOB_READY,
+    STAGE_DUPLICATE_REVIEW,
+    STAGE_MAPPING_REVIEW,
+    STAGE_NORMALIZING,
+    STAGE_READY,
+    CommitError,
+    IngestionError,
+    IngestionService,
+)
 from app.institution_data.store import InstitutionDataStore
 from app.storage.object_store import InMemoryObjectStore
 
@@ -101,6 +115,142 @@ class IngestionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(job["report"]["import"]["inserted"], 1)
         rejected = self.store.job_records("college_a", job["job_id"], status="rejected")[0]
         self.assertIn("attended_exceeds_held", [item["code"] for item in rejected["issues"]])
+
+    async def test_parser_and_unexpected_failures_mark_the_job_failed_not_stuck(self):
+        job = await self._upload("bad.csv", b"a,b\n\"" + b"x" * 200_000 + b"\n1,2\n")
+        self.assertEqual(job["status"], JOB_FAILED)
+        self.assertIn("CSV could not be parsed", job["error"])
+        original = self.service.parsers
+
+        class _ExplodingRegistry(ParserRegistry):
+            def parse(self, *args, **kwargs):
+                raise RuntimeError("secret internal detail")
+
+        self.service.parsers = _ExplodingRegistry()
+        try:
+            with self.assertLogs("app.ingestion.service", level="ERROR") as logs:
+                job = await self._upload("students.csv", STUDENTS)
+        finally:
+            self.service.parsers = original
+        self.assertEqual(job["status"], JOB_FAILED)
+        self.assertIn("RuntimeError", job["error"])
+        self.assertNotIn("secret internal detail", job["error"])
+        self.assertTrue(any("failed unexpectedly" in line for line in logs.output))
+        # A failed job can be processed again once the cause is fixed.
+        job = await self.service.process("college_a", job["job_id"])
+        self.assertEqual(job["status"], JOB_IMPORTED)
+
+    async def test_commit_failure_returns_the_job_to_ready_with_the_error(self):
+        job = await self._upload("students.csv", STUDENTS, options={"auto_commit": False})
+        original = self.store.upsert_records
+
+        def broken(*args, **kwargs):
+            raise RuntimeError("integer out of range")
+
+        self.store.upsert_records = broken
+        try:
+            with self.assertLogs("app.ingestion.service", level="ERROR"):
+                with self.assertRaises(CommitError):
+                    self.service.commit("college_a", job["job_id"], committed_by="staff-1")
+        finally:
+            self.store.upsert_records = original
+        job = self.store.get_job("college_a", job["job_id"])
+        self.assertEqual((job["status"], job["stage"]), (JOB_READY, STAGE_READY))
+        self.assertIn("RuntimeError", job["error"])
+        job = self.service.commit("college_a", job["job_id"], committed_by="staff-1")
+        self.assertEqual(job["status"], JOB_IMPORTED)
+        self.assertIsNone(job["error"])
+        # Auto-commit inside process() leaves the job ready too, never failed.
+        self.store.upsert_records = broken
+        try:
+            with self.assertLogs("app.ingestion.service", level="ERROR"):
+                job = await self._upload("students2.csv", b"Student Name,USN,Course,Sem,Phone,Email ID,DOB\nKiran Rao,1MS23MBA050,MBA,1,9876500000,kiran@x.com,2003-02-02\n")
+        finally:
+            self.store.upsert_records = original
+        self.assertEqual((job["status"], job["stage"]), (JOB_READY, STAGE_READY))
+
+    async def test_interrupted_processing_job_is_restarted_from_scratch(self):
+        job = self.service.upload("college_a", "staff-1", file_name="students.csv", content=STUDENTS, content_type="text/csv")
+        # Simulate a worker restart mid-run: status processing, stale rows and a stale review item.
+        self.store.update_job("college_a", job["job_id"], status=JOB_PROCESSING, stage=STAGE_NORMALIZING, entity="student", mapping={"stale": True})
+        self.store.replace_job_records("college_a", job["job_id"], [{"row_number": 99, "locator": "csv;row=99", "raw": {"x": 1}, "normalized": {}, "status": "ready", "action": "insert", "issues": []}])
+        self.store.add_review_items("college_a", job["job_id"], [{"kind": "duplicate", "payload": {"left_locator": "csv;row=99"}}])
+        job = await self.service.process("college_a", job["job_id"])
+        self.assertEqual(job["status"], JOB_IMPORTED)
+        self.assertEqual(job["report"]["import"]["inserted"], 2)
+        self.assertEqual(job["report"]["restarted"]["from_stage"], STAGE_NORMALIZING)
+        self.assertNotIn("stale", job["mapping"])
+        self.assertEqual(self.store.list_review_items("college_a", job_id=job["job_id"], status="pending"), [])
+        self.assertNotIn("csv;row=99", [row["locator"] for row in self.store.job_records("college_a", job["job_id"])])
+        # Finished jobs are left alone.
+        self.assertEqual((await self.service.process("college_a", job["job_id"]))["report"]["import"]["inserted"], 2)
+
+    async def test_saved_profile_applies_through_normalised_headers_and_never_skips_review_when_incomplete(self):
+        content = b"Name,ID,Contact,Prog,Semester,Remarks\nRavi Kumar,1MS23MBA001,9876543210,MBA,2,fine\n"
+        job = await self._upload("list.csv", content)
+        self.assertEqual(job["stage"], STAGE_MAPPING_REVIEW)
+        mapping = dict(self.store.list_review_items("college_a", job_id=job["job_id"])[0]["payload"]["proposed_mapping"])
+        mapping["Prog"] = "program"
+        await self.service.apply_mapping("college_a", job["job_id"], mapping=mapping, entity="student", approved_by="staff-1")
+        # Same columns, different case and spacing: the profile still applies.
+        again = await self._upload("list2.csv", b"NAME,id,CONTACT,PROG,SEMESTER,REMARKS\nNew Person,1MS23MBA009,9876543299,MBA,2,-\n")
+        self.assertEqual(again["status"], JOB_IMPORTED)
+        self.assertTrue(again["mapping"]["profile_applied"])
+        self.assertEqual(again["report"]["import"]["inserted"], 1)
+        self.assertIsNotNone(self.store.get_record("college_a", "student", "1ms23mba009"))
+        # A profile that no longer covers the required fields falls back to review instead of importing nothing.
+        headers = ["Name", "ID", "Contact", "Prog", "Semester", "Remarks"]
+        from app.normalization.mapping import header_signature
+
+        self.store.save_mapping_profile("college_a", entity="student", header_signature=header_signature(headers), mapping={"Remarks": "program"}, approved_by="staff-1")
+        stale = await self._upload("list3.csv", content.replace(b"1MS23MBA001", b"1MS23MBA011"))
+        self.assertEqual((stale["status"], stale["stage"]), (JOB_NEEDS_REVIEW, STAGE_MAPPING_REVIEW))
+        self.assertTrue(stale["mapping"]["profile_incomplete"])
+        self.assertFalse(stale["mapping"]["profile_applied"])
+        review = self.store.list_review_items("college_a", job_id=stale["job_id"])[0]
+        self.assertEqual(review["kind"], "mapping")
+        self.assertEqual(review["payload"]["proposed_mapping"]["Name"], "name")
+
+    async def test_mapping_review_items_cannot_be_resolved_or_committed_as_duplicates(self):
+        content = b"Name,ID,Contact,Prog,Semester,Remarks\nRavi Kumar,1MS23MBA001,9876543210,MBA,2,fine\n"
+        job = await self._upload("list.csv", content)
+        review = self.store.list_review_items("college_a", job_id=job["job_id"])[0]
+        self.assertEqual(review["kind"], "mapping")
+        with self.assertRaises(IngestionError):
+            self.service.resolve_review("college_a", review["review_id"], decision="approved", resolved_by="staff-1")
+        self.assertEqual(self.store.list_review_items("college_a", job_id=job["job_id"])[0]["status"], "pending")
+        with self.assertRaises(IngestionError):
+            self.service.commit("college_a", job["job_id"], committed_by="staff-1")
+        with self.assertRaises(KeyError):
+            self.service.resolve_review("college_a", "review-missing", decision="approved", resolved_by="staff-1")
+        job = self.store.get_job("college_a", job["job_id"])
+        self.assertEqual((job["status"], job["stage"]), (JOB_NEEDS_REVIEW, STAGE_MAPPING_REVIEW))
+
+    async def test_commit_is_refused_while_duplicate_reviews_are_pending(self):
+        await self._upload("students.csv", STUDENTS)
+        same_person = b"Student Name,USN,Course,Sem,Phone,Email ID,DOB\nRavi Kumar,1MS23MBA777,MBA,1,9876543210,ravi@x.com,12/05/2003\n"
+        job = await self._upload("students3.csv", same_person)
+        self.assertEqual(job["stage"], STAGE_DUPLICATE_REVIEW)
+        with self.assertRaises(IngestionError) as raised:
+            self.service.commit("college_a", job["job_id"], committed_by="staff-1")
+        self.assertIn("duplicate review", str(raised.exception))
+        review = self.store.list_review_items("college_a", job_id=job["job_id"])[0]
+        job = self.service.resolve_review("college_a", review["review_id"], decision="rejected", resolved_by="staff-1")
+        self.assertEqual(job["status"], JOB_IMPORTED)
+        self.assertEqual(job["report"]["import"]["inserted"], 1)
+        self.assertEqual(self.store.count_records("college_a", "student"), 3)
+
+    async def test_large_roster_of_distinct_students_dedupes_quickly(self):
+        lines = [b"Student Name,USN,Course,Sem,Phone,Email ID,DOB"]
+        for i in range(4000):
+            lines.append(f"Person{i} Surname{i},1MS23MBA{i:05d},MBA,1,9{i:09d},p{i}@x.com,{1980 + i // 336}-{1 + (i // 28) % 12:02d}-{1 + i % 28:02d}".encode())
+        started = time.perf_counter()
+        job = await self._upload("big.csv", b"\n".join(lines) + b"\n")
+        elapsed = time.perf_counter() - started
+        self.assertEqual(job["status"], JOB_IMPORTED, job.get("error"))
+        self.assertEqual(job["report"]["import"]["inserted"], 4000)
+        self.assertEqual(job["report"]["normalization"]["duplicate_candidates"], [])
+        self.assertLess(elapsed, 5.0, f"4000 distinct students took {elapsed:.1f}s")
 
 
 if __name__ == "__main__":

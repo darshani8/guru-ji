@@ -31,10 +31,14 @@ def parse_csv(file_name: str, content: bytes, *, kind: FileKind = FileKind.CSV) 
             delimiter = ","
     reader = csv.reader(StringIO(text), delimiter=delimiter)
     rows: list[list[str]] = []
-    for row in reader:
-        rows.append(row)
-        if len(rows) > MAX_ROWS + 20:
-            break
+    try:
+        for row in reader:
+            rows.append(row)
+            if len(rows) > MAX_ROWS + 20:
+                break
+    except csv.Error as exc:
+        # Typically an unbalanced quote that swallows the rest of the file into one field.
+        raise ParserError(f"CSV could not be parsed near row {len(rows) + 1}: {exc}") from exc
     table = grid_to_table(rows, name="data", source_file=file_name, locator_prefix="csv")
     result = ParseResult(file_name=file_name, file_kind=kind, tables=[table], page_count=1, metadata={"encoding": encoding, "delimiter": delimiter})
     result.warnings.extend(table.warnings)

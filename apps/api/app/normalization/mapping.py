@@ -324,9 +324,12 @@ class MappingEngine:
             entity_name, entity_confidence, alternatives = self.detect_entity(headers, samples)
         entity = CANONICAL_ENTITIES[entity_name]
         if saved_profile:
+            # Profiles are found by normalised header signature, so they must be
+            # applied the same way: "NAME" and "Name" are the same column.
             valid = set(entity.field_names())
+            by_normalized = {normalize_header(header): target for header, target in saved_profile.items() if target in valid}
             mappings = tuple(
-                FieldMapping(header, saved_profile.get(header) if saved_profile.get(header) in valid else None, 1.0 if saved_profile.get(header) in valid else 0.0, "approved_profile", "reused an approved mapping profile")
+                FieldMapping(header, by_normalized.get(normalize_header(header)), 1.0 if normalize_header(header) in by_normalized else 0.0, "approved_profile", "reused an approved mapping profile")
                 for header in headers
             )
             return MappingProposal(entity_name, entity_confidence, mappings, self.threshold, alternatives, profile_applied=True)

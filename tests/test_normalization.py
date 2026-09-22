@@ -3,6 +3,7 @@ import unittest
 from app.institution_data.models import CanonicalRecord
 from app.normalization.canonical import ATTENDANCE, CANONICAL_ENTITIES, STUDENT
 from app.normalization.cleaning import clean_record, normalize_date, normalize_person_name, normalize_phone, normalize_program, normalize_semester
+from app.normalization import deduplication
 from app.normalization.deduplication import find_duplicates
 from app.normalization.mapping import MappingEngine, apply_mapping, header_signature
 from app.normalization.validation import identifier_pattern, ocr_suspicion, validate_record
@@ -72,6 +73,11 @@ class MappingTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(proposal.profile_applied)
         self.assertEqual(proposal.mapped(), {"A": "student_id", "B": "name"})
         self.assertEqual(header_signature(["B", "a "]), "a|b")
+        # The profile is matched by normalised header, like the signature that found it.
+        proposal = await engine.propose(["STUDENT_ID", " Name ", "Other"], entity_hint="student", saved_profile={"Student ID": "student_id", "name": "name", "Other": "not_a_field"})
+        self.assertEqual(proposal.mapped(), {"STUDENT_ID": "student_id", " Name ": "name"})
+        self.assertEqual(proposal.unmapped(), ("Other",))
+        self.assertEqual(proposal.missing_required(), ())
 
     def test_apply_mapping_preserves_unmapped_columns_and_combines_names(self):
         canonical, extras = apply_mapping(STUDENT, {"First": "first_name", "Last": "last_name", "ID": "student_id"}, {"First": "Ravi", "Last": "Kumar", "ID": "X1", "Hobby": "chess", "Blank": ""})
@@ -137,7 +143,7 @@ class DeduplicationTests(unittest.TestCase):
             CanonicalRecord("student", {"student_id": "MBA010", "name": "Ravi Kumar", "phone": "2222222222"}),
         ]
         existing = {"mba002": {"name": "Ravi Kumar", "date_of_birth": "2003-05-12", "phone": "9876543210"}}
-        candidates, actions = find_duplicates(records, existing)
+        candidates, actions, _ = find_duplicates(records, existing)
         self.assertEqual(actions[0], "insert")
         self.assertEqual(actions[1], "duplicate_in_batch")
         self.assertEqual(actions[2], "conflict_in_batch")
@@ -147,6 +153,57 @@ class DeduplicationTests(unittest.TestCase):
         probable = [item for item in candidates if item.kind == "probable_person"]
         self.assertTrue(any(item.record_key == "mba002" for item in probable), "same person under a different id must be flagged against existing data")
         self.assertFalse(any(item.evidence.get("existing_record_key") == "mba002" and "MBA010" in item.left_locator for item in probable))
+
+    def test_person_matching_is_blocked_and_needs_corroboration(self):
+        records = [
+            CanonicalRecord("student", {"student_id": "S1", "name": "Ravi Kumar", "phone": "9876543210"}),
+            CanonicalRecord("student", {"student_id": "S2", "name": "Ravi Kumar", "phone": "1111111111"}),  # same name, nothing corroborates
+            CanonicalRecord("student", {"student_id": "S3", "name": "Ravi Kumaar", "email": "RAVI@x.com"}),  # email block
+            CanonicalRecord("student", {"student_id": "S4", "name": "Ravi Kumar", "date_of_birth": "2003-05-12"}),  # dob block
+            CanonicalRecord("student", {"student_id": "S5", "name": "Someone Else", "phone": "9876543210"}),  # phone block, name too different
+        ]
+        existing = {"e1": {"name": "Ravi Kumar", "email": "ravi@x.com"}, "e2": {"name": "Ravi Kumar", "date_of_birth": "2003-05-12", "phone": "9876543210"}}
+        calls: list[tuple[str, str]] = []
+        original = deduplication._name_similarity
+
+        def counting(left, right):
+            calls.append((str(left), str(right)))
+            return original(left, right)
+
+        deduplication._name_similarity = counting
+        try:
+            candidates, actions, warnings = find_duplicates(records, existing)
+        finally:
+            deduplication._name_similarity = original
+        self.assertEqual(warnings, [])
+        pairs = {(item.left_locator, item.record_key) for item in candidates if item.kind == "probable_person"}
+        self.assertEqual(pairs, {("row=1", "e2"), ("row=3", "e1"), ("row=4", "e2")})
+        # Name similarity ran only for pairs that share a corroborating value.
+        self.assertTrue(all(len(pair) == 2 for pair in calls))
+        self.assertNotIn(("Ravi Kumar", "Ravi Kumar"), [(l, r) for l, r in calls if l == r and "Someone" in r])
+        self.assertLessEqual(len(calls), 5)
+        self.assertEqual(actions, {0: "insert", 1: "insert", 2: "insert", 3: "insert", 4: "insert"})
+
+    def test_oversized_batches_skip_the_pairwise_pass_with_a_warning(self):
+        records = [
+            CanonicalRecord("student", {"student_id": f"S{i}", "name": "Ravi Kumar", "phone": "9876543210"})
+            for i in range(3)
+        ]
+        existing = {"e1": {"name": "Ravi Kumar", "phone": "9876543210"}}
+        original = deduplication.MAX_PAIRWISE_ROWS
+        deduplication.MAX_PAIRWISE_ROWS = 2
+        try:
+            candidates, _, warnings = find_duplicates(records, existing)
+        finally:
+            deduplication.MAX_PAIRWISE_ROWS = original
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("probable_person_check_skipped_in_batch", warnings[0])
+        probable = [item for item in candidates if item.kind == "probable_person"]
+        self.assertTrue(all(item.record_key == "e1" for item in probable), "rows are still checked against existing records")
+        self.assertEqual(len(probable), 3)
+        candidates, _, warnings = find_duplicates(records, existing)
+        self.assertEqual(warnings, [])
+        self.assertEqual(len([item for item in candidates if item.kind == "probable_person"]), 3 + 3)
 
 
 if __name__ == "__main__":
