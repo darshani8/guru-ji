@@ -73,7 +73,10 @@ def register_handlers(queue: JobQueue, *, ingestion: IngestionService | None = N
         async def run_map_tick(payload: dict[str, Any]) -> dict[str, Any]:
             # A re-dispatched attempt resumes from the sources' own schedule and
             # leases; the per-institution run lock keeps two ticks from overlapping.
-            return await map_engine.tick(str(payload["institution_id"]))
+            # The job row keeps counts only: review items and incidents live in
+            # their own manager-only stores, where a redaction reaches them.
+            result = await map_engine.tick(str(payload["institution_id"]))
+            return {key: result.get(key) for key in ("institution_id", "run_id", "skipped", "stop_reason", "counts", "spend", "metrics") if key in result}
 
         queue.register("intelligence.map_tick", run_map_tick)
 

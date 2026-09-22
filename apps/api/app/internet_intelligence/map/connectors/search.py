@@ -17,7 +17,7 @@ from ..assets import ACCOUNT, DOMAIN, GROUP, asset_ref
 from ..integrity import spam_terms
 from ..store import GRADE_RANK
 from .base import ConnectorContext, ConnectorResult, Lead
-from .common import match_entity, names_entity
+from .common import match_entity, names_entity, person_shaped
 
 # The platforms searched one at a time for each mapped entity.
 PLATFORM_DOMAINS: tuple[str, ...] = ("instagram.com", "facebook.com", "youtube.com", "linkedin.com", "x.com", "threads.net", "reddit.com", "t.me", "github.com", "linktr.ee")
@@ -90,6 +90,10 @@ class SearchConnector:
                 continue
             found = match_entity(context, url=hit.url, title=hit.title, text=hit.snippet)
             if found is None or not names_entity(found.entity, handle=ref.handle, title=hit.title):
+                continue
+            if person_shaped(ref.key) and not names_entity(found.entity, handle=ref.handle, title=""):
+                # A personal-profile URL (LinkedIn /in/, a phone number) is kept only
+                # when its own handle is the institution's, not just its display name.
                 continue
             asset_id, created = context.store.upsert_asset(context.institution_id, ref, entity_id=found.entity["entity_id"], relation="unknown", note=f"found by searching {domain}")
             context.store.add_evidence(

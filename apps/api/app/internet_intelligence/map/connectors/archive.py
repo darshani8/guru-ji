@@ -15,7 +15,7 @@ from typing import Any
 
 from ..assets import ACCOUNT, GROUP, asset_ref
 from ..grading import grade
-from ..harvest import identity_links
+from ..harvest import identity_links, vouchable
 from ..integrity import CLEAN, assess
 from ..structure import parse_structure
 from .base import ConnectorContext, ConnectorResult, Lead
@@ -88,12 +88,13 @@ class WaybackConnector:
     def _record(self, context: ConnectorContext, domain: Mapping[str, Any], structure: Any, snapshot: str, timestamp: str, anchor: str, spent: float) -> ConnectorResult:
         result = ConnectorResult(outcome="ok", cost=spent, touched={domain["asset_id"]})
         context.store.add_evidence(context.institution_id, asset_id=domain["asset_id"], kind="archive_capture", detail=f"healthy capture {timestamp}", source_url=snapshot, channel="archive", observed_via="archive", run_id=context.run_id)
-        for href, position in identity_links(structure, str(structure.url)):
+        entity = context.store.get_entity(context.institution_id, domain["entity_id"]) if domain["entity_id"] else None
+        for href, position, text in identity_links(structure, str(structure.url)):
             try:
                 ref = asset_ref(href)
             except ValueError:
                 continue
-            if ref.kind not in {ACCOUNT, GROUP} or ref.platform == "website" or context.store.is_suppressed(context.institution_id, ref.key):
+            if ref.kind not in {ACCOUNT, GROUP} or ref.platform == "website" or context.store.is_suppressed(context.institution_id, ref.key) or not vouchable(entity, ref, position, text):
                 continue
             asset_id, created = context.store.upsert_asset(context.institution_id, ref, entity_id=domain["entity_id"], relation="official", note=f"linked from {domain['handle']} (archived {timestamp[:8]})")
             context.store.add_evidence(context.institution_id, asset_id=asset_id, kind="official_link", detail=f"{anchor}:{position}", source_url=snapshot, source_asset_id=domain["asset_id"], channel=f"archive:{domain['handle']}", observed_via="archive", run_id=context.run_id)

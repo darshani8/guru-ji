@@ -1,8 +1,9 @@
 """Owner confirmation: the institution itself says which accounts are its own.
 
 Everything else in the map is inferred; this is the one thing the owner
-states. An institution proves it controls an official domain with a
-per-institution token, published in any one of three places:
+states. An institution proves it controls one of its own domains (one it
+configured, or a reviewer confirmed) with that domain's token, published in
+any one of three places:
 
 * a meta tag on the homepage: ``<meta name="guruji-verification" content="TOKEN">``;
 * a DNS TXT record on the domain: ``guruji-verification=TOKEN``;
@@ -12,7 +13,9 @@ per-institution token, published in any one of three places:
 A verified domain is graded O. Accounts listed in the verified file are O
 too (the owner vouches for them by name); an account taken off the list is
 withdrawn and falls back to whatever else supports it. The token is keyed
-to the institution, so another tenant cannot claim the same domain with it.
+to the institution and the domain, so another tenant cannot use it, and a
+copy on any other host (a taken-over subdomain, a look-alike) proves nothing.
+Domains that are official only by inference are never checked.
 """
 
 from __future__ import annotations
@@ -36,29 +39,41 @@ META_NAME = "guruji-verification"
 MAX_LISTED_ACCOUNTS = 200
 
 
-def verification_token(key: bytes, institution_id: str) -> str:
-    """The institution's ownership token (stable, keyed, and different per institution)."""
+def verification_token(key: bytes, institution_id: str, host: str) -> str:
+    """The ownership token for one domain of one institution (stable and keyed).
 
-    return "gj-" + hmac.new(key, f"ownership:{institution_id}".encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+    Binding it to the host means a token copied from the institution's site
+    proves nothing on any other host (a taken-over subdomain, a look-alike).
+    """
+
+    domain = host.strip().lower().removeprefix("www.")
+    return "gj-" + hmac.new(key, f"ownership:{institution_id}:{domain}".encode("utf-8"), hashlib.sha256).hexdigest()[:32]
 
 
 def _matches(value: Any, token: str) -> bool:
     return isinstance(value, str) and hmac.compare_digest(value.strip().encode("utf-8"), token.encode("utf-8"))
 
 
-def instructions(token: str, domains: list[str]) -> dict[str, Any]:
-    example = domains[0] if domains else "your-college.ac.in"
+def instructions(key: bytes, institution_id: str, domains: list[str]) -> dict[str, Any]:
+    """How to confirm each of the institution's own domains; every domain has its own token."""
+
     return {
-        "token": token,
-        "methods": [
-            {"method": "meta_tag", "how": f'Add <meta name="{META_NAME}" content="{token}"> inside <head> on https://{example}/'},
-            {"method": "dns_txt", "how": f'Add a DNS TXT record on {example}: {META_NAME}={token}'},
-            {"method": "well_known_file", "how": f"Publish https://{example}{WELL_KNOWN_PATH}", "example": {"verification": token, "accounts": ["https://www.instagram.com/<your_account>/", "https://www.youtube.com/@<your_channel>"]}},
+        "domains": [
+            {
+                "domain": domain, "token": (token := verification_token(key, institution_id, domain)),
+                "methods": [
+                    {"method": "meta_tag", "how": f'Add <meta name="{META_NAME}" content="{token}"> inside <head> on https://{domain}/'},
+                    {"method": "dns_txt", "how": f"Add a DNS TXT record on {domain}: {META_NAME}={token}"},
+                    {"method": "well_known_file", "how": f"Publish https://{domain}{WELL_KNOWN_PATH}", "example": {"verification": token, "accounts": ["https://www.instagram.com/<your_account>/", "https://www.youtube.com/@<your_channel>"]}},
+                ],
+            }
+            for domain in domains
         ],
         "notes": [
+            "Each domain has its own token; a token proves nothing on any other host.",
             "Any one method proves the domain; only the well-known file can also name accounts, which are then graded O (confirmed by the owner).",
+            "Only domains the institution configured (or a reviewer confirmed) are listed and checked.",
             "Remove an account from the file to withdraw it; the map re-checks weekly.",
-            "The token identifies your institution on this platform only; publishing it reveals nothing else.",
         ],
     }
 
@@ -85,8 +100,7 @@ class OwnerClaimsConnector:
         existing = context.store.source_targets(context.institution_id, self.name)
         return [
             Lead(self.name, domain["asset_id"], entity_id=domain["entity_id"], asset_id=domain["asset_id"], hops=0, work_class="recheck", origin="recurring", interval_seconds=self.default_interval)
-            for domain in context.store.iter_assets(context.institution_id, kind="domain", relation="official")
-            if domain["asset_id"] not in existing and domain["grade"] in {"O", "A", "B"}
+            for domain in owned_domains(context.store, context.institution_id) if domain["asset_id"] not in existing
         ]
 
     async def run(self, source: Mapping[str, Any], context: ConnectorContext) -> ConnectorResult:
@@ -95,8 +109,11 @@ class OwnerClaimsConnector:
         domain = context.store.get_asset(context.institution_id, str(source["target"]))
         if domain is None or domain["kind"] != "domain":
             return ConnectorResult(outcome="asset_missing", prune=True)
+        if not nominated_by_institution(context.store, context.institution_id, domain["asset_id"]):
+            # Official only by inference: the owner check is not offered there.
+            return ConnectorResult(outcome="not_nominated", prune=True)
         host = domain["asset_key"].removeprefix("web:")
-        token = verification_token(self.key, context.institution_id)
+        token = verification_token(self.key, context.institution_id, host)
         proofs: list[str] = []
         homepage = await context.fetcher.retrieve(f"https://{host}/")
         if homepage.ok and _matches(parse_structure(homepage.text, homepage.url).meta.get(META_NAME), token):
@@ -175,4 +192,17 @@ class OwnerClaimsConnector:
                 result.touched.add(asset_id)
 
 
-__all__ = ["META_NAME", "OwnerClaimsConnector", "WELL_KNOWN_PATH", "instructions", "verification_token"]
+def nominated_by_institution(store: Any, institution_id: str, asset_id: str) -> bool:
+    """A domain the institution configured or a reviewer confirmed (an earlier owner proof counts too)."""
+
+    return any(
+        row["polarity"] == "supports" and row["kind"] in {"configured_domain", "reviewer_confirm", "owner_claim"}
+        for row in store.evidence_for(institution_id, [asset_id])[asset_id]
+    )
+
+
+def owned_domains(store: Any, institution_id: str) -> list[dict[str, Any]]:
+    return [domain for domain in store.iter_assets(institution_id, kind="domain", relation="official") if nominated_by_institution(store, institution_id, domain["asset_id"])]
+
+
+__all__ = ["META_NAME", "OwnerClaimsConnector", "WELL_KNOWN_PATH", "instructions", "nominated_by_institution", "owned_domains", "verification_token"]

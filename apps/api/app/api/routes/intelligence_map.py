@@ -201,7 +201,7 @@ async def tick(request: Request, body: MapInstitutionBody, background: bool = Tr
     try:
         service.guard(principal, target, Capability.INTELLIGENCE_MANAGE)
         if background:
-            job_id = platform_from_request(request).jobs.enqueue(target, "intelligence.map_tick", {"institution_id": target})
+            job_id = platform_from_request(request).jobs.enqueue(target, "intelligence.map_tick", {"institution_id": target, "requested_by": principal.principal_id})
             audit_map_action(request, principal, "tick", metadata={"institution_id": target, "background": True})
             return {"accepted": True, "job_id": job_id}
         result = await service.tick(principal, target)

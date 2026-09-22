@@ -23,7 +23,24 @@ _HIDDEN_STYLE = re.compile(
     r"(?:width|height)\s*:\s*[01]px[^;]*;[^\"']*overflow\s*:\s*hidden|overflow\s*:\s*hidden[^\"']*(?:width|height)\s*:\s*[01]px",
     re.IGNORECASE,
 )
-_CLASS_POSITION = ((FOOTER, re.compile(r"(?:^|[\s_-])(?:footer|site-footer|foot)(?:$|[\s_-])", re.I)), (HEADER, re.compile(r"(?:^|[\s_-])(?:header|masthead|topbar|top-bar)(?:$|[\s_-])", re.I)), (NAV, re.compile(r"(?:^|[\s_-])(?:nav|navbar|menu|navigation)(?:$|[\s_-])", re.I)))
+# Whole class or id tokens that name the page's own chrome. Substrings do not
+# count: "card-footer", "modal-header" and a theme's body class such as
+# "et_pb_footer_columns4" describe content, not the site's footer.
+_CHROME_TOKENS: dict[str, frozenset[str]] = {
+    FOOTER: frozenset({"footer", "site-footer", "main-footer", "global-footer", "footer-widgets", "colophon"}),
+    HEADER: frozenset({"header", "site-header", "main-header", "global-header", "masthead", "topbar", "top-bar"}),
+    NAV: frozenset({"nav", "navbar", "navigation", "site-navigation", "main-navigation", "primary-menu", "main-menu"}),
+}
+# A <header> or <footer> inside one of these belongs to that piece of content
+# (an article's byline, a card), not to the page.
+_SECTIONING = frozenset({"article", "section", "aside", "main", "blockquote"})
+# Elements whose classes say nothing about where a link sits.
+_NO_CLASS_POSITION = frozenset({"html", "body", "a"})
+# Organisation types whose JSON-LD sameAs declares the site owner's accounts.
+_ORGANISATION_TYPES = frozenset({
+    "organization", "educationalorganization", "collegeoruniversity", "school", "highschool", "middleschool", "elementaryschool", "preschool",
+    "ngo", "governmentorganization", "localbusiness", "corporation", "researchorganization", "medicalorganization", "hospital", "placeofworship", "hindutemple",
+})
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,21 +100,21 @@ class _StructureParser(HTMLParser):
                 return position
         return BODY
 
-    @staticmethod
-    def _element_position(tag: str, attributes: dict[str, str]) -> str | None:
-        if tag in {"footer", "header", "nav", "aside"}:
-            return {"footer": FOOTER, "header": HEADER, "nav": NAV, "aside": ASIDE}[tag]
-        role = attributes.get("role", "").lower()
-        if role == "contentinfo":
-            return FOOTER
-        if role == "banner":
-            return HEADER
-        if role == "navigation":
-            return NAV
-        marker = f"{attributes.get('id', '')} {attributes.get('class', '')}"
-        for position, pattern in _CLASS_POSITION:
-            if pattern.search(marker):
-                return position
+    def _element_position(self, tag: str, attributes: dict[str, str]) -> str | None:
+        """The page region an element opens, if it is the site's own header, navigation or footer."""
+
+        if tag == "aside":
+            return ASIDE
+        inside_content = any(open_tag in _SECTIONING for open_tag, _, _ in self.stack)
+        landmark = {"footer": FOOTER, "header": HEADER, "nav": NAV}.get(tag) or {"contentinfo": FOOTER, "banner": HEADER, "navigation": NAV}.get(attributes.get("role", "").lower())
+        if landmark:
+            return None if inside_content else landmark
+        if tag in _NO_CLASS_POSITION:
+            return None
+        tokens = {token.lower() for token in attributes.get("class", "").split()} | ({attributes["id"].strip().lower()} if attributes.get("id", "").strip() else set())
+        for position, names in _CHROME_TOKENS.items():
+            if tokens & names:
+                return None if inside_content else position
         return None
 
     @staticmethod
@@ -176,24 +193,48 @@ class _StructureParser(HTMLParser):
         except ValueError:
             return
         found: list[str] = []
+        page_host = _bare_host(self.base)
 
-        def walk(node: object, depth: int = 0) -> None:
-            if depth > 6:
-                return
-            if isinstance(node, dict):
+        def is_organisation(node: dict) -> bool:
+            kinds = node.get("@type")
+            kinds = [kinds] if isinstance(kinds, str) else kinds if isinstance(kinds, list) else []
+            return any(isinstance(kind, str) and kind.lower() in _ORGANISATION_TYPES for kind in kinds)
+
+        def about_this_site(node: dict) -> bool:
+            # An organisation node that names a different site describes someone else.
+            for key in ("url", "@id"):
+                value = node.get(key)
+                if isinstance(value, str) and value.startswith(("http://", "https://")) and _bare_host(value) not in {page_host, ""}:
+                    return False
+            return True
+
+        def take(node: object) -> None:
+            if isinstance(node, dict) and is_organisation(node) and about_this_site(node):
                 value = node.get("sameAs")
                 if isinstance(value, str):
                     found.append(value)
                 elif isinstance(value, list):
                     found.extend(item for item in value if isinstance(item, str))
-                for child in node.values():
-                    if isinstance(child, (dict, list)):
-                        walk(child, depth + 1)
-            elif isinstance(node, list):
-                for child in node:
-                    walk(child, depth + 1)
 
-        walk(document)
+        # Only the site owner's organisation node counts: a top-level node, an
+        # @graph entry, or the publisher / provider of the site or page. Never
+        # a founder, author, employee or other nested person or organisation.
+        roots = document if isinstance(document, list) else [document]
+        candidates: list[object] = []
+        for root in roots:
+            if not isinstance(root, dict):
+                continue
+            candidates.append(root)
+            graph = root.get("@graph")
+            if isinstance(graph, list):
+                candidates.extend(graph)
+        for node in list(candidates):
+            if isinstance(node, dict):
+                for key in ("publisher", "provider"):
+                    if isinstance(node.get(key), dict):
+                        candidates.append(node[key])
+        for node in candidates:
+            take(node)
         for item in found[:50]:
             absolute = urljoin(self.base, item.strip())
             if absolute.startswith(("http://", "https://")) and absolute not in self.out.same_as:

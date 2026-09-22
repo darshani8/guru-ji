@@ -135,22 +135,82 @@ def match_entity(context: ConnectorContext, *, url: str, title: str, text: str, 
     return EntityHit(best[0], best[1], rival)
 
 
-def names_entity(entity: Mapping[str, Any], *, handle: str, title: str) -> bool:
-    """Whether an account's own handle or display name carries the entity's name.
+# Words an institutional account puts next to its name ("bgscet_cse",
+# "BGSCET Official", "bgscetalumni"); a person's name is not among them.
+INSTITUTIONAL_WORDS = frozenset({
+    "official", "officials", "offl", "college", "colleges", "coll", "clg", "engg", "engineering", "institute", "institution", "inst", "university", "univ", "school",
+    "campus", "dept", "department", "cse", "ece", "eee", "ise", "mech", "mechanical", "civil", "it", "ai", "aiml", "ds", "mba", "mca", "bba", "bca", "bcom", "bsc", "msc",
+    "mtech", "btech", "phd", "pu", "puc", "nss", "ncc", "iste", "ieee", "csi", "acm", "sae", "ecell", "alumni", "association", "placements", "placement", "tpo",
+    "admissions", "admission", "library", "sports", "fest", "club", "clubs", "students", "student", "council", "union", "hostel", "events", "news", "media", "page",
+    "team", "research", "innovation", "cell", "hub", "community", "india", "online", "live", "tv", "channel", "updates", "group", "trust", "math", "mutt", "hospital",
+    "medical", "nursing", "pharmacy", "law", "arts", "science", "commerce", "high", "primary", "english", "public", "international", "residential", "the", "of", "and", "for",
+    "at", "ac", "edu", "org", "com", "net", "in", "co", "gov", "res", "www", "company", "school", "showcase", "u", "r", "c", "user",
+})
 
-    A person who only mentions the college in a bio ("student at BGSCET")
-    does not; the map is about institutional accounts, not people.
+
+def _words(text: str) -> list[str]:
+    return re.findall(r"[a-z0-9]+", text.lower())
+
+
+def _segments(text: str, allowed: frozenset[str]) -> bool:
+    """Whether ``text`` (no separators) is made only of allowed words and digits."""
+
+    if not text:
+        return True
+    if text[0].isdigit():
+        index = 0
+        while index < len(text) and text[index].isdigit():
+            index += 1
+        return _segments(text[index:], allowed)
+    return any(text.startswith(word) and _segments(text[len(word):], allowed) for word in sorted(allowed, key=len, reverse=True) if word)
+
+
+def names_entity(entity: Mapping[str, Any], *, handle: str, title: str) -> bool:
+    """Whether an account's own handle or display name is the entity's, not a person's.
+
+    The name (or an alias) must be all of it, or sit beside institutional
+    words only: "bgscet_cse", "BGSCET Official" and "bgscetalumni" pass;
+    "rahul_bgscet", "Rahul Kumar | BGSCET" and "in/rahul-kumar-bgscet-1234"
+    do not, and neither does a bio that merely mentions the college. Short
+    acronyms ("AIT") must stand as a whole word.
     """
 
     display = re.split(r"\s+\(@|\s+[•|·-]\s+|\s+on\s+(?:instagram|facebook|x|linkedin|youtube)\b", title, maxsplit=1, flags=re.IGNORECASE)[0]
-    compact_handle, compact_display = _compact(handle), _compact(display)
+    allowed = INSTITUTIONAL_WORDS | frozenset(word for location in entity.get("locations") or [] for word in _words(str(location)))
+    # Glued handles ("bgscetalumni") are split only on words of three letters
+    # or more, so short tokens ("it", "ai", "u") cannot spell a person's name.
+    glued = frozenset(word for word in allowed if len(word) >= 3)
     for name in [entity["name"], *(entity.get("names") or [])]:
-        token = _compact(str(name))
-        # Short acronyms ("AIT", "BGS") only count as the whole handle or name;
-        # inside a longer one they match too many other institutions.
-        if token and (token in {compact_handle, compact_display} or (len(token) >= 4 and (token in compact_handle or token in compact_display))):
-            return True
+        name_words = _words(str(name))
+        token = "".join(name_words)
+        if not token:
+            continue
+        for candidate in (handle, display):
+            words = _words(candidate)
+            if not words:
+                continue
+            if words == name_words or "".join(words) == token:
+                return True
+            span = len(name_words)
+            for start in range(len(words) - span + 1):
+                if words[start : start + span] == name_words and all(word in allowed or word.isdigit() for word in words[:start] + words[start + span :]):
+                    return True
+            if len(token) >= 4:
+                for word in words:
+                    if token in word and word != token:
+                        before, after = word.split(token, 1)
+                        rest = [other for other in words if other is not word]
+                        if _segments(before, glued) and _segments(after, glued) and all(other in allowed or other.isdigit() for other in rest):
+                            return True
     return False
+
+
+# Account keys that always belong to a person (or a phone number), whatever links them.
+PERSONAL_PREFIXES = ("linkedin:in:", "reddit:u:", "whatsapp:")
+
+
+def person_shaped(key: str) -> bool:
+    return key.startswith(PERSONAL_PREFIXES) and not key.startswith("whatsapp:group:")
 
 
 # -------------------------------------------------------------------- feeds
@@ -217,4 +277,4 @@ def unique(values: Sequence[str]) -> list[str]:
     return list(dict.fromkeys(values))
 
 
-__all__ = ["ApiClient", "ApiResponse", "EntityHit", "FAILED_OUTCOMES", "FeedItem", "entity_profile", "match_entity", "names_entity", "parse_feed", "unique"]
+__all__ = ["ApiClient", "ApiResponse", "EntityHit", "FAILED_OUTCOMES", "FeedItem", "INSTITUTIONAL_WORDS", "entity_profile", "match_entity", "names_entity", "parse_feed", "person_shaped", "unique"]

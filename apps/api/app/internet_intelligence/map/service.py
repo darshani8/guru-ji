@@ -18,10 +18,10 @@ from .assets import asset_ref
 from .connectors.base import ConnectorContext
 from .incidents import IncidentDesk
 from .learning import coverage_estimate, gap_grid
-from .ownership import OwnerClaimsConnector, instructions, verification_token
+from .ownership import OwnerClaimsConnector, instructions, owned_domains
 from .harvest import OfficialSiteHarvester
 from .metrics import map_metrics, record_baseline
-from .pipeline import regrade, sync_profile
+from .pipeline import nominated, regrade, sync_profile
 from .seed import DEFAULT_SWEEP, Lookalike, SeedRow, SeedSummary, import_seed, parse_lookalikes, parse_sweep
 from .store import MapStore
 
@@ -216,7 +216,9 @@ class MapService:
         elif decision in {"reject", "lookalike", "impersonation"}:
             kind = {"reject": "reviewer_reject", "lookalike": "lookalike", "impersonation": "impersonation"}[decision]
             self.store.add_evidence(institution_id, asset_id=asset["asset_id"], kind=kind, polarity="refutes", detail=detail, channel=reviewer, observed_via="reviewer")
-            effect["sources_pruned"] = self.store.prune_sources_for(institution_id, asset_id=asset["asset_id"], url=asset["url"])
+            # A rejected website takes its host's leads with it, unless it is one of ours.
+            whole_host = asset["kind"] == "domain" and asset["platform"] == "website" and not nominated(self.store, institution_id, asset["asset_id"])
+            effect["sources_pruned"] = self.store.prune_sources_for(institution_id, asset_id=asset["asset_id"], url=asset["url"], whole_host=whole_host)
             if decision == "impersonation":
                 effect["incident"] = {"kind": "impersonation_confirmed", "target": asset["asset_key"], "signals": [detail], "severity": "high"}
                 if self.desk is not None:
@@ -225,7 +227,7 @@ class MapService:
             # A person's account leaves the map: only a keyed fingerprint stays, so it never comes back.
             self.store.suppress(institution_id, asset["asset_key"], reason="personal account (review decision)")
             self.store.suppress(institution_id, asset["url"], reason="personal account (review decision)")
-            self.store.forget_asset(institution_id, asset["asset_id"])
+            self.store.forget_asset(institution_id, asset["asset_id"], keep_review_id=review_id)
             asset = None
         elif decision == "publish":
             effect["published"] = self.store.apply_proposed(institution_id)
@@ -298,9 +300,9 @@ class MapService:
         """The institution's token, how to publish it, and what the owner has confirmed so far."""
 
         self.guard(principal, institution_id, Capability.INTELLIGENCE_MANAGE)
-        domains = [domain["asset_key"].removeprefix("web:") for domain in self.store.iter_assets(institution_id, kind="domain", relation="official") if domain["grade"] in {"O", "A", "B"}]
+        domains = [domain["asset_key"].removeprefix("web:") for domain in owned_domains(self.store, institution_id)]
         confirmed = [{key: asset[key] for key in ("asset_id", "asset_key", "url", "kind", "platform")} for asset in self.store.iter_assets(institution_id, grade="O")]
-        return {**instructions(verification_token(self.store.suppression_key, institution_id), domains), "confirmed": confirmed}
+        return {**instructions(self.store.suppression_key, institution_id, domains), "confirmed": confirmed}
 
     async def verify_ownership(self, principal: Principal, institution_id: str) -> dict[str, Any]:
         """Check every official domain for the token now (the engine also does this weekly)."""
@@ -313,7 +315,7 @@ class MapService:
         run_id = self.store.start_map_run(institution_id, kind="ownership")
         context = ConnectorContext(self.store, institution_id, run_id, datetime.now(timezone.utc), fetcher=self.fetcher)
         results = []
-        for domain in list(self.store.iter_assets(institution_id, kind="domain", relation="official"))[:MAX_HARVEST_DOMAINS]:
+        for domain in owned_domains(self.store, institution_id)[:MAX_HARVEST_DOMAINS]:
             outcome = await connector.run({"target": domain["asset_id"]}, context)
             results.append({"domain": domain["asset_key"].removeprefix("web:"), "outcome": outcome.outcome, "accounts_added": outcome.new_assets})
         self.store.finish_map_run(institution_id, run_id, status="succeeded", stop_reason="completed", counts={"domains": len(results), "verified": sum(item["outcome"] == "verified" for item in results)})

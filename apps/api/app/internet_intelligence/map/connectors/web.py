@@ -48,10 +48,17 @@ class OfficialSiteConnector:
         # The harvester regraded what it touched; the engine need not again.
         result.touched = {domain["asset_id"]}
         result.yield_count = len(harvest.new_assets) + len(harvest.raised)
+        result.cost = float(harvest.requests)
         hops = int(source.get("hops") or 0) + 1
         if hops <= context.max_hops:
             result.leads.extend(Lead("lead_page", url, entity_id=domain["entity_id"], hops=hops) for url in harvest.leads[:25])
-        result.leads.extend(Lead("feed", url, entity_id=domain["entity_id"], asset_id=domain["asset_id"], hops=hops, work_class="rotation", origin="recurring", interval_seconds=86400) for url in harvest.feeds[:5])
+        host = domain["asset_key"].removeprefix("web:")
+        for url in harvest.feeds[:5]:
+            feed_host = (urlparse(url).hostname or "").lower().removeprefix("www.")
+            # The site's own feed dates the site; a feed elsewhere (a YouTube
+            # channel it declares) belongs to nothing until that account is mapped.
+            own = feed_host == host or feed_host.endswith("." + host)
+            result.leads.append(Lead("feed", url, entity_id=domain["entity_id"], asset_id=domain["asset_id"] if own else None, hops=hops, work_class="rotation", origin="recurring", interval_seconds=86400))
         return result
 
 
@@ -190,9 +197,10 @@ class RecheckConnector:
             return ConnectorResult(outcome="fetching_disabled", failed=True)
         if not context.fetcher.allowed_domain(asset["url"]):
             return ConnectorResult(outcome="snippet_only")
-        state = context.store.fetch_state(asset["url"])
+        state = context.store.fetch_state(context.institution_id, asset["url"])
         retrieval = await context.fetcher.retrieve(asset["url"], etag=(state or {}).get("etag"), last_modified=(state or {}).get("last_modified"))
-        context.store.record_fetch(asset["url"], outcome=retrieval.outcome, etag=retrieval.etag, last_modified=retrieval.last_modified, content_sha256=None)
+        keep = retrieval.outcome in {"ok", "not_modified"}
+        context.store.record_fetch(context.institution_id, asset["url"], outcome=retrieval.outcome, etag=retrieval.etag if keep else None, last_modified=retrieval.last_modified if keep else None, content_sha256=None)
         if retrieval.outcome in {"ok", "not_modified"}:
             context.store.add_evidence(context.institution_id, asset_id=asset["asset_id"], kind="liveness", detail=f"{retrieval.outcome}:{retrieval.http_status}", source_url=retrieval.url, channel="fetch", observed_via="live", run_id=context.run_id)
         elif retrieval.outcome in _FAILURES:

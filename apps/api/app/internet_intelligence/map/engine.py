@@ -36,7 +36,7 @@ from .gate import guard_canaries
 from .incidents import IncidentDesk
 from .learning import prioritise_gaps
 from .metrics import map_metrics
-from .pipeline import regrade, sync_profile
+from .pipeline import nominated, regrade, sync_profile
 from .store import MapStore
 
 DEFAULT_BUDGETS: dict[str, float] = {
@@ -84,8 +84,11 @@ class MapEngine:
             regrade(self.store, institution_id, unrated)
         now = self.clock().isoformat()
         if self.registry.get("official_site"):
-            for domain in self.store.iter_assets(institution_id, kind="domain"):
-                if domain["relation"] == "official" and domain["grade"] in {"O", "A", "B"} and domain["status"] not in {"parked", "hijacked"}:
+            for domain in self.store.iter_assets(institution_id, kind="domain", relation="official"):
+                # Only a domain the institution (or a reviewer or regulator) named is
+                # watched as the institution's own site; an inferred one (a subdomain,
+                # a Wikidata claim) is not trusted to vouch for accounts.
+                if nominated(self.store, institution_id, domain["asset_id"]):
                     _, created = self.store.upsert_source(institution_id, connector="official_site", target=domain["asset_id"], entity_id=domain["entity_id"], asset_id=domain["asset_id"], origin="recurring", work_class="rotation", interval_seconds=7 * 86400, due_at=now)
                     added += int(created)
         if self.registry.get("recheck"):
@@ -120,33 +123,97 @@ class MapEngine:
         )
         return created
 
-    def _claim(self, institution_id: str, worker: str) -> list[dict[str, Any]]:
+    def _affordable(self, institution_id: str, day: str) -> list[str]:
+        """Enabled connectors whose budget still has room today, for this institution and platform-wide."""
+
+        tenant, platform = self.store.tenant_spend(institution_id, day=day), self.store.spend(day=day)
+        names = []
+        for name in self.registry.names():
+            connector = self.registry.get(name)
+            if connector is None:
+                continue
+            try:
+                need = max(0.0, min(1.0, float(connector.cost({}))))
+            except Exception:  # noqa: BLE001 - a cost that needs a real source is at least one unit
+                need = 1.0
+            cap = float(self.config.budgets.get(connector.budget_key, 0))
+            used_here = float(tenant.get(connector.budget_key, {}).get("units", 0.0))
+            used_all = float(platform.get(connector.budget_key, {}).get("units", 0.0))
+            if need == 0 or (cap * self.config.tenant_share - used_here >= need and cap - used_all >= need):
+                names.append(name)
+        return names
+
+    def _claim(self, institution_id: str, worker: str, *, connectors: list[str], total: int) -> list[dict[str, Any]]:
         now = self.clock().isoformat()
-        enabled = self.registry.names()
-        total = max(1, self.config.sources_per_tick)
         claimed: list[dict[str, Any]] = []
+        if not connectors or total <= 0:
+            return claimed
         for work_class, share in self.config.class_split:
             quota = max(1, round(total * share))
             # Half of each class goes to gaps and productive sources, half to the
             # longest overdue, so the productive go first and nothing starves.
-            first = self.store.claim_due(institution_id, now=now, worker=worker, lease_seconds=self.config.lease_seconds, limit=(quota + 1) // 2, work_class=work_class, connectors=enabled, order="priority")
-            rest = self.store.claim_due(institution_id, now=now, worker=worker, lease_seconds=self.config.lease_seconds, limit=quota - len(first), work_class=work_class, connectors=enabled) if quota > len(first) else []
+            first = self.store.claim_due(institution_id, now=now, worker=worker, lease_seconds=self.config.lease_seconds, limit=(quota + 1) // 2, work_class=work_class, connectors=connectors, order="priority")
+            rest = self.store.claim_due(institution_id, now=now, worker=worker, lease_seconds=self.config.lease_seconds, limit=quota - len(first), work_class=work_class, connectors=connectors) if quota > len(first) else []
             claimed.extend(first + rest)
         if len(claimed) < total:
             # Slots a class left unused go to whatever else is due.
-            claimed.extend(self.store.claim_due(institution_id, now=now, worker=worker, lease_seconds=self.config.lease_seconds, limit=total - len(claimed), connectors=enabled))
+            claimed.extend(self.store.claim_due(institution_id, now=now, worker=worker, lease_seconds=self.config.lease_seconds, limit=total - len(claimed), connectors=connectors))
+        for extra in claimed[total:]:
+            self.store.release_source(institution_id, extra["source_id"])
         return claimed[:total]
 
-    def _next_interval(self, source: Mapping[str, Any], result: ConnectorResult) -> int:
+    def _next_interval(self, source: Mapping[str, Any], result: ConnectorResult) -> tuple[int, int]:
+        """(seconds until the source is due again, the interval to keep).
+
+        Failure back-off delays only the next run; the kept interval moves
+        with yield around the source's base (productive sooner, idle leads
+        later, idle watches back to base), so an outage or a quota refusal
+        never slows a watch down for good.
+        """
+
         interval = int(source.get("interval_seconds") or 86400)
+        base = int(source.get("base_interval_seconds") or interval)
         if result.failed:
             streak = int(source.get("failure_streak") or 0) + 1
-            interval = interval * (2 ** min(streak, 5))
-        elif result.yield_count > 0:
-            interval = interval // 2
+            delay = base * (2 ** min(streak, 5))
+            bounded = max(self.config.min_interval, min(self.config.max_interval, delay))
+            # The kept interval never grows from a failure (one stretched by an older rule comes back to base).
+            return bounded, max(self.config.min_interval, min(self.config.max_interval, min(interval, base)))
+        if result.yield_count > 0:
+            interval = max(interval // 2, base // 8)
         elif source.get("origin") == "lead":
-            interval = interval * 2
-        return max(self.config.min_interval, min(self.config.max_interval, interval))
+            interval = min(interval * 2, base * 4)
+        else:
+            interval = base if interval >= base else min(base, interval * 2)
+        interval = max(self.config.min_interval, min(self.config.max_interval, interval))
+        return interval, interval
+
+    async def _run_source(
+        self, institution_id: str, run_id: str, profile: InstitutionProfile | None, connector: Any, source: dict[str, Any], estimate: float,
+        counts: dict[str, int], spend: dict[str, float], touched: set[str], incidents: list[dict[str, Any]], review: list[dict[str, Any]],
+    ) -> None:
+        spend[connector.budget_key] = spend.get(connector.budget_key, 0.0) + estimate
+        try:
+            result = await connector.run(source, self._context(institution_id, run_id, profile))
+        except Exception as exc:  # noqa: BLE001 - one broken source must not end the tick
+            result = ConnectorResult(outcome=f"error:{type(exc).__name__}", failed=True)
+        counts["sources"] += 1
+        counts["new_assets"] += len(result.new_assets)
+        counts["raised"] += max(0, result.yield_count - len(result.new_assets))
+        counts["failed"] += int(result.failed)
+        touched |= result.touched
+        incidents.extend({**incident, "connector": connector.name, "source_id": source["source_id"]} for incident in result.incidents)
+        review.extend({**item, "connector": connector.name, "source_id": source["source_id"]} for item in result.review)
+        for lead in result.leads:
+            counts["leads"] += int(self._add_lead(institution_id, lead))
+        delay, keep = self._next_interval(source, result)
+        promoted = source.get("origin") == "lead" and result.yield_count > 0
+        counts["pruned"] += int(result.prune)
+        self.store.complete_source(
+            institution_id, source["source_id"], outcome=result.outcome, next_due=(self.clock() + timedelta(seconds=delay)).isoformat(), interval_seconds=keep, yield_count=result.yield_count,
+            cost=result.cost if result.cost is not None else estimate, failed=result.failed, etag=result.etag, last_modified=result.last_modified, status="pruned" if result.prune else None,
+            origin="recurring" if promoted else None, clear_expiry=promoted,
+        )
 
     # ------------------------------------------------------------------ tick
     async def tick(self, institution_id: str, *, worker: str | None = None) -> dict[str, Any]:
@@ -164,40 +231,34 @@ class MapEngine:
             counts["expired"] = self.store.expire_sources(institution_id, now=self.clock().isoformat())
             day = self.clock().date().isoformat()
             touched: set[str] = set()
-            for source in self._claim(institution_id, worker):
-                connector = self.registry.get(source["connector"])
-                if connector is None:
-                    self.store.release_source(institution_id, source["source_id"])
-                    continue
-                estimate = float(connector.cost(source))
-                cap = float(self.config.budgets.get(connector.budget_key, 0))
-                if estimate > 0 and not self.store.reserve_budget(institution_id, connector=connector.budget_key, units=estimate, day=day, global_cap=cap, tenant_cap=cap * self.config.tenant_share):
-                    counts["deferred_budget"] += 1
-                    self.store.release_source(institution_id, source["source_id"])
-                    continue
-                spend[connector.budget_key] = spend.get(connector.budget_key, 0.0) + estimate
-                try:
-                    result = await connector.run(source, self._context(institution_id, run_id, profile))
-                except Exception as exc:  # noqa: BLE001 - one broken source must not end the tick
-                    result = ConnectorResult(outcome=f"error:{type(exc).__name__}", failed=True)
-                counts["sources"] += 1
-                counts["new_assets"] += len(result.new_assets)
-                counts["raised"] += max(0, result.yield_count - len(result.new_assets))
-                counts["failed"] += int(result.failed)
-                touched |= result.touched
-                incidents.extend({**incident, "connector": connector.name, "source_id": source["source_id"]} for incident in result.incidents)
-                review.extend({**item, "connector": connector.name, "source_id": source["source_id"]} for item in result.review)
-                for lead in result.leads:
-                    counts["leads"] += int(self._add_lead(institution_id, lead))
-                next_due = (self.clock() + timedelta(seconds=self._next_interval(source, result))).isoformat()
-                promoted = source.get("origin") == "lead" and result.yield_count > 0
-                status = "pruned" if result.prune else None
-                counts["pruned"] += int(result.prune)
-                self.store.complete_source(
-                    institution_id, source["source_id"], outcome=result.outcome, next_due=next_due, interval_seconds=self._next_interval(source, result), yield_count=result.yield_count,
-                    cost=result.cost if result.cost is not None else estimate, failed=result.failed, etag=result.etag, last_modified=result.last_modified, status=status,
-                    origin="recurring" if promoted else None, clear_expiry=promoted,
-                )
+            # Only connectors whose budget has room are claimed; when a budget
+            # runs out mid-tick its connectors drop out and the freed slots go
+            # to due work on other budgets (deferred sources keep their place).
+            affordable = self._affordable(institution_id, day)
+            slots = max(1, self.config.sources_per_tick)
+            batches = 0
+            while slots > counts["sources"] and affordable and batches < 5:
+                batches += 1
+                batch = self._claim(institution_id, worker, connectors=affordable, total=slots - counts["sources"])
+                if not batch:
+                    break
+                deferred_before = counts["deferred_budget"]
+                for source in batch:
+                    connector = self.registry.get(source["connector"])
+                    if connector is None or connector.name not in affordable:
+                        self.store.release_source(institution_id, source["source_id"])
+                        continue
+                    estimate = float(connector.cost(source))
+                    cap = float(self.config.budgets.get(connector.budget_key, 0))
+                    if estimate > 0 and not self.store.reserve_budget(institution_id, connector=connector.budget_key, units=estimate, day=day, global_cap=cap, tenant_cap=cap * self.config.tenant_share):
+                        counts["deferred_budget"] += 1
+                        self.store.release_source(institution_id, source["source_id"])
+                        spent_key = connector.budget_key
+                        affordable = [name for name in affordable if (self.registry.get(name) and self.registry.get(name).budget_key != spent_key)]
+                        continue
+                    await self._run_source(institution_id, run_id, profile, connector, source, estimate, counts, spend, touched, incidents, review)
+                if counts["deferred_budget"] == deferred_before:
+                    break  # claim again only to refill slots a spent budget left empty
             if touched:
                 regrade(self.store, institution_id, sorted(touched))
                 review.extend(self._disputes(institution_id, touched))

@@ -20,7 +20,8 @@ from urllib.parse import urljoin, urlparse
 from ..fetch import PublicPageFetcher, Retrieval
 from .assets import ACCOUNT, GROUP, asset_ref
 from .integrity import CLEAN, IntegrityReport, assess
-from .pipeline import anchor_grade, regrade
+from .connectors.common import names_entity, person_shaped
+from .pipeline import anchor_grade, lose_anchor, nominated, regrade
 from .store import GRADE_RANK, MapStore
 from .structure import BODY, HEAD_LINK, HIDDEN, IDENTITY_POSITIONS, PageStructure, parse_structure
 
@@ -42,6 +43,7 @@ class HarvestResult:
     anchor: str = "C"
     incidents: list[dict[str, Any]] = field(default_factory=list)
     raised: list[str] = field(default_factory=list)  # accounts whose grade went up in this harvest
+    requests: int = 0  # page requests actually made (what the harvest really cost)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -59,7 +61,7 @@ class OfficialSiteHarvester:
     fetcher: PublicPageFetcher
     store: MapStore
     max_pages: int = 5
-    conditional: bool = False  # use the shared fetch cache's validators (the scheduled engine sets this)
+    conditional: bool = False  # reuse this institution's validators from its last clean harvest (the scheduled engine sets this)
 
     async def harvest(self, institution_id: str, domain_asset_id: str, *, run_id: str | None = None) -> HarvestResult:
         asset = self.store.get_asset(institution_id, domain_asset_id)
@@ -67,23 +69,33 @@ class OfficialSiteHarvester:
             raise ValueError("harvest needs a domain asset")
         host = asset["asset_key"].removeprefix("web:")
         result = HarvestResult(domain=host)
+        entity = self.store.get_entity(institution_id, asset["entity_id"]) if asset["entity_id"] else None
         # Grade the domain from its evidence first: the links it vouches for inherit that grade.
         regrade(self.store, institution_id, [domain_asset_id])
-        homepage = await self._retrieve(asset["url"])
+        homepage = await self._retrieve(institution_id, asset["url"], result)
+        if homepage.outcome == "not_modified":
+            # Unchanged since this institution's last clean harvest: the links it gave then still stand.
+            touched = self._reconfirm(institution_id, domain_asset_id, homepage.url, run_id, result)
+            current = self.store.get_asset(institution_id, domain_asset_id) or asset
+            if touched and current["status"] == "live":
+                self._liveness(institution_id, domain_asset_id, homepage, run_id)
+                result.pages.append({"url": homepage.url, "outcome": homepage.outcome})
+                result.integrity = "unchanged"
+                self._note_raised(regrade(self.store, institution_id, [domain_asset_id, *touched]), result)
+                return result
+            # Nothing of ours to stand on (or the site was unhealthy last time): read it afresh.
+            homepage = await self._retrieve(institution_id, asset["url"], result, conditional=False)
         if homepage.ok and _host(homepage.url) != host:
             # Another host answered: that says nothing about this domain being live.
             self.store.add_evidence(institution_id, asset_id=domain_asset_id, kind="liveness", polarity="refutes", detail=f"redirected:{_host(homepage.url)}", source_url=homepage.url, channel="fetch", observed_via="live", run_id=run_id)
         else:
             self._liveness(institution_id, domain_asset_id, homepage, run_id)
         result.pages.append({"url": homepage.url, "outcome": homepage.outcome})
-        if homepage.outcome == "not_modified":
-            # Unchanged since the last fetch: the links it gave then still stand.
-            result.integrity = "unchanged"
-            touched = self._reconfirm(institution_id, domain_asset_id, homepage.url, run_id, result)
-            self._note_raised(regrade(self.store, institution_id, [domain_asset_id, *touched]), result)
-            return result
         if not homepage.ok:
             regrade(self.store, institution_id, [domain_asset_id])
+            current = self.store.get_asset(institution_id, domain_asset_id) or asset
+            if current["status"] == "dead":
+                lose_anchor(self.store, institution_id, domain_asset_id, reason="dead", run_id=run_id)
             return result
         if _host(homepage.url) != host:
             # The domain now redirects elsewhere: it cannot vouch for anything, and the move is a finding.
@@ -91,16 +103,18 @@ class OfficialSiteHarvester:
             result.integrity = "redirects_offsite"
             result.evidence += 1
             regrade(self.store, institution_id, [domain_asset_id])
+            lose_anchor(self.store, institution_id, domain_asset_id, reason="redirected", run_id=run_id)
             return result
         home = parse_structure(homepage.text, homepage.url)
         report = assess(home, homepage.text)
         self._integrity(institution_id, domain_asset_id, report, homepage.url, host, run_id, result)
+        if report.status in {"parked", "hijacked"}:
+            lose_anchor(self.store, institution_id, domain_asset_id, reason=report.status, run_id=run_id)
         pages: list[tuple[str, PageStructure, str]] = [(homepage.url, home, homepage.text)]
         if report.status == CLEAN:
-            for url in self._candidate_pages(home, host):
-                if len(pages) >= self.max_pages:
-                    break
-                retrieval = await self._retrieve(url, conditional=False)
+            # The reservation is max_pages fetches: count attempts, not successes.
+            for url in self._candidate_pages(home, host)[: max(0, self.max_pages - 1)]:
+                retrieval = await self._retrieve(institution_id, url, result, conditional=False)
                 result.pages.append({"url": retrieval.url, "outcome": retrieval.outcome})
                 if retrieval.ok and _host(retrieval.url) == host:
                     structure = parse_structure(retrieval.text, retrieval.url)
@@ -111,6 +125,10 @@ class OfficialSiteHarvester:
                     pages.append((retrieval.url, structure, retrieval.text))
         regrade(self.store, institution_id, [domain_asset_id])
         anchor = anchor_grade(self.store, institution_id, domain_asset_id)
+        if anchor in ANCHORING_GRADES and not nominated(self.store, institution_id, domain_asset_id):
+            # Official only by inference (a subdomain, Wikidata, a directory): it may
+            # not vouch for accounts until the institution or a reviewer says it is theirs.
+            anchor = "C"
         result.anchor = anchor
         if result.integrity != CLEAN or anchor not in ANCHORING_GRADES:
             result.feeds = list(dict.fromkeys(feed for _, structure, _ in pages for feed in structure.feeds))
@@ -128,14 +146,14 @@ class OfficialSiteHarvester:
                             result.leads.append(link.href)
                     except ValueError:
                         continue
-            for href, position in self._identity_links(structure, page_url):
+            for href, position, text in self._identity_links(structure, page_url):
                 try:
                     ref = asset_ref(href)
                 except ValueError:
                     continue
                 if ref.platform == "website":
                     continue
-                if ref.kind not in {ACCOUNT, GROUP} or self.store.is_suppressed(institution_id, ref.key):
+                if ref.kind not in {ACCOUNT, GROUP} or self.store.is_suppressed(institution_id, ref.key) or not vouchable(entity, ref, position, text):
                     continue
                 seen_on_page.setdefault(page_url, set()).add(ref.key)
                 target_id, created = self.store.upsert_asset(institution_id, ref, entity_id=asset["entity_id"], relation="official", note=f"linked from {host}")
@@ -148,20 +166,20 @@ class OfficialSiteHarvester:
                     result.new_assets.append(ref.key)
         touched |= self._record_removals(institution_id, domain_asset_id, {url for url, _, _ in pages}, seen_on_page, run_id, result)
         self._note_raised(regrade(self.store, institution_id, sorted(touched)), result)
+        # Only a clean, anchored harvest may be reused from a 304 next time.
+        if self.conditional:
+            self.store.record_fetch(institution_id, asset["url"], outcome=homepage.outcome, etag=homepage.etag, last_modified=homepage.last_modified, content_sha256=hashlib.sha256(homepage.body).hexdigest())
         return result
 
     @staticmethod
     def _note_raised(changes: list[dict[str, Any]], result: HarvestResult) -> None:
         result.raised.extend(change["asset_key"] for change in changes if GRADE_RANK.get(change["to"], 1) > GRADE_RANK.get(change["from"], 1) and change["asset_key"] not in result.new_assets)
 
-    async def _retrieve(self, url: str, *, conditional: bool | None = None) -> Retrieval:
+    async def _retrieve(self, institution_id: str, url: str, result: HarvestResult, *, conditional: bool | None = None) -> Retrieval:
         use_cache = self.conditional if conditional is None else conditional
-        state = self.store.fetch_state(url) if use_cache else None
-        retrieval = await self.fetcher.retrieve(url, etag=(state or {}).get("etag"), last_modified=(state or {}).get("last_modified"))
-        if self.conditional:
-            digest = hashlib.sha256(retrieval.body).hexdigest() if retrieval.ok else None
-            self.store.record_fetch(url, outcome=retrieval.outcome, etag=retrieval.etag if retrieval.outcome in {"ok", "not_modified"} else None, last_modified=retrieval.last_modified if retrieval.outcome in {"ok", "not_modified"} else None, content_sha256=digest)
-        return retrieval
+        state = self.store.fetch_state(institution_id, url) if use_cache else None
+        result.requests += 1
+        return await self.fetcher.retrieve(url, etag=(state or {}).get("etag"), last_modified=(state or {}).get("last_modified"))
 
     def _reconfirm(self, institution_id: str, domain_asset_id: str, page_url: str, run_id: str | None, result: HarvestResult) -> set[str]:
         """Repeat the latest official-link observation from an unchanged page (a 304 answer)."""
@@ -219,7 +237,7 @@ class OfficialSiteHarvester:
         for link in home.links:
             if link.position == HIDDEN or _host(link.href) != host:
                 continue
-            if _CONTACT.search(urlparse(link.href).path) or _CONTACT.search(link.text):
+            if is_contact_page(link.href) or _CONTACT.search(link.text):
                 clean = link.href.split("#", 1)[0]
                 if clean.rstrip("/") != home.url.rstrip("/") and clean not in found:
                     found.append(clean)
@@ -228,22 +246,49 @@ class OfficialSiteHarvester:
         return found
 
     @staticmethod
-    def _identity_links(structure: PageStructure, page_url: str) -> list[tuple[str, str]]:
-        """(href, position) of links that declare identity on this page."""
+    def _identity_links(structure: PageStructure, page_url: str) -> list[tuple[str, str, str]]:
+        """(href, position, link text) of links that declare identity on this page."""
 
-        contact_page = bool(_CONTACT.search(urlparse(page_url).path))
-        out: list[tuple[str, str]] = []
+        contact_page = is_contact_page(page_url)
+        out: dict[tuple[str, str], str] = {}
         for link in structure.links:
             if link.position == HIDDEN:
                 continue
             if link.position in IDENTITY_POSITIONS or link.position == HEAD_LINK or (contact_page and link.position == BODY):
-                out.append((link.href, "rel_me" if link.position == HEAD_LINK else ("contact_page" if link.position == BODY else link.position)))
-        out.extend((href, "same_as") for href in structure.same_as)
-        return list(dict.fromkeys(out))
+                position = "rel_me" if link.position == HEAD_LINK else ("contact_page" if link.position == BODY else link.position)
+                out.setdefault((link.href, position), link.text)
+        for href in structure.same_as:
+            out.setdefault((href, "same_as"), "")
+        return [(href, position, text) for (href, position), text in out.items()]
 
 
-def identity_links(structure: PageStructure, page_url: str) -> list[tuple[str, str]]:
-    """(href, position) of the links a page uses to declare its own accounts."""
+# A contact or about page itself, not a page beneath it (/about/principal lists people).
+_CONTACT_PAGE = re.compile(r"^(?:contact|contact[-_]?us|about|about[-_]?us|connect(?:[-_]with[-_]us)?|follow[-_]?us|social(?:[-_]media)?|reach[-_]?us|get[-_]in[-_]touch)(?:\.[a-z]{2,5})?$", re.IGNORECASE)
+
+
+def is_contact_page(url: str) -> bool:
+    segments = [segment for segment in urlparse(url).path.split("/") if segment]
+    return bool(segments) and bool(_CONTACT_PAGE.match(segments[-1]))
+
+
+def vouchable(entity: dict[str, Any] | None, ref: Any, position: str, text: str) -> bool:
+    """Whether an official page's link may vouch for this account as the institution's.
+
+    Header, navigation, footer, rel=me and sameAs links do; a link in the
+    body of a contact page only when the account itself carries the
+    institution's name (a principal's LinkedIn listed there does not); and
+    accounts that always belong to a person only on that same condition.
+    """
+
+    if ref.key.startswith("whatsapp:") and not ref.key.startswith("whatsapp:group:"):
+        return False  # a phone number, not an account the map should publish
+    if position == "contact_page" or person_shaped(ref.key):
+        return entity is not None and names_entity(entity, handle=ref.handle, title=text)
+    return True
+
+
+def identity_links(structure: PageStructure, page_url: str) -> list[tuple[str, str, str]]:
+    """(href, position, link text) of the links a page uses to declare its own accounts."""
 
     return OfficialSiteHarvester._identity_links(structure, page_url)
 
@@ -252,4 +297,4 @@ def best(grades: list[str]) -> str:
     return max(grades, key=lambda value: GRADE_RANK.get(value, 1)) if grades else "unrated"
 
 
-__all__ = ["ANCHORING_GRADES", "HarvestResult", "OfficialSiteHarvester", "identity_links"]
+__all__ = ["ANCHORING_GRADES", "HarvestResult", "OfficialSiteHarvester", "identity_links", "is_contact_page", "vouchable"]

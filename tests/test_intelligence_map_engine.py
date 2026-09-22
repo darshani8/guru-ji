@@ -145,11 +145,12 @@ class SourceStoreTests(unittest.TestCase):
         self.assertTrue(reserve("a", connector="fetch", units=4, day="2026-09-23", global_cap=10, tenant_cap=5), "budgets reset daily")
 
     def test_the_fetch_cache_and_the_run_lock(self):
-        self.assertIsNone(self.store.fetch_state("https://bgscet.ac.in/"))
-        self.store.record_fetch("https://bgscet.ac.in/", outcome="ok", etag='"v1"', last_modified=None, content_sha256="abc")
-        self.store.record_fetch("https://bgscet.ac.in/", outcome="not_modified", etag='"v1"', last_modified="Mon", content_sha256=None)
-        state = self.store.fetch_state("https://bgscet.ac.in/")
+        self.assertIsNone(self.store.fetch_state("bgscet", "https://bgscet.ac.in/"))
+        self.store.record_fetch("bgscet", "https://bgscet.ac.in/", outcome="ok", etag='"v1"', last_modified=None, content_sha256="abc")
+        self.store.record_fetch("bgscet", "https://bgscet.ac.in/", outcome="not_modified", etag='"v1"', last_modified="Mon", content_sha256=None)
+        state = self.store.fetch_state("bgscet", "https://bgscet.ac.in/")
         self.assertEqual((state["etag"], state["last_modified"], state["outcome"], state["content_sha256"]), ('"v1"', "Mon", "not_modified", "abc"))
+        self.assertIsNone(self.store.fetch_state("other", "https://bgscet.ac.in/"), "validators belong to the institution that read the page")
         run = self.store.try_start_map_run("bgscet", kind="tick", lock_seconds=3600)
         self.assertIsNotNone(run)
         self.assertIsNone(self.store.try_start_map_run("bgscet", kind="tick", lock_seconds=3600), "one tick at a time per institution")
@@ -298,14 +299,24 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.store.try_start_map_run("bgscet", kind="tick", lock_seconds=3600)
         self.assertIn("skipped", await engine.tick("bgscet"))
 
-    def test_intervals_adapt_to_yield(self):
+    def test_intervals_adapt_to_yield_and_recover_from_failures(self):
         engine = self.engine()
-        base = {"interval_seconds": 86400, "failure_streak": 0, "origin": "lead"}
-        self.assertEqual(engine._next_interval(base, ConnectorResult(yield_count=2)), 43200)
-        self.assertEqual(engine._next_interval(base, ConnectorResult()), 172800)
-        self.assertEqual(engine._next_interval({**base, "origin": "recurring"}, ConnectorResult()), 86400)
-        self.assertEqual(engine._next_interval({**base, "failure_streak": 9}, ConnectorResult(failed=True)), 30 * 86400, "back-off is capped")
-        self.assertEqual(engine._next_interval({**base, "interval_seconds": 60}, ConnectorResult(yield_count=1)), 3600, "never more often than hourly")
+        base = {"interval_seconds": 86400, "base_interval_seconds": 86400, "failure_streak": 0, "origin": "lead"}
+        self.assertEqual(engine._next_interval(base, ConnectorResult(yield_count=2)), (43200, 43200))
+        self.assertEqual(engine._next_interval(base, ConnectorResult()), (172800, 172800))
+        self.assertEqual(engine._next_interval({**base, "origin": "recurring"}, ConnectorResult()), (86400, 86400))
+        self.assertEqual(engine._next_interval({**base, "failure_streak": 9}, ConnectorResult(failed=True)), (30 * 86400, 86400), "back-off delays the next run only, and is capped")
+        self.assertEqual(engine._next_interval({**base, "interval_seconds": 60, "base_interval_seconds": 60}, ConnectorResult(yield_count=1)), (3600, 3600), "never more often than hourly")
+        # A weekly watch that failed twice and then answers is weekly again.
+        week = {"interval_seconds": 7 * 86400, "base_interval_seconds": 7 * 86400, "failure_streak": 0, "origin": "recurring"}
+        self.assertEqual(engine._next_interval(week, ConnectorResult(failed=True))[1], 7 * 86400)
+        self.assertEqual(engine._next_interval({**week, "failure_streak": 1}, ConnectorResult(failed=True)), (28 * 86400, 7 * 86400))
+        self.assertEqual(engine._next_interval({**week, "interval_seconds": 30 * 86400, "failure_streak": 2}, ConnectorResult()), (7 * 86400, 7 * 86400), "an interval stretched by an old outage comes back to base")
+        self.assertEqual(engine._next_interval({**week, "interval_seconds": 86400}, ConnectorResult()), (2 * 86400, 2 * 86400), "an idle watch drifts back toward base")
+        productive = {"interval_seconds": 14 * 86400, "base_interval_seconds": 14 * 86400, "failure_streak": 0, "origin": "recurring"}
+        for _ in range(10):
+            productive["interval_seconds"] = engine._next_interval(productive, ConnectorResult(yield_count=3))[1]
+        self.assertEqual(productive["interval_seconds"], 14 * 86400 // 8, "yield speeds a source up, but only so far")
 
     async def test_the_job_handler_and_tick_all(self):
         engine = self.engine()
@@ -346,7 +357,7 @@ class RecheckTests(unittest.IsolatedAsyncioTestCase):
         domain_id = sync_profile(store, PROFILE)["domains_added"][0]
         site = Site({"https://bgscet.ac.in/": (200, HOME)}, etags=True)
         await OfficialSiteHarvester(site.fetcher(), store).harvest("bgscet", domain_id)
-        self.assertIsNone(store.fetch_state("https://bgscet.ac.in/"), "a manual harvest does not touch the shared cache")
+        self.assertIsNone(store.fetch_state("bgscet", "https://bgscet.ac.in/"), "a manual harvest does not touch the fetch cache")
 
 
 @unittest.skipUnless(FASTAPI_AVAILABLE, "FastAPI is not installed")

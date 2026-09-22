@@ -26,7 +26,7 @@ if FASTAPI_AVAILABLE:
 NOW = datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)
 KEY = b"test-key"
 PROFILE = InstitutionProfile("bgscet", "BGS College of Engineering and Technology", "Bengaluru", official_domains=["bgscet.ac.in"])
-TOKEN = verification_token(KEY, "bgscet")
+TOKEN = verification_token(KEY, "bgscet", "bgscet.ac.in")
 
 
 def home(token=None):
@@ -39,11 +39,13 @@ def well_known(token, accounts):
 
 
 class TokenTests(unittest.TestCase):
-    def test_tokens_are_keyed_per_institution(self):
-        self.assertEqual(TOKEN, verification_token(KEY, "bgscet"))
-        self.assertNotEqual(TOKEN, verification_token(KEY, "sjbit"), "another tenant cannot reuse it")
-        self.assertNotEqual(TOKEN, verification_token(b"other-key", "bgscet"))
-        guide = instructions(TOKEN, ["bgscet.ac.in"])
+    def test_tokens_are_keyed_per_institution_and_domain(self):
+        self.assertEqual(TOKEN, verification_token(KEY, "bgscet", "www.BGSCET.ac.in"))
+        self.assertNotEqual(TOKEN, verification_token(KEY, "sjbit", "bgscet.ac.in"), "another tenant cannot reuse it")
+        self.assertNotEqual(TOKEN, verification_token(KEY, "bgscet", "old.bgscet.ac.in"), "nor can another host")
+        self.assertNotEqual(TOKEN, verification_token(b"other-key", "bgscet", "bgscet.ac.in"))
+        [guide] = instructions(KEY, "bgscet", ["bgscet.ac.in"])["domains"]
+        self.assertEqual(guide["token"], TOKEN)
         self.assertEqual([item["method"] for item in guide["methods"]], ["meta_tag", "dns_txt", "well_known_file"])
         self.assertIn("https://bgscet.ac.in/.well-known/guruji.json", guide["methods"][2]["how"])
 
@@ -73,7 +75,7 @@ class OwnerConnectorTests(unittest.IsolatedAsyncioTestCase):
         result = await connector.run({"target": self.domain_id}, self.context({"https://bgscet.ac.in/": (200, home(TOKEN))}))
         self.assertEqual(result.outcome, "verified")
         self.assertEqual(self.store.get_asset("bgscet", self.domain_id)["grade"], "O")
-        wrong = await connector.run({"target": self.domain_id}, self.context({"https://bgscet.ac.in/": (200, home(verification_token(KEY, "sjbit")))}))
+        wrong = await connector.run({"target": self.domain_id}, self.context({"https://bgscet.ac.in/": (200, home(verification_token(KEY, "sjbit", "bgscet.ac.in")))}))
         self.assertEqual(wrong.outcome, "no_proof", "another institution's token proves nothing")
         self.assertEqual(self.store.get_asset("bgscet", self.domain_id)["grade"], "A", "the token is gone: back to what the rest of the evidence says")
 
@@ -96,6 +98,21 @@ class OwnerConnectorTests(unittest.IsolatedAsyncioTestCase):
         forged = await connector.run({"target": self.domain_id}, self.context(pages))
         self.assertEqual(forged.outcome, "no_proof", "a file without the institution's token is ignored")
 
+    async def test_a_domain_official_only_by_inference_is_never_checked(self):
+        from app.internet_intelligence.map.assets import asset_ref
+
+        # A subdomain the map inferred (say a dangling one someone took over) copies the site's token and lists its own account.
+        sub_id, _ = self.store.upsert_asset("bgscet", asset_ref("https://old.bgscet.ac.in/"), entity_id=None, relation="official")
+        self.store.add_evidence("bgscet", asset_id=sub_id, kind="subdomain", detail="A:bgscet.ac.in", source_asset_id=self.domain_id, channel="dns", observed_via="live")
+        regrade(self.store, "bgscet", [sub_id])
+        connector = OwnerClaimsConnector(key=KEY)
+        self.assertEqual([lead.target for lead in connector.plan(self.context({}))], [self.domain_id], "only the domain the institution configured")
+        pages = {"https://old.bgscet.ac.in/": (200, home(TOKEN)), f"https://old.bgscet.ac.in{WELL_KNOWN_PATH}": well_known(TOKEN, ["https://www.instagram.com/fake_college/"])}
+        result = await connector.run({"target": sub_id}, self.context(pages))
+        self.assertEqual(result.outcome, "not_nominated")
+        self.assertIsNone(self.store.find_asset("bgscet", "instagram:fake_college"))
+        self.assertNotEqual(self.store.get_asset("bgscet", sub_id)["grade"], "O")
+
     async def test_dns_txt_is_checked_only_when_dns_is_allowed(self):
         client = api({("dns.google", "/resolve"): (200, {"Status": 0, "Answer": [{"data": f'"{META_NAME}={TOKEN}"'}, {"data": '"v=spf1 -all"'}]})})
         result = await OwnerClaimsConnector(key=KEY, dns=client).run({"target": self.domain_id}, self.context({"https://bgscet.ac.in/": (200, home())}))
@@ -115,7 +132,7 @@ class OwnershipServiceTests(unittest.TestCase):
         manager = principal(PrincipalType.PRINCIPAL, college_id="bgscet")
         with self.assertRaises(PermissionError):
             service.ownership(principal(PrincipalType.FACULTY, college_id="bgscet"), "bgscet")
-        self.assertEqual(service.ownership(manager, "bgscet")["token"], TOKEN)
+        self.assertEqual([(item["domain"], item["token"]) for item in service.ownership(manager, "bgscet")["domains"]], [("bgscet.ac.in", TOKEN)])
         verified = asyncio.run(service.verify_ownership(manager, "bgscet"))
         self.assertEqual(verified["results"][0]["outcome"], "verified")
         self.assertEqual([item["asset_key"] for item in verified["confirmed"]], ["web:bgscet.ac.in"])
@@ -151,7 +168,7 @@ class OwnershipRouteTests(unittest.TestCase):
         with mock.patch.object(platform, "intelligence_map", MapService(store)):
             shown = client.get("/v1/intelligence/map/ownership", headers=headers)
             self.assertEqual(shown.status_code, 200)
-            self.assertEqual(shown.json()["token"], verification_token(KEY, "own_college"))
+            self.assertEqual(shown.json()["domains"], [], "no configured domain yet, so nothing to confirm")
             self.assertEqual(client.get("/v1/intelligence/map/ownership", headers={**headers, "X-Demo-Role": "faculty"}).status_code, 403)
             self.assertEqual(client.post("/v1/intelligence/map/ownership/verify", headers=headers, json={}).status_code, 422, "no fetcher configured")
             suppressed = client.post("/v1/intelligence/map/suppress", headers=headers, json={"identifier": "https://www.instagram.com/some.person/", "reason": "a person's account"})

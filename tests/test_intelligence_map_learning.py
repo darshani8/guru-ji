@@ -70,8 +70,7 @@ class PriorityTests(Base):
         self.store.complete_source(INSTITUTION, productive, outcome="ok", next_due=NOW.isoformat(), interval_seconds=3600, yield_count=5, cost=1, failed=False)
         self.assertAlmostEqual(self.store.get_source(INSTITUTION, productive)["priority"], 1.5)
         engine = MapEngine(self.store, ConnectorRegistry(), EngineConfig(sources_per_tick=2, class_split=(("explore", 1.0),)), clock=lambda: NOW)
-        with mock.patch.object(engine.registry, "names", return_value=["lead_page"]):
-            claimed = [row["target"] for row in engine._claim(INSTITUTION, "w")]
+        claimed = [row["target"] for row in engine._claim(INSTITUTION, "w", connectors=["lead_page"], total=2)]
         self.assertEqual(claimed[0], "https://good.example/", "the productive source first")
         self.assertIn(claimed[1], {f"https://old{index}.example/" for index in range(4)}, "and the longest overdue next")
         self.store.complete_source(INSTITUTION, productive, outcome="ok", next_due=NOW.isoformat(), interval_seconds=3600, yield_count=0, cost=1, failed=False)

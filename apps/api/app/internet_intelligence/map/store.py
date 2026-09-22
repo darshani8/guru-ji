@@ -248,6 +248,20 @@ _STATEMENTS: tuple[str, ...] = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS idx_intel_incidents_open ON intel_incidents(institution_id, status, severity)",
+    # Conditional-request validators, per institution: a 304 answer is only
+    # meaningful against this institution's own last reading of the page.
+    """
+    CREATE TABLE IF NOT EXISTS intel_fetch_validators (
+        institution_id TEXT NOT NULL,
+        url_sha256 TEXT NOT NULL,
+        etag TEXT,
+        last_modified TEXT,
+        outcome TEXT NOT NULL,
+        content_sha256 TEXT,
+        fetched_at TEXT NOT NULL,
+        PRIMARY KEY(institution_id, url_sha256)
+    )
+    """,
     # Global tables: public-web metadata and platform-wide spend, never tenant
     # data, so they stay outside row-level security and a tick can use them
     # for every institution.
@@ -260,16 +274,7 @@ _STATEMENTS: tuple[str, ...] = (
         PRIMARY KEY(day, connector)
     )
     """,
-    """
-    CREATE TABLE IF NOT EXISTS intel_fetch_state (
-        url_sha256 TEXT PRIMARY KEY,
-        etag TEXT,
-        last_modified TEXT,
-        outcome TEXT NOT NULL,
-        content_sha256 TEXT,
-        fetched_at TEXT NOT NULL
-    )
-    """,
+
 )
 # Columns added after the table first existed; created where missing at start-up.
 ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
@@ -277,9 +282,11 @@ ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("intel_assets", "registration_expires_at", "TEXT"),
     # A running average of what a source yields; productive sources are claimed first.
     ("intel_sources", "priority", "REAL NOT NULL DEFAULT 0"),
+    # The interval a source started with; adaptive intervals move around it.
+    ("intel_sources", "base_interval_seconds", "INTEGER"),
 )
-TENANT_TABLES: tuple[str, ...] = ("intel_entities", "intel_assets", "intel_evidence", "intel_gold_items", "intel_suppression", "intel_map_runs", "intel_sources", "intel_quota", "intel_review_items", "intel_incidents")
-GLOBAL_TABLES: tuple[str, ...] = ("intel_budget_ledger", "intel_fetch_state")
+TENANT_TABLES: tuple[str, ...] = ("intel_entities", "intel_assets", "intel_evidence", "intel_gold_items", "intel_suppression", "intel_map_runs", "intel_sources", "intel_quota", "intel_review_items", "intel_incidents", "intel_fetch_validators")
+GLOBAL_TABLES: tuple[str, ...] = ("intel_budget_ledger",)
 SOURCE_CLASSES = frozenset({"rotation", "recheck", "explore"})
 REVIEW_KINDS = frozenset({"impersonation_candidate", "court_record", "dispute", "canary_leak", "run_gate", "candidate_account"})
 REVIEW_STATUSES = frozenset({"open", "decided", "expired"})
@@ -323,7 +330,7 @@ def render_sql_migration() -> str:
 
 
 class MapStoreScheduling:
-    """Sources, leases, budgets and the shared fetch cache (mixed into MapStore)."""
+    """Sources, leases, budgets and per-institution fetch validators (mixed into MapStore)."""
 
     backend: SqlBackend
 
@@ -352,8 +359,9 @@ class MapStoreScheduling:
                 return str(existing["source_id"]), False
             source_id = f"isrc-{uuid4().hex}"
             self.backend.execute(
-                "INSERT INTO intel_sources(source_id, institution_id, connector, target, entity_id, asset_id, topic, origin, work_class, hops, due_at, interval_seconds, expires_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (source_id, institution_id, connector, target, entity_id, asset_id, topic[:100], origin, work_class, max(0, hops), due_at or stamp, max(60, int(interval_seconds)), expires_at, stamp, stamp),
+                "INSERT INTO intel_sources(source_id, institution_id, connector, target, entity_id, asset_id, topic, origin, work_class, hops, due_at, interval_seconds, base_interval_seconds, expires_at, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (source_id, institution_id, connector, target, entity_id, asset_id, topic[:100], origin, work_class, max(0, hops), due_at or stamp, max(60, int(interval_seconds)), max(60, int(interval_seconds)), expires_at, stamp, stamp),
             )
             return source_id, True
 
@@ -511,16 +519,18 @@ class MapStoreScheduling:
         return {str(row["connector"]): {"units": float(row["units"]), "calls": int(row["calls"])} for row in rows}
 
     # -------------------------------------------------------------- fetch cache
-    def fetch_state(self, url: str) -> dict[str, Any] | None:
-        with self.backend.transaction():
-            return self.backend.fetchone("SELECT * FROM intel_fetch_state WHERE url_sha256 = ?", (hashlib.sha256(url.encode("utf-8")).hexdigest(),))
+    def fetch_state(self, institution_id: str, url: str) -> dict[str, Any] | None:
+        with self._tenant(institution_id):
+            return self.backend.fetchone("SELECT * FROM intel_fetch_validators WHERE institution_id = ? AND url_sha256 = ?", (institution_id, hashlib.sha256(url.encode("utf-8")).hexdigest()))
 
-    def record_fetch(self, url: str, *, outcome: str, etag: str | None, last_modified: str | None, content_sha256: str | None) -> None:
+    def record_fetch(self, institution_id: str, url: str, *, outcome: str, etag: str | None, last_modified: str | None, content_sha256: str | None) -> None:
         key = hashlib.sha256(url.encode("utf-8")).hexdigest()
-        with self.backend.transaction():
+        with self._tenant(institution_id):
             self.backend.execute(
-                "INSERT INTO intel_fetch_state(url_sha256, etag, last_modified, outcome, content_sha256, fetched_at) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (url_sha256) DO UPDATE SET etag = excluded.etag, last_modified = excluded.last_modified, outcome = excluded.outcome, content_sha256 = COALESCE(excluded.content_sha256, intel_fetch_state.content_sha256), fetched_at = excluded.fetched_at",
-                (key, etag, last_modified, outcome[:40], content_sha256, now_iso()),
+                "INSERT INTO intel_fetch_validators(institution_id, url_sha256, etag, last_modified, outcome, content_sha256, fetched_at) VALUES (?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT (institution_id, url_sha256) DO UPDATE SET etag = excluded.etag, last_modified = excluded.last_modified, outcome = excluded.outcome, "
+                "content_sha256 = COALESCE(excluded.content_sha256, intel_fetch_validators.content_sha256), fetched_at = excluded.fetched_at",
+                (institution_id, key, etag, last_modified, outcome[:40], content_sha256, now_iso()),
             )
 
     # ---------------------------------------------------------------- run lock
@@ -635,35 +645,50 @@ class MapStoreReview:
         with self._tenant(institution_id):
             self.backend.execute("UPDATE intel_assets SET relation = ?, updated_at = ? WHERE institution_id = ? AND asset_id = ?", (relation, now_iso(), institution_id, asset_id))
 
-    def prune_sources_for(self, institution_id: str, *, asset_id: str, url: str) -> int:
-        """Stop following an asset and the leads found on its host (it was rejected)."""
+    def prune_sources_for(self, institution_id: str, *, asset_id: str, url: str, whole_host: bool = False) -> int:
+        """Stop following a rejected asset, and (for a rejected website) the leads found on its host.
 
-        host = urlparse(url).hostname or ""
+        A social account shares its host with every other account on that
+        platform, so only the account's own sources are pruned for it.
+        """
+
+        stamp = now_iso()
         with self._tenant(institution_id):
-            pruned = self.backend.execute("UPDATE intel_sources SET status = 'pruned', updated_at = ? WHERE institution_id = ? AND status = 'active' AND (asset_id = ? OR target = ?)", (now_iso(), institution_id, asset_id, asset_id))
-            if host:
+            pruned = self.backend.execute("UPDATE intel_sources SET status = 'pruned', updated_at = ? WHERE institution_id = ? AND status = 'active' AND (asset_id = ? OR target = ? OR target = ?)", (stamp, institution_id, asset_id, asset_id, url))
+            host = (urlparse(url).hostname or "").lower()
+            if whole_host and host:
                 pruned += self.backend.execute(
                     "UPDATE intel_sources SET status = 'pruned', updated_at = ? WHERE institution_id = ? AND status = 'active' AND (target LIKE ? OR target LIKE ?)",
-                    (now_iso(), institution_id, f"https://{host}/%", f"http://{host}/%"),
+                    (stamp, institution_id, f"https://{host}/%", f"http://{host}/%"),
                 )
         return pruned
 
-    def forget_asset(self, institution_id: str, asset_id: str) -> bool:
+    def forget_asset(self, institution_id: str, asset_id: str, *, keep_review_id: str | None = None) -> bool:
         """Remove an asset, its evidence and its sources entirely.
 
         The evidence log is otherwise append-only; this is the one exception,
         for an account that turned out to be a person's: the map keeps only a
         keyed fingerprint (the suppression list) so it is never added again.
+        Every review item and incident that named it is redacted too
+        (``keep_review_id`` is left for the caller that is deciding it).
         """
 
+        stamp = now_iso()
         with self._tenant(institution_id):
             asset = self.backend.fetchone("SELECT asset_key, url FROM intel_assets WHERE institution_id = ? AND asset_id = ?", (institution_id, asset_id))
             if asset is None:
                 return False
+            self.backend.execute(
+                "UPDATE intel_review_items SET title = 'a personal account (removed from the map)', detail = '', url = '', asset_id = NULL, updated_at = ?, "
+                "status = CASE WHEN status = 'open' THEN 'decided' ELSE status END, decision = CASE WHEN status = 'open' THEN 'personal' ELSE decision END, "
+                "decided_by = CASE WHEN status = 'open' THEN 'system:suppression' ELSE decided_by END, decided_at = CASE WHEN status = 'open' THEN ? ELSE decided_at END "
+                "WHERE institution_id = ? AND (asset_id = ? OR url = ?) AND review_id <> ?",
+                (stamp, stamp, institution_id, asset_id, asset["url"], keep_review_id or ""),
+            )
+            self.backend.execute("DELETE FROM intel_incidents WHERE institution_id = ? AND target = ?", (institution_id, asset["asset_key"]))
             self.backend.execute("DELETE FROM intel_evidence WHERE institution_id = ? AND asset_id = ?", (institution_id, asset_id))
             self.backend.execute("DELETE FROM intel_sources WHERE institution_id = ? AND (asset_id = ? OR target = ? OR target = ?)", (institution_id, asset_id, asset_id, asset["url"]))
             self.backend.execute("DELETE FROM intel_gold_items WHERE institution_id = ? AND asset_key = ?", (institution_id, asset["asset_key"]))
-            self.backend.execute("UPDATE intel_review_items SET asset_id = NULL WHERE institution_id = ? AND asset_id = ?", (institution_id, asset_id))
             self.backend.execute("DELETE FROM intel_assets WHERE institution_id = ? AND asset_id = ?", (institution_id, asset_id))
         return True
 

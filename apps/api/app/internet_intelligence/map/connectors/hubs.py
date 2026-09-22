@@ -16,7 +16,7 @@ from urllib.parse import urlparse
 
 from ..assets import ACCOUNT, DOMAIN, GROUP, asset_ref
 from ..integrity import CLEAN, assess
-from ..pipeline import anchor_grade
+from ..pipeline import anchor_grade, lose_anchor
 from ..structure import BODY, HIDDEN, parse_structure
 from .base import ConnectorContext, ConnectorResult, Lead
 from .common import FAILED_OUTCOMES, match_entity, names_entity
@@ -67,9 +67,13 @@ class LinkHubConnector:
             return ConnectorResult(outcome="asset_missing", prune=True)
         retrieval = await context.fetcher.retrieve(hub["url"])
         if not retrieval.ok:
+            if retrieval.outcome in {"not_found", "gone"}:
+                # A deleted hub no longer vouches for what it listed.
+                lose_anchor(context.store, context.institution_id, hub["asset_id"], reason=retrieval.outcome, run_id=context.run_id)
             return ConnectorResult(outcome=retrieval.outcome, failed=retrieval.outcome in FAILED_OUTCOMES)
         structure = parse_structure(retrieval.text, retrieval.url)
         if assess(structure, retrieval.text).status != CLEAN:
+            lose_anchor(context.store, context.institution_id, hub["asset_id"], reason="unhealthy", run_id=context.run_id)
             return ConnectorResult(outcome="unhealthy")
         hub_grade = anchor_grade(context.store, context.institution_id, hub["asset_id"])
         hub_grade = hub_grade if hub_grade in {"O", "A", "B"} else "C"

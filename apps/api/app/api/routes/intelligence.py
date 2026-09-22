@@ -114,7 +114,7 @@ async def run_monitor(request: Request, institution_id: str | None = None, backg
     if platform.monitor is None:
         raise HTTPException(status_code=503, detail="monitoring is not configured")
     if background:
-        job_id = platform.jobs.enqueue(target, "intelligence.monitor", {"institution_id": target})
+        job_id = platform.jobs.enqueue(target, "intelligence.monitor", {"institution_id": target, "requested_by": principal.principal_id})
         return {"accepted": True, "job_id": job_id}
     try:
         return await platform.monitor.run_for(target)

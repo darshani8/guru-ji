@@ -56,13 +56,18 @@ class FeedConnector:
             return ConnectorResult(outcome="fetching_disabled", failed=True)
         url = str(source["target"])
         youtube = _YOUTUBE_FEED.match(url)
-        state = context.store.fetch_state(url) or {}
+        state = context.store.fetch_state(context.institution_id, url) or {}
         # YouTube pages are never fetched; its channel feed is a machine
         # endpoint published for exactly this, and robots.txt still applies.
         retrieval = await context.fetcher.retrieve(url, accept=FEED_TYPES, etag=state.get("etag"), last_modified=state.get("last_modified"), check_domain=youtube is None)
         keep = retrieval.outcome in {"ok", "not_modified"}
-        context.store.record_fetch(url, outcome=retrieval.outcome, etag=retrieval.etag if keep else None, last_modified=retrieval.last_modified if keep else None, content_sha256=None)
-        asset_id = source.get("asset_id")
+        context.store.record_fetch(context.institution_id, url, outcome=retrieval.outcome, etag=retrieval.etag if keep else None, last_modified=retrieval.last_modified if keep else None, content_sha256=None)
+        if youtube:
+            # A channel feed speaks for that channel only, whatever page declared it.
+            channel = context.store.find_asset(context.institution_id, f"youtube:channel:{youtube.group(1)}")
+            asset_id = channel["asset_id"] if channel else None
+        else:
+            asset_id = source.get("asset_id")
         result = ConnectorResult(outcome=retrieval.outcome, failed=retrieval.outcome in FAILED_OUTCOMES, etag=retrieval.etag, last_modified=retrieval.last_modified)
         if youtube and asset_id:
             # Only a channel's own feed speaks to the channel being alive.

@@ -39,9 +39,18 @@ def regrade(store: MapStore, institution_id: str, asset_ids: Iterable[str] | Non
     grades.update({asset_id: result.grade for asset_id, result in results.items()})
     disputed = apply_disputes(peers.values(), grades)
     changes: list[dict[str, Any]] = []
+    # A dispute ends for the whole group once one account is anchored or the
+    # others are refuted: members graded now or not, none stays 'disputed'.
+    for peer_id, peer in peers.items():
+        if peer_id in results:
+            continue
+        if peer["status"] == "disputed" and peer_id not in disputed:
+            store.set_status(institution_id, peer_id, status="unknown")
+        elif peer_id in disputed and peer["status"] != "disputed":
+            store.set_status(institution_id, peer_id, status="disputed")
     for asset_id, result in results.items():
         asset = assets[asset_id]
-        status = "disputed" if asset_id in disputed else result.status
+        status = "disputed" if asset_id in disputed else (result.status or ("unknown" if asset["status"] == "disputed" else None))
         if status and status != asset["status"]:
             store.set_status(institution_id, asset_id, status=status, verified_via=result.verified_via, verified_at=result.verified_at)
         elif result.verified_at and result.verified_at != asset.get("last_verified_at"):
@@ -75,6 +84,50 @@ def sync_profile(store: MapStore, profile: InstitutionProfile, *, run_id: str | 
     return {"entity_id": entity_id, "domains_added": created}
 
 
+# Evidence that the institution itself (or a person acting for it, or a
+# regulator) says a domain is its own. Only such a domain vouches for accounts.
+_NOMINATING = frozenset({"configured_domain", "owner_claim", "reviewer_confirm"})
+
+
+def nominated(store: MapStore, institution_id: str, asset_id: str) -> bool:
+    """Whether the institution, a reviewer or a regulator named this domain as the institution's."""
+
+    for row in store.evidence_for(institution_id, [asset_id])[asset_id]:
+        if row["polarity"] != "supports":
+            continue
+        if row["kind"] in _NOMINATING or (row["kind"] == "directory_record" and str(row["detail"]).startswith("authority:")):
+            return True
+    return False
+
+
+def lose_anchor(store: MapStore, institution_id: str, source_asset_id: str, *, reason: str, run_id: str | None = None) -> list[str]:
+    """Record that a domain or hub no longer vouches for what it linked (it died, lapsed or was taken over).
+
+    Each account it vouched for gets one ``anchor_lost`` row (repeated
+    failures add nothing more); the grader then treats the old live links as
+    history ("was official then", A-arch) until a healthy fetch links them again.
+    Returns the accounts affected, already regraded.
+    """
+
+    linked: dict[str, str] = {}  # asset -> latest time the source vouched for it
+    lost_at: dict[str, str] = {}  # asset -> latest anchor_lost from this source
+    for kind in ("official_link", "hub_link", "subdomain"):
+        for row in store.links_from(institution_id, source_asset_id, kind=kind):
+            if row["polarity"] == "supports":
+                linked[row["asset_id"]] = max(linked.get(row["asset_id"], ""), str(row["observed_at"]))
+    for row in store.links_from(institution_id, source_asset_id, kind="anchor_lost"):
+        lost_at[row["asset_id"]] = max(lost_at.get(row["asset_id"], ""), str(row["observed_at"]))
+    lost: list[str] = []
+    for asset_id, vouched in linked.items():
+        if lost_at.get(asset_id, "") >= vouched:
+            continue  # already recorded for this loss
+        store.add_evidence(institution_id, asset_id=asset_id, kind="anchor_lost", polarity="refutes", detail=reason[:80], source_asset_id=source_asset_id, channel="anchor", observed_via="live", run_id=run_id)
+        lost.append(asset_id)
+    if lost:
+        regrade(store, institution_id, lost)
+    return lost
+
+
 def anchor_grade(store: MapStore, institution_id: str, asset_id: str | None) -> str:
     if not asset_id:
         return "C"
@@ -90,4 +143,4 @@ def unique(items: Sequence[str]) -> list[str]:
     return list(dict.fromkeys(items))
 
 
-__all__ = ["anchor_grade", "regrade", "sync_profile", "unique"]
+__all__ = ["anchor_grade", "lose_anchor", "nominated", "regrade", "sync_profile", "unique"]

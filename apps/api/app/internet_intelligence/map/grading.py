@@ -71,6 +71,7 @@ def grade(asset: Mapping[str, Any], evidence: Sequence[Mapping[str, Any]], *, no
     supports = [item for item in ordered if item.get("polarity") == "supports"]
     refutes = [item for item in ordered if item.get("polarity") == "refutes"]
     status = _status(ordered, current)
+    takeover = _takeover(ordered)
     live = [item for item in supports if item.get("observed_via") in {"live", "owner", "reviewer"}]
     verified = live[-1] if live else None
     verified_at = str(verified["observed_at"]) if verified else None
@@ -83,14 +84,17 @@ def grade(asset: Mapping[str, Any], evidence: Sequence[Mapping[str, Any]], *, no
             later = [s for s in supports if s.get("kind") in {"owner_claim", "reviewer_confirm"} and _when(s.get("observed_at")) > _when(item.get("observed_at"))]
             if not later:
                 return GradeResult("D", [f"{kind}: {_detail(item)[:120]}"], status, verified_at, verified_via)
-        if kind == "integrity" and _detail(item).split(":", 1)[0] in {"parked", "hijacked"}:
-            return GradeResult("D", [f"domain {_detail(item).split(':', 1)[0]}"], status, verified_at, verified_via)
+    if takeover:
+        return GradeResult("D", [f"domain {takeover}"], status, verified_at, verified_via)
     if status == "dead":
         return GradeResult("D", ["dead on two checks at least a day apart"], status, verified_at, verified_via)
 
     # -- O / A / A-arch / B / C from supporting evidence. An official link that
     # a later clean fetch of the same page no longer found stops counting.
     withdrawn = {str(item.get("source_url")): _when(item.get("observed_at")) for item in refutes if item.get("kind") == "official_link"}
+    # A domain or hub that died, lapsed or was taken over no longer vouches:
+    # what it linked before then is history ("was official then").
+    anchor_lost = {str(item.get("source_asset_id")): _when(item.get("observed_at")) for item in refutes if item.get("kind") == "anchor_lost" and item.get("source_asset_id")}
     # The owner can take a confirmation back (token removed, account delisted).
     owner_withdrawn = {str(item.get("channel")): _when(item.get("observed_at")) for item in refutes if item.get("kind") == "owner_claim"}
     latest_integrity = _latest_integrity(ordered)
@@ -104,6 +108,12 @@ def grade(asset: Mapping[str, Any], evidence: Sequence[Mapping[str, Any]], *, no
         if item.get("kind") == "official_link" and str(item.get("source_url")) in withdrawn and withdrawn[str(item.get("source_url"))] > _when(item.get("observed_at")):
             continue
         kind, via, detail = item.get("kind"), item.get("observed_via"), _detail(item)
+        stale = str(item.get("source_asset_id")) in anchor_lost and anchor_lost[str(item.get("source_asset_id"))] > _when(item.get("observed_at"))
+        if stale and kind == "official_link" and via == "live":
+            via = "archive"
+        elif stale and kind in {"hub_link", "subdomain"}:
+            candidates.append(("C", f"{kind.replace('_', ' ')} from a source that no longer vouches ({detail[:80]})"))
+            continue
         if kind == "owner_claim" and via == "owner":
             if owner_withdrawn.get(str(item.get("channel")), datetime.min.replace(tzinfo=timezone.utc)) < _when(item.get("observed_at")):
                 candidates.append(("O", f"owner confirmed ({detail[:80]})"))
@@ -167,16 +177,53 @@ def _latest_integrity(ordered: Sequence[Mapping[str, Any]]) -> list[Mapping[str,
     return latest[-1:] if latest else []
 
 
+def _latest_integrity_by_channel(ordered: Sequence[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]]:
+    """The newest integrity observation from each channel (the site's own pages, DNS, ...)."""
+
+    latest: dict[str, Mapping[str, Any]] = {}
+    for item in ordered:
+        if item.get("kind") == "integrity":
+            latest[str(item.get("channel") or "")] = item
+    return latest
+
+
+def _confirmed_after(ordered: Sequence[Mapping[str, Any]], moment: datetime) -> bool:
+    return any(
+        item.get("polarity") == "supports" and item.get("kind") in {"owner_claim", "reviewer_confirm"} and item.get("observed_via") in {"owner", "reviewer"} and _when(item.get("observed_at")) > moment
+        for item in ordered
+    )
+
+
+def _takeover(ordered: Sequence[Mapping[str, Any]]) -> str | None:
+    """'hijacked' or 'parked' while the domain is out of the institution's hands, else None.
+
+    A hijacker can serve a page that looks clean, so a hijack stands until
+    the owner or a reviewer confirms the domain again. A parked lander is
+    cleared as soon as each channel that saw it sees a healthy page (the
+    registration was renewed), or by the same confirmation.
+    """
+
+    for item in ordered:
+        if item.get("kind") == "integrity" and item.get("polarity") == "refutes" and _detail(item).startswith("hijacked") and not _confirmed_after(ordered, _when(item.get("observed_at"))):
+            return "hijacked"
+    for item in _latest_integrity_by_channel(ordered).values():
+        if item.get("polarity") == "refutes" and _detail(item).startswith("parked") and not _confirmed_after(ordered, _when(item.get("observed_at"))):
+            return "parked"
+    return None
+
+
 def _status(ordered: Sequence[Mapping[str, Any]], now: datetime) -> str | None:
     """The status the latest observations imply; None leaves the stored status alone."""
 
     integrity = _latest_integrity(ordered)
-    if integrity:
-        verdict = _detail(integrity[0]).split(":", 1)[0]
-        if integrity[0].get("polarity") == "refutes" and verdict in {"parked", "hijacked", "compromised"}:
-            return verdict
-        if integrity[0].get("polarity") == "refutes" and verdict == "redirects_offsite":
-            return "redirected"
+    takeover = _takeover(ordered)
+    if takeover:
+        return takeover
+    verdicts = {_detail(item).split(":", 1)[0] for item in _latest_integrity_by_channel(ordered).values() if item.get("polarity") == "refutes"}
+    if "compromised" in verdicts:
+        return "compromised"
+    if "redirects_offsite" in verdicts:
+        return "redirected"
     liveness = [item for item in ordered if item.get("kind") == "liveness"]
     if not liveness:
         return "live" if integrity else None
@@ -207,6 +254,9 @@ def apply_disputes(assets: Iterable[Mapping[str, Any]], grades: Mapping[str, str
 
     groups: dict[tuple[str, str], list[str]] = {}
     for asset in assets:
+        # A refuted account (an impostor a reviewer rejected) disputes nothing.
+        if grades.get(str(asset.get("asset_id")), asset.get("grade")) == "D":
+            continue
         if asset.get("relation") == "official" and asset.get("entity_id") and asset.get("kind") == "account":
             groups.setdefault((str(asset["entity_id"]), str(asset["platform"])), []).append(str(asset["asset_id"]))
     capped: dict[str, str] = {}

@@ -44,8 +44,9 @@ your website's footer or header: that alone makes them A.
 
 ## Confirming ownership (grade O)
 
-Your institution's map managers can see your ownership token in the map
-(`GET /v1/intelligence/map/ownership`). Publish it in any one of these ways:
+Your institution's map managers can see an ownership token for each of your
+own domains in the map (`GET /v1/intelligence/map/ownership`). Each domain
+has its own token; publish it on that domain in any one of these ways:
 
 1. A meta tag in the `<head>` of your homepage:
 
@@ -75,8 +76,10 @@ Your institution's map managers can see your ownership token in the map
 
 Any one method confirms the domain. Accounts listed in the file are graded
 O. To withdraw one, remove it from the list; the map checks weekly (managers
-can also run the check at once). The token is tied to your institution on
-this platform and reveals nothing else.
+can also run the check at once). The token is tied to your institution and
+to that one domain on this platform: a copy on any other host proves
+nothing, and it reveals nothing else. Only domains your institution
+configured (or a reviewer confirmed) are checked.
 
 ## When something is wrong
 
