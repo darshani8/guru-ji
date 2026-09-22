@@ -8,6 +8,7 @@ from typing import AsyncIterator
 from fastapi import FastAPI, HTTPException
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api.dependencies import build_runtime
@@ -70,8 +71,23 @@ app.include_router(documents_router)
 app.include_router(intelligence_router)
 app.include_router(intelligence_map_router)
 app.include_router(platform_router)
+
+# Two separate browser apps: the client assistant at `/` and the developer
+# platform console at `/console/`. They share only the sign-in client and base
+# styles under `/shared/`; neither links to the other. The console is mounted
+# only when enabled, so a client-facing deployment does not serve it at all.
 web_root = Path(__file__).resolve().parents[2] / "web"
 if web_root.exists():
-    app.mount("/", StaticFiles(directory=web_root, html=True), name="web")
+    app.mount("/shared", StaticFiles(directory=web_root / "shared"), name="web-shared")
+    if settings.web_console_enabled:
+
+        @app.get("/console", include_in_schema=False)
+        @app.get("/platform.html", include_in_schema=False)  # the console's previous address
+        async def console_entry() -> RedirectResponse:
+            # The `/` mount below would otherwise answer these paths with a 404.
+            return RedirectResponse("/console/")
+
+        app.mount("/console", StaticFiles(directory=web_root / "console", html=True), name="web-console")
+    app.mount("/", StaticFiles(directory=web_root / "assistant", html=True), name="web-assistant")
 
 __all__ = ["app"]

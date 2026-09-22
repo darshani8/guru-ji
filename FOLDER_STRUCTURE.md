@@ -359,7 +359,9 @@ apps/api/app/
 ├── platform_tools/        # registered tools per domain group
 ├── storage/               # object store backends
 └── workers/               # job queue backends and handlers
-apps/web/platform.html, platform.js   # platform console
+apps/web/assistant/                   # client text/voice assistant, served at /
+apps/web/console/                     # developer platform console, served at /console/
+apps/web/shared/                      # sign-in client and base styles used by both
 migrations/002_institution_data.sql   # canonical schema + RLS (generated from the canonical model)
 scripts/run_worker.py, run_monitor.py, platform_smoke.py, export_openapi.py
 docs/PLATFORM_BLUEPRINT.md            # blueprint -> implementation map

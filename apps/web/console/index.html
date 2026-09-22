@@ -4,22 +4,23 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="theme-color" content="#102a43">
-  <meta name="description" content="Guru Ji institutional intelligence platform console">
+  <meta name="description" content="Guru Ji platform console for developers">
+  <meta name="robots" content="noindex, nofollow">
   <title>Guru Ji — Platform console</title>
-  <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/shared/styles.css">
+  <link rel="stylesheet" href="/console/console.css">
 </head>
-<body>
+<body data-auth-return-path="/console/">
   <main class="app platform">
     <header class="topbar">
       <div class="brand">
         <div class="brand-mark">GJ</div>
         <div>
           <div class="brand-name">Guru Ji</div>
-          <span class="brand-subtitle">Institutional intelligence platform</span>
+          <span class="brand-subtitle">Developer platform console</span>
         </div>
       </div>
       <div class="topbar-end">
-        <a class="nav-link" href="/">Assistant</a>
         <div id="api-status" class="status neutral" role="status" aria-live="polite">
           <span class="status-dot"></span>
           <span id="api-status-label">Connecting…</span>
@@ -176,7 +177,7 @@
   </main>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
-  <script src="/auth.js" defer></script>
-  <script src="/platform.js" defer></script>
+  <script src="/shared/auth.js" defer></script>
+  <script src="/console/console.js" defer></script>
 </body>
 </html>

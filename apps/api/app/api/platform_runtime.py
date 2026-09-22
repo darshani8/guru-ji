@@ -224,7 +224,7 @@ def map_connectors(settings: AppSettings, *, transport: Any | None = None) -> Co
     ])
 
 
-def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: PolicyDecisionPoint, tracer: TraceRecorder, model: TextModel | None, institution_store: InstitutionDataStore | None = None, objects: ObjectStore | None = None, search_provider: Any | None = None, start_workers: bool = False) -> PlatformRuntime:
+def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: PolicyDecisionPoint, tracer: TraceRecorder, model: TextModel | None, planner_model: TextModel | None = None, institution_store: InstitutionDataStore | None = None, objects: ObjectStore | None = None, search_provider: Any | None = None, start_workers: bool = False) -> PlatformRuntime:
     """Assemble the platform.
 
     ``start_workers`` is set only by processes meant to run background jobs
@@ -251,7 +251,8 @@ def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: P
     if settings.job_queue == "thread" and start_workers and institution_store is None and database_url not in _SHARED_ONLY_URLS:
         worker_store = InstitutionDataStore(database_url)
     jobs = _job_queue(settings, store, worker_store)
-    model_planner = ModelPlanner(model) if (settings.agent_planner == "model" and model is not None) else None
+    planner_model = planner_model or model
+    model_planner = ModelPlanner(planner_model) if (settings.agent_planner == "model" and planner_model is not None) else None
     agent = MasterAgent(request.gateway, request.registry, request.data, store, control_store, planner=DeterministicPlanner(), model_planner=model_planner, model=model, model_max_tokens=settings.model_max_tokens, tracer=tracer, background=jobs)
     if worker_store is not None:
         worker_intelligence_store = IntelligenceStore(backend=worker_store.backend)

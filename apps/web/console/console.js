@@ -1,4 +1,4 @@
-// Platform console: ingestion, agent commands, documents, intelligence.
+// Developer platform console: ingestion, agent commands, documents, intelligence.
 // Identity is owned by auth.js; every call carries the server-verified headers.
 (function () {
   'use strict';
