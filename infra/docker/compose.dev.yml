@@ -160,7 +160,6 @@ services:
       - ../../apps:/app/apps:ro
       - ../../scripts:/app/scripts:ro
 
-volumes:
   # The internet map's daily digest to each institution's alert recipients
   # (open incidents, the review queue, what was found):
   #   docker compose --profile monitor up map-digest
