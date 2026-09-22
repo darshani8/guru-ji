@@ -40,6 +40,10 @@ voice = [
 llm = [
     "litellm>=1.60,<2.0",
 ]
+# Claude through the official Anthropic SDK (GURU_MODEL_PROVIDER=anthropic).
+anthropic = [
+    "anthropic>=1.8,<2.0",
+]
 # Richer file parsing for the ingestion layer. The core reader handles CSV, XLSX,
 # DOCX, JSON, and text without these; PDFs and legacy .xls need one of them.
 ingest = [

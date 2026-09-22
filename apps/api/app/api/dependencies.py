@@ -22,6 +22,7 @@ from ..persistence.database import InMemoryControlStore, PostgresControlStore, S
 from ..policy.cerbos import CerbosPolicyDecisionPoint
 from ..policy.pdp import LocalPolicyDecisionPoint, PolicyDecisionPoint
 from ..policy.query_limits import QueryLimits
+from ..providers.anthropic import LATENCY_SENSITIVE_SYSTEM, AnthropicProvider
 from ..providers.litellm import LiteLLMProvider
 from ..providers.ollama import OllamaProvider
 from ..tools.college_tools import build_college_tools
@@ -114,7 +115,30 @@ def _build_model(settings: AppSettings):
             api_key=settings.litellm_api_key,
             timeout_seconds=settings.model_timeout_seconds,
         )
+    if settings.model_provider == "anthropic":
+        # Voice and chat answers are what a person waits on: low effort and the
+        # latency instruction keep the reply quick.
+        return AnthropicProvider(
+            model_id=settings.anthropic_model_id,
+            api_key=settings.anthropic_api_key,
+            effort=settings.anthropic_effort,
+            system=LATENCY_SENSITIVE_SYSTEM,
+            timeout_seconds=settings.model_timeout_seconds,
+        )
     return None
+
+
+def _build_planner_model(settings: AppSettings, model):
+    """The model that plans agent actions; other providers reuse the answer model."""
+
+    if settings.model_provider == "anthropic":
+        return AnthropicProvider(
+            model_id=settings.anthropic_model_id,
+            api_key=settings.anthropic_api_key,
+            effort=settings.anthropic_planner_effort,
+            timeout_seconds=settings.model_timeout_seconds,
+        )
+    return model
 
 
 def _build_pdp(settings: AppSettings) -> PolicyDecisionPoint:
@@ -224,7 +248,7 @@ def build_runtime(settings: AppSettings | None = None, *, start_workers: bool = 
         pdp=pdp,
         tracer=tracer,
     )
-    platform = build_platform(settings, control_store=store, pdp=pdp, tracer=tracer, model=model, start_workers=start_workers) if settings.platform_enabled else None
+    platform = build_platform(settings, control_store=store, pdp=pdp, tracer=tracer, model=model, planner_model=_build_planner_model(settings, model), start_workers=start_workers) if settings.platform_enabled else None
     return Runtime(
         settings=settings,
         sources=sources,

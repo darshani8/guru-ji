@@ -16,9 +16,10 @@ ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
 # Runtime dependencies resolve from uv.lock rather than a hand-copied list, so the
 # image gets exactly what CI tested and cannot drift when a bound is widened.
 # The aws extra (S3, SQS, SES, Textract) and the ingest extra (PDF and legacy
-# Excel readers) are what production settings require.
+# Excel readers) are what production settings require; the anthropic extra is
+# the Claude SDK behind GURU_MODEL_PROVIDER=anthropic.
 COPY pyproject.toml uv.lock README.md ./
-RUN uv sync --frozen --no-dev --no-install-project --extra aws --extra ingest
+RUN uv sync --frozen --no-dev --no-install-project --extra aws --extra ingest --extra anthropic
 
 FROM python:3.12-slim
 
