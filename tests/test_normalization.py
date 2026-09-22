@@ -206,5 +206,27 @@ class DeduplicationTests(unittest.TestCase):
         self.assertEqual(len([item for item in candidates if item.kind == "probable_person"]), 3 + 3)
 
 
+class DegenerateBlockTests(unittest.TestCase):
+    def test_values_shared_by_many_people_neither_slow_nor_flag_matching(self):
+        import time
+
+        from app.institution_data.models import CanonicalRecord
+        from app.normalization.deduplication import MAX_BLOCK_SIZE, find_duplicates
+
+        # A whole roster sharing the college landline, with near-identical names: not duplicates.
+        rows = [CanonicalRecord("student", {"student_id": f"S{i:05d}", "name": f"Student {i} Kumar", "phone": "08012345678", "program": "MBA"}) for i in range(MAX_BLOCK_SIZE + 300)]
+        rows.append(CanonicalRecord("student", {"student_id": "X1", "name": "Asha Rao", "phone": "9876543210"}))
+        rows.append(CanonicalRecord("student", {"student_id": "X2", "name": "Asha  Rao", "phone": "9876543210"}))
+        existing = {f"E{i}": {"name": f"Student {i} Kumar", "phone": "08012345678"} for i in range(MAX_BLOCK_SIZE + 100)}
+        started = time.perf_counter()
+        candidates, actions, warnings = find_duplicates(rows, existing)
+        self.assertLess(time.perf_counter() - started, 3.0)
+        self.assertEqual([(c.kind, c.record_key) for c in candidates], [("probable_person", "x2")] if candidates and candidates[0].record_key == "x2" else [("probable_person", candidates[0].record_key)] if candidates else [])
+        self.assertEqual(len(candidates), 1, "only the pair sharing a private phone is a probable duplicate")
+        self.assertEqual(candidates[0].evidence.get("phone"), "match")
+        self.assertTrue(any(warning.startswith("shared_values_ignored") for warning in warnings), warnings)
+        self.assertEqual(sum(1 for action in actions.values() if action == "insert"), len(rows))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -581,6 +581,44 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /v1/ingestion/jobs/{job_id}/retry:
+    post:
+      tags:
+      - ingestion
+      summary: Re-run a failed or interrupted ingestion job
+      description: Queue the job again; a run that is still alive (fresh heartbeat)
+        is left untouched.
+      operationId: retry_job_v1_ingestion_jobs__job_id__retry_post
+      parameters:
+      - name: job_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Job Id
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      responses:
+        '202':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Retry Job V1 Ingestion Jobs  Job Id  Retry Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /v1/ingestion/jobs/{job_id}/report:
     get:
       tags:

@@ -7,6 +7,8 @@ source row produced which canonical record.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 import hashlib
 import logging
 from collections.abc import Mapping, Sequence
@@ -49,7 +51,11 @@ class IngestionError(ValueError):
     """A job-level failure that is safe to show to the requesting user."""
 
 
-class CommitError(IngestionError):
+class ProcessingError(IngestionError):
+    """A server-side failure inside a stage; the job's state and the error were recorded and the stage can be retried."""
+
+
+class CommitError(ProcessingError):
     """The import step failed; the job was returned to ``ready`` with the error recorded."""
 
 
@@ -62,6 +68,9 @@ class IngestionService:
     max_upload_bytes: int = 50_000_000
     max_rows: int = 50_000
     auto_commit: bool = True
+    # A job left ``processing`` is restarted only when its last heartbeat is
+    # older than this, so a run that is still alive is never duplicated.
+    restart_after_seconds: int = 900
 
     # ------------------------------------------------------------------ upload
     def upload(self, institution_id: str, principal_id: str, *, file_name: str, content: bytes, content_type: str = "application/octet-stream", entity_hint: str | None = None, options: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -97,18 +106,22 @@ class IngestionService:
         return self.store.get_job(institution_id, job_id) or job
 
     # ----------------------------------------------------------------- process
-    async def process(self, institution_id: str, job_id: str) -> dict[str, Any]:
+    async def process(self, institution_id: str, job_id: str, *, force: bool = False) -> dict[str, Any]:
         """Run the pipeline for a queued job.
 
-        A job still ``processing`` was interrupted (a worker restart); it is
-        restarted from the beginning, discarding whatever the interrupted run
-        left behind, so the re-queued background job can pick it up again.
+        A job still ``processing`` whose heartbeat is stale was interrupted (a
+        worker restart); it is restarted from the beginning, discarding
+        whatever the interrupted run left behind. One whose heartbeat is fresh
+        belongs to a run that is still alive and is returned unchanged unless
+        ``force`` is set.
         """
 
         job = self._job(institution_id, job_id)
         if job["status"] not in {JOB_QUEUED, JOB_FAILED, JOB_PROCESSING}:
             return job
         if job["status"] == JOB_PROCESSING:
+            if not force and not self._heartbeat_stale(job):
+                return job
             job = self._reset_interrupted(institution_id, job)
         try:
             self.store.update_job(institution_id, job_id, status=JOB_PROCESSING, stage=STAGE_PARSING, error=None)
@@ -128,6 +141,20 @@ class IngestionService:
             logger.exception("ingestion job %s for institution %s failed unexpectedly", job_id, institution_id)
             message = f"the job failed unexpectedly ({type(exc).__name__}); the error has been logged for the operators"
             return self.store.update_job(institution_id, job_id, status=JOB_FAILED, stage=job.get("stage", STAGE_PARSING), error=message)
+
+    def _heartbeat_stale(self, job: Mapping[str, Any]) -> bool:
+        try:
+            last = datetime.fromisoformat(str(job.get("updated_at")))
+        except (TypeError, ValueError):
+            return True
+        if last.tzinfo is None:
+            last = last.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - last).total_seconds() > self.restart_after_seconds
+
+    def _heartbeat(self, institution_id: str, job_id: str) -> None:
+        """Refresh the job's timestamp so a concurrent restart knows this run is alive."""
+
+        self.store.update_job(institution_id, job_id)
 
     def _reset_interrupted(self, institution_id: str, job: dict[str, Any]) -> dict[str, Any]:
         """Discard the partial state of an interrupted run before it is restarted.
@@ -272,7 +299,15 @@ class IngestionService:
         mapping_state = dict(job.get("mapping") or {})
         mapping_state.update({"entity": entity_name, "approved_mapping": approved, "approved_by": approved_by, "header_signature": signature, "review_required": [], "missing_required": []})
         job = self.store.update_job(institution_id, job_id, status=JOB_PROCESSING, stage=STAGE_NORMALIZING, entity=entity_name, mapping=mapping_state, error=None)
-        return self._normalize(institution_id, job, approved)
+        try:
+            return self._normalize(institution_id, job, approved)
+        except CommitError:
+            raise  # commit() already returned the job to ready with the error
+        except Exception as exc:  # noqa: BLE001 - a job must never stay processing after a route-run stage fails
+            logger.exception("ingestion job %s for institution %s failed while normalizing", job_id, institution_id)
+            message = f"normalization failed unexpectedly ({type(exc).__name__}); submit the mapping again once the cause is fixed"
+            self.store.update_job(institution_id, job_id, status=JOB_FAILED, stage=STAGE_NORMALIZING, error=message)
+            raise ProcessingError(message) from exc
 
     # ---------------------------------------------------------- normalization
     def _normalize(self, institution_id: str, job: dict[str, Any], mapping: Mapping[str, str]) -> dict[str, Any]:
@@ -284,7 +319,9 @@ class IngestionService:
         id_field = next((name for name in entity.natural_key if entity.field(name).field_type is FieldType.IDENTIFIER), None)
         id_values: list[str] = []
         prepared: list[tuple[dict[str, Any], CanonicalRecord]] = []
-        for row in staged:
+        for position, row in enumerate(staged):
+            if position % 500 == 0:
+                self._heartbeat(institution_id, job["job_id"])
             canonical, extras = apply_mapping(entity, mapping, row["raw"])
             cleaned, notes, issues = clean_record(entity, canonical)
             if id_field and cleaned.get(id_field):
@@ -307,7 +344,9 @@ class IngestionService:
             )
             for key, value in people.items():
                 existing.setdefault(key, value)
+        self._heartbeat(institution_id, job["job_id"])
         candidates, actions, duplicate_warnings = find_duplicates(records, existing)
+        self._heartbeat(institution_id, job["job_id"])
         updated_rows: list[dict[str, Any]] = []
         for index, (row, record) in enumerate(prepared):
             action = actions.get(index, "insert")
@@ -456,6 +495,6 @@ class IngestionService:
 
 
 __all__ = [
-    "CommitError", "IngestionError", "IngestionService", "JOB_FAILED", "JOB_IMPORTED", "JOB_NEEDS_REVIEW", "JOB_PROCESSING", "JOB_QUEUED", "JOB_READY",
+    "CommitError", "IngestionError", "IngestionService", "ProcessingError", "JOB_FAILED", "JOB_IMPORTED", "JOB_NEEDS_REVIEW", "JOB_PROCESSING", "JOB_QUEUED", "JOB_READY",
     "STAGE_DONE", "STAGE_DUPLICATE_REVIEW", "STAGE_MAPPING", "STAGE_MAPPING_REVIEW", "STAGE_NORMALIZING", "STAGE_PARSING", "STAGE_READY",
 ]

@@ -16,6 +16,10 @@ from typing import Any
 from ..institution_data.models import CanonicalRecord
 
 NAME_SIMILARITY_THRESHOLD = 0.9
+# A value shared by more than this many people (a college landline in the phone
+# column, a placeholder date of birth, one guardian number for a hostel)
+# identifies nobody: its block is not compared and it does not corroborate.
+MAX_BLOCK_SIZE = 200
 # Above this many keyed rows the in-batch pairwise pass is skipped (and reported);
 # matching against existing records still runs since it is linear in the batch.
 MAX_PAIRWISE_ROWS = 5000
@@ -55,13 +59,13 @@ def _name_similarity(left: Any, right: Any) -> float:
     return SequenceMatcher(None, str(left).lower(), str(right).lower()).ratio()
 
 
-def _person_signals(left: Mapping[str, Any], right: Mapping[str, Any]) -> tuple[float, dict[str, Any]]:
+def _person_signals(left: Mapping[str, Any], right: Mapping[str, Any], ignored: frozenset[str] | set[str] = frozenset()) -> tuple[float, dict[str, Any]]:
     """Score two people: a corroborating field must match before names are compared."""
 
     evidence: dict[str, Any] = {}
     corroborating = 0
     for key in CORROBORATING_FIELDS:
-        if left.get(key) and right.get(key) and _norm(left[key]) == _norm(right[key]):
+        if left.get(key) and right.get(key) and _norm(left[key]) == _norm(right[key]) and f"{key}:{_norm(left[key])}" not in ignored:
             corroborating += 1
             evidence[key] = "match"
     if not corroborating:
@@ -143,6 +147,12 @@ def _probable_people(records: Sequence[CanonicalRecord], keyed: Sequence[int], e
     for key, view in existing_views.items():
         for block in _block_keys(view):
             blocks.setdefault(block, []).append(("existing", key))
+    # Degenerate blocks would make the pass quadratic again and would flag
+    # unrelated people who merely share a placeholder value.
+    ignored = frozenset(block for block, members in blocks.items() if len(members) > MAX_BLOCK_SIZE)
+    if ignored:
+        fields = sorted({block.split(":", 1)[0] for block in ignored})
+        warnings.append(f"shared_values_ignored: {', '.join(fields)} values shared by more than {MAX_BLOCK_SIZE} people were not used for matching")
     found: list[DuplicateCandidate] = []
     for index in keyed:
         record = records[index]
@@ -151,18 +161,20 @@ def _probable_people(records: Sequence[CanonicalRecord], keyed: Sequence[int], e
         batch_hits: dict[int, tuple[float, dict[str, Any]]] = {}
         existing_hits: dict[str, tuple[float, dict[str, Any]]] = {}
         for block in _block_keys(left):
+            if block in ignored:
+                continue
             for kind, other in blocks.get(block, ()):
                 if kind == "batch":
                     # Each in-batch pair is scored once, from the earlier row.
                     if other <= index or other in batch_hits:
                         continue
-                    score, evidence = _person_signals(left, views[other])
+                    score, evidence = _person_signals(left, views[other], ignored)
                     if score >= NAME_SIMILARITY_THRESHOLD:
                         batch_hits[other] = (score, evidence)
                 else:
                     if other == record.record_key or other in existing_hits:
                         continue
-                    score, evidence = _person_signals(left, existing_views[other])
+                    score, evidence = _person_signals(left, existing_views[other], ignored)
                     if score >= NAME_SIMILARITY_THRESHOLD:
                         existing_hits[other] = (score, evidence)
         for other_index in sorted(batch_hits):
@@ -176,4 +188,4 @@ def _probable_people(records: Sequence[CanonicalRecord], keyed: Sequence[int], e
     return found
 
 
-__all__ = ["DuplicateCandidate", "MAX_PAIRWISE_ROWS", "NAME_SIMILARITY_THRESHOLD", "find_duplicates"]
+__all__ = ["DuplicateCandidate", "MAX_BLOCK_SIZE", "MAX_PAIRWISE_ROWS", "NAME_SIMILARITY_THRESHOLD", "find_duplicates"]

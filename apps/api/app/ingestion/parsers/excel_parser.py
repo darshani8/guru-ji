@@ -30,11 +30,19 @@ _EXCEL_EPOCH = datetime(1899, 12, 30)
 _DATE_FORMAT_IDS = {14, 15, 16, 17, 18, 19, 20, 21, 22, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 45, 46, 47, 50, 51, 52, 53, 54, 55, 56, 57, 58}
 
 
+# Cells beyond this column are ignored: no institutional data table needs them,
+# and padding rows out to a crafted reference such as ZZZZZZ1 would allocate
+# hundreds of millions of cells.
+MAX_SHEET_COLUMNS = 1024
+
+
 def _column_index(ref: str) -> int:
     match = _CELL_REF.match(ref)
     if not match:
         return 0
     letters = match.group(1)
+    if len(letters) > 3:  # Excel's last column is XFD
+        return MAX_SHEET_COLUMNS
     index = 0
     for char in letters:
         index = index * 26 + (ord(char) - ord("A") + 1)
@@ -168,20 +176,31 @@ def _read_sheet(archive: zipfile.ZipFile, path: str, shared: list[str], date_sty
 
     rows: list[list[Any]] = []
     row_tag = f"{{{_NS['m']}}}row"
+    cell_tag = f"{{{_NS['m']}}}c"
+    values: list[Any] | None = None
     with open_entry(archive, path) as source:
-        for _, row in ElementTree.iterparse(source, events=("end",)):
-            if row.tag != row_tag:
+        # Cells are read and released one at a time, so even a single row
+        # holding millions of cells never builds a tree in memory.
+        for event, element in ElementTree.iterparse(source, events=("start", "end")):
+            if event == "start":
+                if element.tag == row_tag:
+                    values = []
                 continue
-            values: list[Any] = []
-            for cell in row.findall("m:c", _NS):
-                index = _column_index(cell.get("r", ""))
-                while len(values) < index:
-                    values.append("")
-                values.append(_cell_value(cell, shared, date_styles))
-            rows.append(values)
-            row.clear()
-            if len(rows) > MAX_ROWS + 20:
-                break
+            if element.tag == cell_tag:
+                if values is not None:
+                    index = _column_index(element.get("r", ""))
+                    if index < MAX_SHEET_COLUMNS:
+                        while len(values) < index:
+                            values.append("")
+                        values.append(_cell_value(element, shared, date_styles))
+                element.clear()
+                continue
+            if element.tag == row_tag:
+                rows.append(values if values is not None else [])
+                values = None
+                element.clear()
+                if len(rows) > MAX_ROWS + 20:
+                    break
     return rows
 
 

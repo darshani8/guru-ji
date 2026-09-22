@@ -11,7 +11,7 @@ from starlette.concurrency import run_in_threadpool
 
 from ...domain.principals import Capability
 from ...ingestion.models import ParserError
-from ...ingestion.service import IngestionError
+from ...ingestion.service import IngestionError, ProcessingError
 from ...normalization.canonical import CANONICAL_ENTITIES
 from ..dependencies import platform_from_request
 from ._platform_common import require_principal, resolve_institution, translate
@@ -89,6 +89,9 @@ async def upload_file(
         options["auto_commit"] = auto_commit
     try:
         job = await run_in_threadpool(platform.ingestion.upload, target, principal.principal_id, file_name=file.filename or "upload.bin", content=content, content_type=file.content_type or "application/octet-stream", entity_hint=entity, options=options)
+    except ProcessingError as exc:
+        # A server-side failure (database, storage): the job state was recorded and the step can be retried.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (IngestionError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     if process:
@@ -164,6 +167,9 @@ async def decide_mapping(job_id: str, body: MappingDecisionBody, request: Reques
 
     try:
         job = await run_in_threadpool(apply_mapping)
+    except ProcessingError as exc:
+        # A server-side failure (database, storage): the job state was recorded and the step can be retried.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (IngestionError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except KeyError as exc:
@@ -178,11 +184,30 @@ async def commit_job(job_id: str, request: Request, institution_id: str | None =
     target = resolve_institution(principal, institution_id)
     try:
         job = await run_in_threadpool(platform.ingestion.commit, target, job_id, committed_by=principal.principal_id)
+    except ProcessingError as exc:
+        # A server-side failure (database, storage): the job state was recorded and the step can be retried.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (IngestionError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except KeyError as exc:
         raise translate(exc) from exc
     return {"job": _public_job(job)}
+
+
+@router.post("/jobs/{job_id}/retry", summary="Re-run a failed or interrupted ingestion job", status_code=202)
+async def retry_job(job_id: str, request: Request, institution_id: str | None = None) -> dict[str, Any]:
+    """Queue the job again; a run that is still alive (fresh heartbeat) is left untouched."""
+
+    platform = platform_from_request(request)
+    principal = require_principal(request, Capability.DATA_INGEST)
+    target = resolve_institution(principal, institution_id)
+    job = await run_in_threadpool(platform.store.get_job, target, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail=f"job not found: {job_id}")
+    if job["status"] not in {"failed", "processing"}:
+        raise HTTPException(status_code=409, detail=f"job cannot be retried from status {job['status']}")
+    await run_in_threadpool(_enqueue_processing, platform, target, job_id, principal.principal_id)
+    return {"job": _public_job(await run_in_threadpool(platform.store.get_job, target, job_id) or job)}
 
 
 @router.get("/jobs/{job_id}/report", summary="Import report with lineage counts")
@@ -211,6 +236,9 @@ async def resolve_review(review_id: str, body: ReviewDecisionBody, request: Requ
     target = resolve_institution(principal, institution_id)
     try:
         job = platform.ingestion.resolve_review(target, review_id, decision=body.decision, resolved_by=principal.principal_id, note=body.note)
+    except ProcessingError as exc:
+        # A server-side failure (database, storage): the job state was recorded and the step can be retried.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (IngestionError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except KeyError as exc:

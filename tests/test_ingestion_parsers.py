@@ -267,5 +267,29 @@ class ParserTests(unittest.TestCase):
             DisabledOcrEngine().recognize(b"x")
 
 
+class WideSheetTests(unittest.TestCase):
+    def test_giant_cell_references_and_wide_rows_are_bounded(self):
+        import time
+
+        from app.ingestion.parsers.excel_parser import MAX_SHEET_COLUMNS, parse_xlsx
+
+        content = build_xlsx({"Sheet1": [["Name", "USN"], ["Ravi", "MBA001"]]})
+        wide = "".join(f'<c r="{chr(65 + (i % 26))}{chr(65 + (i // 26 % 26))}{chr(65 + (i // 676 % 26))}3"><v>{i}</v></c>' for i in range(3000))
+
+        def transform(data: bytes) -> bytes:
+            text = data.decode("utf-8")
+            text = text.replace("</row></sheetData>", '<c r="ZZZZZZ2" t="inlineStr"><is><t>far</t></is></c></row><row r="3">' + wide + "</row></sheetData>")
+            return text.encode("utf-8")
+
+        crafted = rewrite_entry(content, "xl/worksheets/sheet1.xml", transform)
+        started = time.perf_counter()
+        result = parse_xlsx("wide.xlsx", crafted)
+        self.assertLess(time.perf_counter() - started, 5.0)
+        table = result.tables[0]
+        self.assertLessEqual(len(table.headers), MAX_SHEET_COLUMNS)
+        self.assertLessEqual(max(len(record.fields) for record in table.records), MAX_SHEET_COLUMNS)
+        self.assertNotIn("far", str([record.fields for record in table.records]), "a cell beyond the last supported column is ignored, never padded out to")
+
+
 if __name__ == "__main__":
     unittest.main()

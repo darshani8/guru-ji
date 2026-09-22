@@ -28,6 +28,19 @@ class PlatformRouteTests(unittest.TestCase):
         cls.job_id = upload.json()["job"]["job_id"]
         cls.client.post("/v1/ingestion/uploads", headers=cls.principal, files={"file": ("attendance.csv", ATTENDANCE, "text/csv")})
 
+    def test_failed_jobs_can_be_retried_and_finished_jobs_cannot(self):
+        platform = app.state.runtime.platform
+        done = self.client.post(f"/v1/ingestion/jobs/{self.job_id}/retry", headers=self.principal)
+        self.assertEqual(done.status_code, 409, done.text)
+        upload = self.client.post("/v1/ingestion/uploads", headers=self.principal, files={"file": ("again.csv", STUDENTS, "text/csv")}, data={"entity": "student"})
+        job_id = upload.json()["job"]["job_id"]
+        platform.store.update_job("route_college", job_id, status="failed", stage="parsing", error="simulated")
+        retried = self.client.post(f"/v1/ingestion/jobs/{job_id}/retry", headers=self.principal)
+        self.assertEqual(retried.status_code, 202, retried.text)
+        self.assertEqual(self.client.get(f"/v1/ingestion/jobs/{job_id}", headers=self.principal).json()["job"]["status"], "imported")
+        self.assertEqual(self.client.post(f"/v1/ingestion/jobs/{job_id}/retry", headers=self.student).status_code, 403)
+        self.assertEqual(self.client.post("/v1/ingestion/jobs/nope/retry", headers=self.principal).status_code, 404)
+
     def test_ingestion_routes_expose_job_state_and_report(self):
         job = self.client.get(f"/v1/ingestion/jobs/{self.job_id}", headers=self.principal).json()["job"]
         self.assertEqual(job["status"], "imported")

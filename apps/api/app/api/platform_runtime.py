@@ -121,7 +121,7 @@ def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: P
     objects = objects or _object_store(settings)
     parsers = ParserRegistry(ocr_engine=_ocr_engine(settings), max_bytes=settings.max_upload_bytes)
     mapping = MappingEngine(threshold=settings.mapping_confidence_threshold, model=model)
-    ingestion = IngestionService(store=store, objects=objects, parsers=parsers, mapping=mapping, max_upload_bytes=settings.max_upload_bytes, max_rows=settings.ingestion_max_rows, auto_commit=settings.ingestion_auto_commit)
+    ingestion = IngestionService(store=store, objects=objects, parsers=parsers, mapping=mapping, max_upload_bytes=settings.max_upload_bytes, max_rows=settings.ingestion_max_rows, auto_commit=settings.ingestion_auto_commit, restart_after_seconds=settings.job_stale_seconds)
     data = InstitutionDataService(store)
     reports = ReportService(store, objects)
     email = EmailService(store, objects, _email_sender(settings), allowed_domains=settings.email_allowed_domains)

@@ -1,5 +1,6 @@
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 
 from app.ingestion.registry import ParserRegistry
 from app.ingestion.service import (
@@ -175,6 +176,12 @@ class IngestionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.store.update_job("college_a", job["job_id"], status=JOB_PROCESSING, stage=STAGE_NORMALIZING, entity="student", mapping={"stale": True})
         self.store.replace_job_records("college_a", job["job_id"], [{"row_number": 99, "locator": "csv;row=99", "raw": {"x": 1}, "normalized": {}, "status": "ready", "action": "insert", "issues": []}])
         self.store.add_review_items("college_a", job["job_id"], [{"kind": "duplicate", "payload": {"left_locator": "csv;row=99"}}])
+        # A run whose heartbeat is fresh is still alive: it is left alone, nothing is reset.
+        untouched = await self.service.process("college_a", job["job_id"])
+        self.assertEqual((untouched["status"], untouched["stage"]), (JOB_PROCESSING, STAGE_NORMALIZING))
+        self.assertEqual(len(self.store.list_review_items("college_a", job_id=job["job_id"], status="pending")), 1)
+        stale = (datetime.now(timezone.utc) - timedelta(seconds=self.service.restart_after_seconds + 60)).isoformat()
+        self.store.backend.execute("UPDATE ingestion_jobs SET updated_at = ? WHERE job_id = ?", (stale, job["job_id"]))
         job = await self.service.process("college_a", job["job_id"])
         self.assertEqual(job["status"], JOB_IMPORTED)
         self.assertEqual(job["report"]["import"]["inserted"], 2)
@@ -184,6 +191,27 @@ class IngestionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("csv;row=99", [row["locator"] for row in self.store.job_records("college_a", job["job_id"])])
         # Finished jobs are left alone.
         self.assertEqual((await self.service.process("college_a", job["job_id"]))["report"]["import"]["inserted"], 2)
+
+    async def test_route_run_normalization_failure_marks_the_job_failed_and_is_retryable(self):
+        from unittest import mock
+
+        from app.ingestion.service import JOB_FAILED, ProcessingError
+
+        content = b"Name,ID,Contact,Prog,Semester,Remarks\nRavi Kumar,1MS23MBA001,9876543210,MBA,2,fine\n"
+        job = await self._upload("list.csv", content)
+        self.assertEqual(job["stage"], STAGE_MAPPING_REVIEW)
+        mapping = dict(self.store.list_review_items("college_a", job_id=job["job_id"])[0]["payload"]["proposed_mapping"])
+        mapping["Prog"] = "program"
+        with mock.patch.object(type(self.store), "lookup_person_matches", side_effect=RuntimeError("connection reset")), self.assertLogs("app.ingestion.service", level="ERROR"):
+            with self.assertRaises(ProcessingError) as raised:
+                await self.service.apply_mapping("college_a", job["job_id"], mapping=mapping, entity="student", approved_by="staff-1")
+        self.assertNotIn("connection reset", str(raised.exception))
+        failed = self.store.get_job("college_a", job["job_id"])
+        self.assertEqual((failed["status"], failed["stage"]), (JOB_FAILED, STAGE_NORMALIZING))
+        self.assertIn("RuntimeError", failed["error"])
+        # Submitting the mapping again resumes the job once the cause is fixed.
+        job = await self.service.apply_mapping("college_a", job["job_id"], mapping=mapping, entity="student", approved_by="staff-1")
+        self.assertEqual(job["status"], JOB_IMPORTED)
 
     async def test_saved_profile_applies_through_normalised_headers_and_never_skips_review_when_incomplete(self):
         content = b"Name,ID,Contact,Prog,Semester,Remarks\nRavi Kumar,1MS23MBA001,9876543210,MBA,2,fine\n"
