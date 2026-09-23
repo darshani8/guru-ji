@@ -30,6 +30,9 @@ from .store import SENSITIVE_TOPICS, IntelligenceStore
 from .urls import canonicalize_url, domain_of
 
 MAX_CANDIDATES = 60
+# A page must name the institution this much more strongly than any known
+# look-alike (the map's margin), or it is as likely about the look-alike.
+LOOKALIKE_MARGIN = 0.2
 INSTRUCTION_SMUGGLING_WARNING = "possible_instruction_smuggling"
 
 
@@ -47,6 +50,9 @@ class InternetIntelligenceService:
     keep_unknown_dates: bool = True
     # Live investigations a person may run per day (each one spends search credits).
     investigations_per_day: int = 20
+    # The internet map's store, when the map is on: its look-alike entities
+    # (British Geological Survey for a college also called BGS) screen findings too.
+    map_store: Any | None = None
     _levels: dict[str, int] = field(default_factory=lambda: {NOT_MATCHED: 0, LOW: 1, MEDIUM: 2, HIGH: 3})
 
     # ------------------------------------------------------------------ guards
@@ -159,6 +165,7 @@ class InternetIntelligenceService:
         kept: list[dict[str, Any]] = []
         excluded: dict[str, int] = {}
         review: list[dict[str, Any]] = []
+        lookalikes = self.map_store.list_entities(institution_id, kind="lookalike") if self.map_store is not None else []
         for canonical, entry in candidates.items():
             hit = entry["hit"]
             title, text, published, extracted = hit.title, hit.snippet, hit.published_at, False
@@ -194,6 +201,8 @@ class InternetIntelligenceService:
                 status, reason = "excluded", "date_unknown"
             elif relevance < 0.3:
                 status, reason = "excluded", "not_relevant"
+            if status == "kept" and lookalikes and not {"official_domain", "known_social_account"} & set(match.reasons) and match.score < self._rival(institution_id, lookalikes, source_url, title, text) + LOOKALIKE_MARGIN:
+                status, reason = "excluded", "lookalike_match"
             excerpt = text.strip()[:600]
             record = {
                 "url": source_url, "requested_url": hit.url, "canonical_url": canonical, "domain": domain_of(source_url), "title": title[:300] or source_url, "excerpt": excerpt, "content_sha256": hashlib.sha256(f"{title}\n{text}".encode("utf-8")).hexdigest(),
@@ -243,6 +252,15 @@ class InternetIntelligenceService:
         if persist and save_report:
             report["report_id"] = self.store.save_report(institution_id, requested_by=requested_by, question=question, window_days=window_days, summary=summary, findings=report["findings"])
         return report, kept
+
+    @staticmethod
+    def _rival(institution_id: str, lookalikes: Sequence[dict[str, Any]], url: str, title: str, text: str) -> float:
+        """How strongly the page names its best-matching look-alike (0 when it names none)."""
+
+        from .map.connectors.common import entity_profile  # the map is optional: imported only when it is wired in
+
+        profiles = [profile for profile in (entity_profile(entity, institution_id, f"{title} {text}") for entity in lookalikes) if profile is not None]
+        return max((resolve_entity(profile, url=url, title=title, text=text).score for profile in profiles), default=0.0)
 
     @staticmethod
     def _public(item: dict[str, Any]) -> dict[str, Any]:
@@ -332,4 +350,4 @@ class InvestigationQuotaExceeded(Exception):
     """A person has used their daily allowance of live investigations."""
 
 
-__all__ = ["INSTRUCTION_SMUGGLING_WARNING", "InternetIntelligenceService", "InvestigationQuotaExceeded", "MAX_CANDIDATES"]
+__all__ = ["INSTRUCTION_SMUGGLING_WARNING", "LOOKALIKE_MARGIN", "InternetIntelligenceService", "InvestigationQuotaExceeded", "MAX_CANDIDATES"]

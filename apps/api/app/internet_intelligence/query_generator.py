@@ -18,6 +18,9 @@ _STOP = frozenset({"what", "happened", "about", "our", "the", "on", "internet", 
 # Latin words plus Kannada script (U+0C80-U+0CFF), so a question asked in
 # Kannada still yields search terms instead of falling back to generic topics.
 _TERM = re.compile(r"[a-zA-Zಀ-೿][a-zA-Z0-9ಀ-೿-]{2,}")
+# Names and keywords that take turns in the identity queries. A profile lists
+# a few; the cap only bounds how long a full rotation takes.
+MAX_IDENTITY_TERMS = 10
 
 
 def question_terms(question: str | None) -> list[str]:
@@ -52,13 +55,15 @@ def generate_queries(
     Identity queries (name with location, aliases, keywords) find mentions no
     topic word would, so a third of the slots is reserved for them and a long
     topic list can never crowd them out. ``rotation`` (the monitor passes its
-    run count) shifts both lists so that, over successive runs, every topic
-    and every alias gets its turn even when one run cannot fit them all.
+    run count) shifts both lists so that, over successive runs, every topic,
+    every alias and every keyword gets its turn even when one run cannot fit
+    them all: the identity list holds all of them (up to MAX_IDENTITY_TERMS
+    names and as many keywords), not just the first few.
     """
 
     limit = max(1, max_queries)
-    base_names = list(profile.all_names())[:3]
-    primary = base_names[0]
+    names = list(profile.all_names())[:MAX_IDENTITY_TERMS]
+    primary = names[0]
     with_location = f"{primary} {profile.location}".strip() if profile.location else primary
     terms = question_terms(question)
     asked: list[str] = []
@@ -69,8 +74,8 @@ def generate_queries(
     focused: list[str] = []
     chosen = [topic.lower() for topic in (topics or ()) if topic] or ([] if terms else list(DEFAULT_TOPICS[:5]))
     identity = [f'"{with_location}"']
-    identity.extend(f'"{alias}"' + (f" {profile.location}" if profile.location else "") for alias in base_names[1:])
-    identity.extend(f'"{primary}" {keyword}' for keyword in profile.keywords[:2])
+    identity.extend(f'"{alias}"' + (f" {profile.location}" if profile.location else "") for alias in names[1:])
+    identity.extend(f'"{primary}" {keyword}' for keyword in profile.keywords[:MAX_IDENTITY_TERMS])
     reserved = min(len(identity), max(1, limit // 3))
     topic_slots = max(1, limit - reserved - len(asked))
     focused.extend(f'"{primary}" {topic_term(topic, now=now)}' for topic in _rotated(chosen, rotation, topic_slots))
@@ -90,4 +95,4 @@ def generate_queries(
     return queries[:limit]
 
 
-__all__ = ["DEFAULT_TOPICS", "generate_queries", "question_terms", "topic_term"]
+__all__ = ["DEFAULT_TOPICS", "MAX_IDENTITY_TERMS", "generate_queries", "question_terms", "topic_term"]

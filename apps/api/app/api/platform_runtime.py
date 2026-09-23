@@ -251,6 +251,8 @@ def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: P
     build = dict(objects=objects, parsers=parsers, mapping=mapping, control_store=control_store, pdp=pdp, tracer=tracer, model=model, provider=provider)
     request = _services(settings, store, intelligence_store, **build)
     intelligence_map = _map_service(settings, store.backend, intelligence_store, provider, request.notifications) if settings.intelligence_map_enabled else None
+    if intelligence_map is not None and request.intelligence is not None:
+        request.intelligence.map_store = intelligence_map.store  # the map's look-alikes screen investigations too
     # The in-process worker works on its own connection when the database can
     # open one, so its transactions never hold the request path's lock.
     worker_store: InstitutionDataStore | None = None
@@ -264,6 +266,8 @@ def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: P
         worker_intelligence_store = IntelligenceStore(backend=worker_store.backend)
         worker = _services(settings, worker_store, worker_intelligence_store, **build)
         worker_map = _map_service(settings, worker_store.backend, worker_intelligence_store, provider, worker.notifications) if settings.intelligence_map_enabled else None
+        if worker_map is not None and worker.intelligence is not None:
+            worker.intelligence.map_store = worker_map.store  # and the scheduled monitor's runs
         worker_agent = MasterAgent(worker.gateway, worker.registry, worker.data, worker_store, control_store, planner=DeterministicPlanner(), model_planner=model_planner, model=model, model_max_tokens=settings.model_max_tokens, tracer=tracer, background=jobs)
         register_handlers(jobs, ingestion=worker.ingestion, agent=worker_agent, monitor=worker.monitor, notifications=worker.notifications, map_engine=worker_map.engine if worker_map else None, map_desk=worker_map.desk if worker_map else None)
     else:

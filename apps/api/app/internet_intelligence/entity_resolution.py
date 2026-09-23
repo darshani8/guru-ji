@@ -105,10 +105,12 @@ def resolve_entity(profile: InstitutionProfile, *, url: str, title: str, text: s
                 reasons.append(f"exclusion_present:{exclusion}")
     location_seen = any(reason.startswith("location_in") for reason in reasons)
     # The cap keys on the name that actually matched: a short alias such as
-    # "ABC" is generic even when the full name is not.
+    # "ABC" is generic even when the full name is not. It sits below MEDIUM,
+    # so a page that only repeats a short name ("BGS releases new geological
+    # map" for a college also called BGS) goes to review, never to findings.
     generic = matched_name is not None and len(matched_name.split()) <= 2 and not location_seen and not anchored
     if generic:
-        score = min(score, 0.55)
+        score = min(score, 0.45)
         reasons.append("generic_name_without_location")
     if location_missing:
         # A page that repeats the name but never the configured location is at

@@ -67,7 +67,7 @@ class IntelligenceUnitTests(unittest.TestCase):
         nothing = resolve_entity(PROFILE, url="https://x.example/", title="XYZ University", text="new campus")
         self.assertEqual(nothing.level, "not_matched")
         generic = resolve_entity(PROFILE, url="https://x.example/", title="ABC College news", text="ABC College opened")
-        self.assertEqual(generic.level, "medium")
+        self.assertEqual(generic.level, "low", "a short name without the location is for review, not a finding")
 
     def test_namesakes_without_the_location_never_score_high(self):
         # A long name that merely repeats on a page about another town is capped below HIGH.
