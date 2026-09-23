@@ -12,6 +12,7 @@ const state = {
   intentionalClose: false,
   requestInFlight: false,
   finalResultKeys: new Set(),
+  voiceCommands: new Map(),
   pingTimer: null,
 };
 
@@ -38,7 +39,9 @@ async function api(path, options = {}) {
     // Some health or proxy failures do not return JSON.
   }
   if (!response.ok) {
-    throw new Error(data.detail || data.error?.message || `Request failed (${response.status})`);
+    const error = new Error(data.detail || data.error?.message || `Request failed (${response.status})`);
+    error.status = response.status;
+    throw error;
   }
   return data;
 }
@@ -121,6 +124,79 @@ function setComposerBusy(busy) {
   $('send-button').textContent = busy ? 'Sending…' : 'Send ↗';
 }
 
+// Questions go to the institutional agent, which answers from the records the
+// college has imported. Where the data platform is off (503) or the account may
+// not run agent commands (403), the read-only assistant answers instead.
+function askAgent(text, approvalId = null) {
+  return api('/v1/agent/commands', {
+    method: 'POST',
+    body: JSON.stringify({ command: text, channel: 'text', include_data: false, approval_id: approvalId }),
+  });
+}
+
+function askReadOnlyAssistant(text) {
+  return api('/v1/chat', {
+    method: 'POST',
+    body: JSON.stringify({
+      prompt: text,
+      institution_scope: { college_id: window.GuruAuth.collegeId() },
+      channel: 'text',
+    }),
+  });
+}
+
+function showAnswer(data, options = {}) {
+  const answer = data.answer && typeof data.answer === 'object' ? data.answer : data;
+  const answerText = typeof data.answer === 'string'
+    ? data.answer
+    : answer.answer || answer.refusal_reason || 'No answer returned.';
+  const article = addMessage('assistant', answerText, { ...options, answer });
+  if (answer.status === 'approval_required' && answer.approval) {
+    addApprovalControls(article, answer.approval, options.command);
+  }
+  return article;
+}
+
+// An action that changes institutional records waits for the person to
+// confirm it; confirming records the decision and runs the same command again.
+function addApprovalControls(article, approval, command) {
+  const controls = document.createElement('div');
+  controls.className = 'approval-actions';
+  const confirm = document.createElement('button');
+  confirm.type = 'button';
+  confirm.className = 'approval-button';
+  confirm.textContent = 'Confirm and run';
+  const cancel = document.createElement('button');
+  cancel.type = 'button';
+  cancel.className = 'approval-button secondary';
+  cancel.textContent = 'Cancel';
+  controls.append(confirm, cancel);
+  article.querySelector('.bubble').append(controls);
+
+  async function decide(approve) {
+    confirm.disabled = true;
+    cancel.disabled = true;
+    try {
+      await api(`/v1/agent/approvals/${encodeURIComponent(approval.approval_id)}`, {
+        method: 'POST',
+        body: JSON.stringify({ approve }),
+      });
+      controls.remove();
+      if (!approve || !command) {
+        addMessage('assistant', approve ? 'Confirmed.' : 'Cancelled. Nothing was changed.');
+        return;
+      }
+      showAnswer(await askAgent(command, approval.approval_id), { command });
+    } catch (error) {
+      confirm.disabled = false;
+      cancel.disabled = false;
+      showToast(error.message);
+    }
+  }
+  confirm.addEventListener('click', () => decide(true));
+  cancel.addEventListener('click', () => decide(false));
+}
+
 async function ask(prompt) {
   const text = prompt.trim();
   if (!text || state.requestInFlight) return;
@@ -132,20 +208,15 @@ async function ask(prompt) {
   loading.classList.add('loading-message');
 
   try {
-    const data = await api('/v1/chat', {
-      method: 'POST',
-      body: JSON.stringify({
-        prompt: text,
-        institution_scope: { college_id: window.GuruAuth.collegeId() },
-        channel: 'text',
-      }),
-    });
+    let data;
+    try {
+      data = await askAgent(text);
+    } catch (error) {
+      if (error.status !== 503 && error.status !== 403) throw error;
+      data = await askReadOnlyAssistant(text);
+    }
     loading.remove();
-    const answer = data.answer && typeof data.answer === 'object' ? data.answer : data;
-    const answerText = typeof data.answer === 'string'
-      ? data.answer
-      : answer.answer || answer.refusal_reason || 'No answer returned.';
-    addMessage('assistant', answerText, { answer });
+    showAnswer(data, { command: text });
   } catch (error) {
     loading.remove();
     addMessage('assistant', error.message);
@@ -227,10 +298,14 @@ function sendUtterance(text) {
   const clientMessageId = `voice-${crypto.randomUUID ? crypto.randomUUID() : Date.now()}`;
   state.waitingForAnswer = true;
   stopRecognition();
+  state.voiceCommands.set(clientMessageId, value);
   state.voiceSocket.send(JSON.stringify({
     type: 'utterance',
     client_message_id: clientMessageId,
     text: value,
+    // The server uses the agent only where the platform is on and the account
+    // may run commands, and answers read-only otherwise.
+    mode: 'agent',
   }));
   addMessage('user', value, { voice: true });
   renderVoiceState('Guru Ji is preparing a cited answer…');
@@ -303,7 +378,9 @@ function handleVoiceMessage(event) {
   if (message.type === 'answer') {
     const answer = message.answer || {};
     const text = answer.answer || answer.refusal_reason || 'No answer returned.';
-    addMessage('assistant', text, { answer, voice: true });
+    const command = state.voiceCommands.get(message.client_message_id);
+    state.voiceCommands.delete(message.client_message_id);
+    showAnswer(answer, { voice: true, command });
     state.waitingForAnswer = false;
     speakAnswer(text);
     return;
