@@ -105,7 +105,7 @@ openstreetmap.org.
 | A-arch | Linked like that, but only in an archived copy, or before the site that linked it died, lapsed, was taken over or started redirecting. |
 | B | Linked like that on an official page graded B; listed on a hub or account page graded A, or a live subdomain of an A domain; any other directory record; a reviewer's confirmation; two independent sources agreeing (search, directories, community records, hubs, backlinks, platform APIs, reviewers); or a configured domain that now redirects to another host. |
 | C | One source only: a search snippet, a backlink, a community or platform-API record, a link from a page graded C or a hub graded B or lower, or an imported claim nobody has re-verified. |
-| D | Refuted: rejected by a reviewer, a look-alike or an impersonator (only a reviewer's later confirmation lifts this), dead on two checks at least a day apart, or on a parked or hijacked domain. |
+| D | Refuted: rejected by a reviewer, a look-alike or an impersonator (only a reviewer's later confirmation lifts this), dead on two checks at least a day apart, or on a parked, hijacked or lapsed domain (these too stand until a reviewer confirms the domain). |
 
 The most useful thing you can do is keep your official accounts linked from
 your website's footer or header, or list them in `sameAs` or with
@@ -159,11 +159,18 @@ else. Only domains your institution configured (or a reviewer confirmed) are
 checked. The token is public, so the map trusts it only on a healthy site:
 while a domain is reported compromised, hijacked, parked or redirecting it is
 not checked, a hijack or a reviewer's rejection is lifted only by a reviewer,
-and the accounts a lost domain listed stop being O. If a token may be in the
-wrong hands (say a domain lapsed and someone else registered it), your
-managers can issue new tokens (`POST /v1/intelligence/map/ownership/rotate`):
-every earlier token stops proving anything, so publish the new one before the
-next weekly check.
+and the accounts a lost domain listed stop being O. When the map sees one of
+your domains lost (dead, parked, hijacked or redirecting), the domain's own
+confirmation is withdrawn and its token is replaced on its own: the old one,
+which an archive may have kept, proves nothing any more, and the ownership
+page in the console shows the new one to publish once the domain is yours
+again. A parked lander or a name that stopped resolving is treated like a
+hijack: it stands until one of your managers confirms the domain, because a
+clean page afterwards says nothing about who holds the name. If a token may
+be in the wrong hands for another reason, your managers can issue new tokens
+for every domain (`POST /v1/intelligence/map/ownership/rotate`): every
+earlier token stops proving anything, so publish the new one before the next
+weekly check.
 
 ## When something is wrong
 
