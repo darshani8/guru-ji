@@ -55,7 +55,7 @@ UNHEALTHY_STATUSES = frozenset({"compromised", "hijacked", "parked", "redirected
 _FILE_ABSENT = frozenset({"not_found", "gone", "content_type"})
 
 
-def verification_token(key: bytes, institution_id: str, host: str, epoch: int = 0) -> str:
+def verification_token(key: bytes, institution_id: str, host: str, epoch: int = 0, generation: int = 0) -> str:
     """The ownership token for one domain of one institution at one epoch (stable and keyed).
 
     Binding it to the host means a token copied from the institution's site
@@ -64,10 +64,14 @@ def verification_token(key: bytes, institution_id: str, host: str, epoch: int = 
     can move the institution to a new epoch and every older token stops
     proving anything; epoch 0 is the token issued before rotation existed,
     so tokens already published keep working until the first rotation.
+    ``generation`` moves on its own each time the map sees the domain lost
+    (dead, parked, hijacked, redirected): whoever holds the name next cannot
+    reuse the token an archive kept, and the institution's console shows the
+    new one.
     """
 
     domain = host.strip().lower().removeprefix("www.")
-    message = f"ownership:{institution_id}:{domain}" + (f":{epoch}" if epoch else "")
+    message = f"ownership:{institution_id}:{domain}" + (f":{epoch}" if epoch else "") + (f":g{generation}" if generation else "")
     return "gj-" + hmac.new(key, message.encode("utf-8"), hashlib.sha256).hexdigest()[:32]
 
 
@@ -79,14 +83,20 @@ def _matches(value: Any, token: str) -> bool:
     return isinstance(value, str) and hmac.compare_digest(value.strip().encode("utf-8"), token.encode("utf-8"))
 
 
-def instructions(key: bytes, institution_id: str, domains: list[str], *, epoch: int = 0) -> dict[str, Any]:
+def token_generation(store: Any, institution_id: str, asset_id: str) -> int:
+    """How many times the map saw this domain lost since its token was first issued (see ``verification_token``)."""
+
+    return sum(1 for row in store.evidence_for(institution_id, [asset_id])[asset_id] if row["kind"] == "owner_token_void")
+
+
+def instructions(key: bytes, institution_id: str, domains: list[str], *, epoch: int = 0, generations: Mapping[str, int] | None = None) -> dict[str, Any]:
     """How to confirm each of the institution's own domains; every domain has its own token."""
 
     return {
         "epoch": epoch,
         "domains": [
             {
-                "domain": domain, "token": (token := verification_token(key, institution_id, domain, epoch)),
+                "domain": domain, "token": (token := verification_token(key, institution_id, domain, epoch, (generations or {}).get(domain, 0))),
                 "methods": [
                     {"method": "meta_tag", "how": f'Add <meta name="{META_NAME}" content="{token}"> inside <head> on https://{domain}/'},
                     {"method": "dns_txt", "how": f"Add a DNS TXT record on {domain}: {META_NAME}={token}"},
@@ -142,7 +152,7 @@ class OwnerClaimsConnector:
         if domain["status"] in UNHEALTHY_STATUSES:
             return ConnectorResult(outcome="unhealthy")
         host = domain["asset_key"].removeprefix("web:")
-        token = verification_token(self.key, context.institution_id, host, context.store.owner_token_epoch(context.institution_id))
+        token = verification_token(self.key, context.institution_id, host, context.store.owner_token_epoch(context.institution_id), token_generation(context.store, context.institution_id, domain["asset_id"]))
         home, home_outcome = await self._homepage(context, host, token)
         if home == "unhealthy":
             # Spam or a lander on the homepage: the site cannot speak for the owner, nor take a confirmation back.
@@ -326,4 +336,4 @@ def owned_domains(store: Any, institution_id: str) -> list[dict[str, Any]]:
     return [domain for domain in store.iter_assets(institution_id, kind="domain", relation="official") if nominated_by_institution(store, institution_id, domain["asset_id"])]
 
 
-__all__ = ["META_NAME", "UNHEALTHY_STATUSES", "OwnerClaimsConnector", "WELL_KNOWN_PATH", "claimable", "instructions", "nominated_by_institution", "owned_domains", "verification_token"]
+__all__ = ["token_generation", "META_NAME", "UNHEALTHY_STATUSES", "OwnerClaimsConnector", "WELL_KNOWN_PATH", "claimable", "instructions", "nominated_by_institution", "owned_domains", "verification_token"]

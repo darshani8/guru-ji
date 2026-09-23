@@ -250,22 +250,49 @@ def _confirmed_after(ordered: Sequence[Mapping[str, Any]], moment: datetime) -> 
 
 
 def _takeover(ordered: Sequence[Mapping[str, Any]]) -> str | None:
-    """'hijacked' or 'parked' while the domain is out of the institution's hands, else None.
+    """'hijacked', 'parked' or 'dead' while the domain is out of the institution's hands, else None.
 
     A hijacker can serve a page that looks clean (and republish the old
     ownership token), so a hijack stands until a reviewer confirms the
-    domain again. A parked lander is cleared as soon as each channel that
-    saw it sees a healthy page (the registration was renewed), or by the
-    same confirmation.
+    domain again. So does a parked lander, and a name that stopped
+    resolving: both mean the name may have changed hands, and a clean page
+    afterwards proves nothing about who holds it now. ('dead' is returned
+    for a lapsed name.)
     """
 
     for item in ordered:
         if item.get("kind") == "integrity" and item.get("polarity") == "refutes" and _detail(item).startswith("hijacked") and not _confirmed_after(ordered, _when(item.get("observed_at"))):
             return "hijacked"
-    for item in _latest_integrity_by_channel(ordered).values():
-        if item.get("polarity") == "refutes" and _detail(item).startswith("parked") and not _confirmed_after(ordered, _when(item.get("observed_at"))):
+    # A registrar's lander means the name left the institution's hands (for sale,
+    # lapsed): like a hijack, it stands until a reviewer confirms the domain again,
+    # because whoever holds the name next can serve a clean page.
+    for item in ordered:
+        if item.get("kind") == "integrity" and item.get("polarity") == "refutes" and _detail(item).startswith("parked") and not _confirmed_after(ordered, _when(item.get("observed_at"))):
             return "parked"
+    # So does a name that stopped existing (two failures to resolve a day apart):
+    # a lapsed registration that someone else may register next.
+    lapsed = _lapsed_at(ordered)
+    if lapsed is not None and not _confirmed_after(ordered, lapsed):
+        return "dead"
     return None
+
+
+def _lapsed_at(ordered: Sequence[Mapping[str, Any]]) -> datetime | None:
+    """When the name last stopped resolving for good (an unbroken run of lookup failures a day or more long), if ever."""
+
+    run: list[datetime] = []
+    lapsed: datetime | None = None
+    for item in ordered:
+        if item.get("kind") != "liveness":
+            continue
+        reason = _detail(item)
+        if item.get("polarity") == "supports":
+            run = []
+        elif reason.startswith("unresolved") or reason == "not_found:nxdomain":
+            run.append(_when(item.get("observed_at")))
+            if run[-1] - run[0] >= DEAD_CONFIRMATION:
+                lapsed = run[-1]
+    return lapsed
 
 
 def _status(ordered: Sequence[Mapping[str, Any]], now: datetime) -> str | None:
@@ -332,8 +359,8 @@ def superseded_observations(rows: Iterable[Mapping[str, Any]], *, before: dateti
     kept whatever its age: the newest of each kind on each channel (the last
     check, each channel's latest verdict); the newest success of each kind by
     how it was observed (when the asset was last verified); every hijacked
-    verdict (a hijack stands until the owner or a reviewer confirms the domain
-    again); and of liveness, the last success and the oldest and newest
+    and parked verdict and every failure to resolve the name (each stands
+    until a reviewer confirms the domain again); and of liveness, the last success and the oldest and newest
     not-found failures after it ("dead on two checks at least a day apart"
     spans the whole unbroken run of failures, across channels). Deleting the
     rest leaves every grade, status and verification time as it was.
@@ -348,7 +375,9 @@ def superseded_observations(rows: Iterable[Mapping[str, Any]], *, before: dateti
         items.sort(key=lambda item: (_when(item.get("observed_at")), str(item.get("evidence_id", ""))))
         keep = {str(item["evidence_id"]) for item in {(item["kind"], str(item.get("channel") or "")): item for item in items}.values()}
         keep |= {str(item["evidence_id"]) for item in {(item["kind"], item.get("observed_via")): item for item in items if item.get("polarity") == "supports"}.values()}
-        keep |= {str(item["evidence_id"]) for item in items if item["kind"] == "integrity" and _detail(item).startswith("hijacked")}
+        # Every hijacked or parked verdict, and every failure to resolve the name: each stands until a reviewer confirms the domain.
+        keep |= {str(item["evidence_id"]) for item in items if item["kind"] == "integrity" and _detail(item).startswith(("hijacked", "parked"))}
+        keep |= {str(item["evidence_id"]) for item in items if item["kind"] == "liveness" and (_detail(item).startswith("unresolved") or _detail(item) == "not_found:nxdomain")}
         liveness = [item for item in items if item["kind"] == "liveness"]
         # The last success (kept above as the newest liveness success) ends the run the "dead" test walks.
         start = max((index for index, item in enumerate(liveness) if item.get("polarity") == "supports"), default=-1)

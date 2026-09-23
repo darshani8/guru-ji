@@ -263,9 +263,36 @@ def lose_anchor(store: MapStore, institution_id: str, source_asset_id: str, *, r
         store.add_evidence(institution_id, asset_id=asset_id, kind="anchor_lost", polarity="refutes", detail=reason[:80], source_asset_id=source_asset_id, channel="anchor", observed_via="live", run_id=run_id)
         lost.append(asset_id)
     lost.extend(asset_id for asset_id in withdraw_owner_listing(store, institution_id, source_asset_id, detail=f"the listing domain no longer vouches ({reason})", run_id=run_id) if asset_id not in lost)
+    if _void_owner_proof(store, institution_id, source_asset_id, reason=reason, run_id=run_id):
+        lost.append(source_asset_id)
     if lost:
         regrade(store, institution_id, lost)
     return lost
+
+
+def _void_owner_proof(store: MapStore, institution_id: str, domain_asset_id: str, *, reason: str, run_id: str | None = None) -> bool:
+    """A lost domain's own owner proof is withdrawn, and its token voided (once per loss after a proof).
+
+    Whoever holds the name now is not the owner: the old O must not come
+    back with a clean page, and the token an archive kept must not prove
+    anything (``token_generation`` moves on with each void). The owner
+    proves the domain again with the new token the console shows.
+    """
+
+    domain = store.get_asset(institution_id, domain_asset_id)
+    if domain is None or domain["kind"] != "domain":
+        return False
+    channel = f"owner:{domain['asset_key'].removeprefix('web:')}"
+    rows = store.evidence_for(institution_id, [domain_asset_id])[domain_asset_id]
+    proofs = sorted((row for row in rows if row["kind"] == "owner_claim" and row["channel"] == channel), key=lambda row: (str(row["observed_at"]), str(row.get("evidence_id", ""))))
+    last_proof = max((str(row["observed_at"]) for row in proofs if row["polarity"] == "supports"), default="")
+    last_void = max((str(row["observed_at"]) for row in rows if row["kind"] == "owner_token_void"), default="")
+    if not last_proof or last_proof <= last_void:
+        return False
+    if proofs[-1]["polarity"] == "supports":
+        store.add_evidence(institution_id, asset_id=domain_asset_id, kind="owner_claim", polarity="refutes", detail=f"the domain was lost ({reason[:60]}); the owner must prove it again", channel=channel, observed_via="live", run_id=run_id)
+    store.add_evidence(institution_id, asset_id=domain_asset_id, kind="owner_token_void", polarity="refutes", detail=reason[:80], channel=channel, observed_via="live", run_id=run_id)
+    return True
 
 
 def withdraw_owner_listing(

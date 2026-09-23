@@ -21,7 +21,7 @@ from .authority import approves, authorities
 from .connectors.base import ConnectorContext
 from .incidents import IncidentDesk
 from .learning import coverage_estimate, gap_grid
-from .ownership import OwnerClaimsConnector, instructions, owned_domains
+from .ownership import token_generation, OwnerClaimsConnector, instructions, owned_domains
 from .harvest import OfficialSiteHarvester
 from .metrics import map_metrics, record_baseline, run_series
 from .pipeline import forget, nominated, refute_source, regrade, sync_profile
@@ -403,9 +403,11 @@ class MapService:
         """The institution's token, how to publish it, and what the owner has confirmed so far."""
 
         self.guard(principal, institution_id, Capability.INTELLIGENCE_MANAGE)
-        domains = [domain["asset_key"].removeprefix("web:") for domain in owned_domains(self.store, institution_id)]
+        owned = owned_domains(self.store, institution_id)
+        domains = [domain["asset_key"].removeprefix("web:") for domain in owned]
+        generations = {domain["asset_key"].removeprefix("web:"): token_generation(self.store, institution_id, domain["asset_id"]) for domain in owned}
         confirmed = [{key: asset[key] for key in ("asset_id", "asset_key", "url", "kind", "platform")} for asset in self.store.iter_assets(institution_id, grade="O")]
-        return {**instructions(self.store.suppression_key, institution_id, domains, epoch=self.store.owner_token_epoch(institution_id)), "confirmed": confirmed}
+        return {**instructions(self.store.suppression_key, institution_id, domains, epoch=self.store.owner_token_epoch(institution_id), generations=generations), "confirmed": confirmed}
 
     def rotate_ownership(self, principal: Principal, institution_id: str) -> dict[str, Any]:
         """Issue new tokens for every domain; the old ones stop proving anything.

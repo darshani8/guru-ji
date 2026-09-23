@@ -181,6 +181,12 @@ class OwnerBase(unittest.IsolatedAsyncioTestCase):
     def evidence_count(self):
         return len(self.store.list_evidence("bgscet", limit=20000))
 
+    def service_tokens(self):
+        """The token for each domain as the console shows it to the institution's managers."""
+
+        shown = MapService(self.store).ownership(principal(PrincipalType.PRINCIPAL, college_id="bgscet"), "bgscet")
+        return {item["domain"]: item["token"] for item in shown["domains"]}
+
 
 class OwnerTrustTests(OwnerBase):
     """P7-1: the token is public, so only a healthy site may use it, and only a reviewer undoes a reviewer or a takeover."""
@@ -227,7 +233,12 @@ class OwnerTrustTests(OwnerBase):
         self.store.add_evidence("bgscet", asset_id=self.domain_id, kind="reviewer_confirm", detail="recovered from the registrar", channel="reviewer:r", observed_via="reviewer")
         regrade(self.store, "bgscet", [self.domain_id])
         self.assertEqual((self.domain()["grade"], self.domain()["status"]), ("O", "live"))
-        recovered = await self.check({HOME_URL: (200, home(TOKEN)), FILE_URL: well_known(TOKEN, [INSTAGRAM])})
+        # The token an archive kept was voided when the domain was lost; the owner publishes the new one the console shows.
+        stale = await self.check({HOME_URL: (200, home(TOKEN)), FILE_URL: well_known(TOKEN, [INSTAGRAM])})
+        self.assertEqual(stale.outcome, "no_proof", "the old token proves nothing once the domain was lost")
+        fresh = verification_token(KEY, "bgscet", "bgscet.ac.in", 0, 1)
+        self.assertEqual(self.service_tokens(), {"bgscet.ac.in": fresh})
+        recovered = await self.check({HOME_URL: (200, home(fresh)), FILE_URL: well_known(fresh, [INSTAGRAM])})
         self.assertEqual(recovered.outcome, "verified")
         self.assertEqual(self.grade_of("instagram:bgscet_engg_coll"), "O", "back in the owner's hands, the file counts again")
 
@@ -313,13 +324,15 @@ class OwnerWithdrawalTests(OwnerBase):
     async def test_losing_the_domain_withdraws_its_accounts(self):
         await self.verified()
         withdrawn = lose_anchor(self.store, "bgscet", self.domain_id, reason="dead")
-        self.assertEqual(len(withdrawn), 2)
+        self.assertEqual(len(withdrawn), 3, "both listed accounts, and the domain's own proof")
+        self.assertNotEqual(self.domain()["grade"], "O", "whoever holds the name now is not the owner")
         self.assertEqual([self.grade_of("instagram:bgscet_engg_coll"), self.grade_of("youtube:@bgscet")], ["unrated", "unrated"])
         before = self.evidence_count()
         self.assertEqual(lose_anchor(self.store, "bgscet", self.domain_id, reason="dead"), [], "a repeated loss adds nothing")
         self.assertEqual(self.evidence_count(), before)
-        await self.check({HOME_URL: (200, home(TOKEN)), FILE_URL: well_known(TOKEN, [INSTAGRAM])})
-        self.assertEqual(self.grade_of("instagram:bgscet_engg_coll"), "O", "the domain is back and lists it again")
+        fresh = verification_token(KEY, "bgscet", "bgscet.ac.in", 0, 1)
+        await self.check({HOME_URL: (200, home(fresh)), FILE_URL: well_known(fresh, [INSTAGRAM])})
+        self.assertEqual(self.grade_of("instagram:bgscet_engg_coll"), "O", "the domain is back, proven with its new token, and lists it again")
 
 
 class OwnerOutageTests(OwnerBase):

@@ -87,7 +87,12 @@ class AnchorLossTests(Base):
         self.assertEqual(self.store.get_asset("bgscet", self.domain_id)["grade"], "D")
         self.assertEqual(self.grade_of("instagram:bgscet_engg_coll"), "A-arch", "it was official then; the site no longer vouches")
         await self.harvest({"https://bgscet.ac.in/": (200, HOME)})
-        self.assertEqual(self.store.get_asset("bgscet", self.domain_id)["grade"], "A", "a renewed domain recovers")
+        self.assertEqual(self.store.get_asset("bgscet", self.domain_id)["grade"], "D", "a clean page after a lander proves nothing about who holds the name now")
+        self.assertNotEqual(self.grade_of("instagram:bgscet_engg_coll"), "A")
+        # The institution's manager confirms the domain is theirs again: it recovers.
+        self.store.add_evidence("bgscet", asset_id=self.domain_id, kind="reviewer_confirm", detail="renewed", channel="reviewer:p", observed_via="reviewer")
+        await self.harvest({"https://bgscet.ac.in/": (200, HOME)})
+        self.assertIn(self.store.get_asset("bgscet", self.domain_id)["grade"], {"A", "O"}, "a confirmed, renewed domain recovers")
         self.assertEqual(self.grade_of("instagram:bgscet_engg_coll"), "A")
 
     def test_takeover_rules(self):
@@ -99,7 +104,9 @@ class AnchorLossTests(Base):
         configured = ev("configured_domain", "", NOW - timedelta(days=60), polarity="supports", via="reviewer", channel="profile")
         parked, clean = ev("integrity", "parked:lander", NOW - timedelta(days=30)), ev("integrity", "clean:", NOW - timedelta(days=1), polarity="supports")
         self.assertEqual(grade(domain, [configured, parked]).grade, "D")
-        self.assertEqual(grade(domain, [configured, parked, clean]).grade, "A", "renewed: parked no longer")
+        self.assertEqual(grade(domain, [configured, parked, clean]).grade, "D", "a clean page after a lander proves nothing about who holds the name")
+        confirmed = ev("reviewer_confirm", "renewed", NOW, polarity="supports", via="reviewer", channel="reviewer:x")
+        self.assertIn(grade(domain, [configured, parked, clean, confirmed]).grade, {"A", "B"}, "a reviewer's confirmation ends it")
         hijacked = ev("integrity", "hijacked:gambling", NOW - timedelta(days=30))
         self.assertEqual(grade(domain, [configured, hijacked, clean]).grade, "D", "a hijacker can serve a clean page")
         owner = ev("owner_claim", "verified", NOW, polarity="supports", via="owner", channel="owner:x")
