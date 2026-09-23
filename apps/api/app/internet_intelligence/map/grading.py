@@ -42,7 +42,7 @@ from typing import Any
 
 from .store import GRADE_RANK
 
-SCORER_VERSION = "grader-1"
+SCORER_VERSION = "grader-2"
 DEAD_CONFIRMATION = timedelta(hours=24)
 # Kinds whose channel counts toward the two-independent-channels rule.
 _CORROBORATING = frozenset({"search_snippet", "directory_record", "community_record", "hub_link", "reviewer_confirm", "backlink", "api_identity"})

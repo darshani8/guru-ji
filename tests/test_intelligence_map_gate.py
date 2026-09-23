@@ -340,5 +340,40 @@ class ProfileAuthorityTests(Base):
         self.assertEqual(self.grade(domain), "C", "only the Math's approvers may settle the Math's domain")
 
 
+class RescoreLifecycleTests(Base):
+    def test_an_unchanged_grade_takes_the_new_rules_stamp_and_rescoring_finishes(self):
+        asset_id = self.asset("https://www.instagram.com/bgscet_engg_coll/")
+        self.evidence(asset_id, "search:tavily", "wikidata")
+        regrade(self.store, INSTITUTION)
+        self.store.restamp_grade(INSTITUTION, asset_id, reasons=self.store.get_asset(INSTITUTION, asset_id)["grade_reasons"], scorer_version="grader-0")
+        self.tick()
+        self.assertFalse(self.store.has_stale_scores(INSTITUTION, SCORER_VERSION), "re-scored once, not at every pass")
+
+    def test_rescoring_never_publishes_a_held_passs_grades(self):
+        held = self.asset("https://www.instagram.com/bgs_group_official/")
+        self.store.set_grade(INSTITUTION, held, grade="B", reasons=["held"], scorer_version=SCORER_VERSION, proposed=True, run_id="held-pass")
+        old = self.asset("https://x.com/bgscet_official")
+        self.evidence(old, "search:tavily")
+        regrade(self.store, INSTITUTION, [old])
+        self.store.restamp_grade(INSTITUTION, old, reasons=["old rule"], scorer_version="grader-0")
+        verdict = rescore(self.store, INSTITUTION, run_id=f"rescore:{SCORER_VERSION}")
+        self.assertTrue(verdict.passed)
+        asset = self.store.get_asset(INSTITUTION, held)
+        self.assertEqual((asset["grade"], asset["proposed_grade"], asset["proposed_run_id"]), ("unrated", "B", "held-pass"), "still the held pass's, for its manager to decide")
+
+    def test_a_discarded_rescoring_is_not_raised_again(self):
+        self.store.add_gold(INSTITUTION, asset_key="instagram:bgscet_engg_coll", platform="instagram", split="holdout", expected_min_grade="B")
+        asset_id = self.asset("https://www.instagram.com/bgscet_engg_coll/")
+        self.evidence(asset_id, "search:tavily")
+        self.store.set_grade(INSTITUTION, asset_id, grade="B", reasons=["old rule"], scorer_version="grader-0")
+        self.tick()
+        [item] = self.store.list_review_items(INSTITUTION, kind="run_gate")
+        self.service.decide(self.manager, INSTITUTION, item["review_id"], decision="discard")
+        self.assertFalse(self.store.has_stale_scores(INSTITUTION, SCORER_VERSION), "the manager kept the grade under the new rule")
+        self.tick()
+        asset = self.store.get_asset(INSTITUTION, asset_id)
+        self.assertEqual((asset["grade"], asset["proposed_grade"]), ("B", None), "not re-proposed with nobody asked")
+
+
 if __name__ == "__main__":
     unittest.main()
