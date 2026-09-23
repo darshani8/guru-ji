@@ -151,13 +151,13 @@ class FullDuplexVoiceTests(unittest.TestCase):
 
     def test_the_browser_reports_what_it_heard_as_counts_only(self) -> None:
         websocket = self._open()
-        report = {"type": "client_log", "starts": 2, "ends": 1, "interim": 9, "finals": 1, "dropped_echo": 0, "sent": 1, "restarts": 0, "errors": ["network"], "browser": "Chrome 140"}
+        report = {"type": "client_log", "starts": 2, "ends": 1, "interim": 9, "finals": 1, "dropped_echo": 0, "sent": 1, "restarts": 0, "errors": ["network"], "browser": "Chrome 140", "level_peak": 37}
         with self.assertLogs("guru.voice", "INFO") as logs:
             websocket.send_json(report)
             websocket.send_json({"type": "ping"})
             self.assertEqual(websocket.receive_json(), {"type": "pong"})
         line = "\n".join(logs.output)
-        self.assertIn("browser=Chrome 140 starts=2 ends=1 restarts=0 interim=9 finals=1 dropped_echo=0 sent=1 errors=network", line)
+        self.assertIn("browser=Chrome 140 starts=2 ends=1 restarts=0 interim=9 finals=1 dropped_echo=0 sent=1 errors=network mic_peak=37", line)
         # A report can carry no words: extra fields are refused.
         websocket.send_json({**report, "text": "private words"})
         self.assertEqual(websocket.receive_json()["code"], "invalid_event")

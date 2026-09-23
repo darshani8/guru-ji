@@ -47,6 +47,12 @@ const state = {
   watchdogTimer: null,
   clientLogTimer: null,
   recognitionStats: null,
+  // The microphone stays open while voice is on: its level shows on screen,
+  // and a microphone the person picked is handed to speech recognition.
+  micStream: null,
+  micDeviceId: loadMicrophone(),
+  micMeter: null,
+  micTrackFailed: false,
   activeReplyId: null,
   echoText: '',
   echoTimer: null,
@@ -80,6 +86,22 @@ function loadLanguage() {
   if (preferred.startsWith('hi')) return 'hi-IN';
   if (preferred.startsWith('kn')) return 'kn-IN';
   return 'en-IN';
+}
+
+function loadMicrophone() {
+  try {
+    return window.localStorage.getItem('guruji.microphone') || '';
+  } catch {
+    return '';
+  }
+}
+
+function saveMicrophone(deviceId) {
+  try {
+    window.localStorage.setItem('guruji.microphone', deviceId || '');
+  } catch {
+    // Not remembered; the choice still applies to this visit.
+  }
 }
 
 function saveLanguage(language) {
@@ -575,10 +597,24 @@ function stopRecognition() {
 function startRecognition() {
   if (!state.recognition || !state.shouldListen) return;
   if (HALF_DUPLEX && state.speaking) return;
+  // A microphone the person picked is given to recognition directly (newer
+  // Chrome accepts an audio track); otherwise it uses the browser's default.
+  const track = state.micDeviceId && !state.micTrackFailed ? state.micStream?.getAudioTracks()[0] : null;
   try {
-    state.recognition.start();
+    if (track && track.readyState === 'live') state.recognition.start(track);
+    else state.recognition.start();
   } catch (error) {
-    if (error.name !== 'InvalidStateError') showToast('Voice input could not start.');
+    if (error.name === 'InvalidStateError') return;
+    if (track) {
+      state.micTrackFailed = true;
+      try {
+        state.recognition.start();
+        return;
+      } catch {
+        // Reported below.
+      }
+    }
+    showToast('Voice input could not start.');
   }
 }
 
@@ -714,6 +750,13 @@ function configureRecognition() {
   recognition.onerror = (event) => {
     countRecognition('errors', event.error);
     if (!state.voiceSessionId) return;
+    // This browser would not listen to the picked microphone directly: go back
+    // to its default microphone (onend restarts recognition).
+    if (state.micDeviceId && !state.micTrackFailed && ['audio-capture', 'not-allowed', 'service-not-allowed', 'bad-grammar'].includes(event.error)) {
+      state.micTrackFailed = true;
+      showToast('This browser listens to its default microphone. Pick it in Chrome settings (chrome://settings/content/microphone).');
+      return;
+    }
     if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
       handleVoiceFailure('Microphone permission was denied.');
       return;
@@ -745,7 +788,7 @@ function configureRecognition() {
 
 // ------------------------------------------------------------------ listening health
 function freshRecognitionStats() {
-  return { starts: 0, ends: 0, interim: 0, finals: 0, dropped_echo: 0, sent: 0, restarts: 0, errors: [] };
+  return { starts: 0, ends: 0, interim: 0, finals: 0, dropped_echo: 0, sent: 0, restarts: 0, errors: [], level_peak: 0 };
 }
 
 function countRecognition(name, error) {
@@ -774,7 +817,7 @@ function sendClientLog() {
   const stats = state.recognitionStats;
   const socket = state.voiceSocket;
   if (!stats || !socket || socket.readyState !== WebSocket.OPEN) return;
-  const changed = Object.entries(stats).some(([key, value]) => (key === 'errors' ? value.length : value) > 0);
+  const changed = Object.entries(stats).some(([key, value]) => key !== 'level_peak' && (key === 'errors' ? value.length : value) > 0);
   if (!changed) return;
   socket.send(JSON.stringify({ type: 'client_log', ...stats, browser: browserLabel() }));
   state.recognitionStats = freshRecognitionStats();
@@ -867,6 +910,7 @@ function handleVoiceMessage(event) {
     renderVoiceState(listeningHint());
     startListeningHealth();
     startRecognition();
+    listMicrophones();
     return;
   }
   if (message.type === 'thinking') {
@@ -988,12 +1032,112 @@ function startTransport(data) {
   });
 }
 
-async function requestMicrophonePermission() {
+async function openMicrophone(deviceId = state.micDeviceId) {
   if (!window.isSecureContext || !navigator.mediaDevices?.getUserMedia) {
     throw new Error('Voice input requires HTTPS or localhost and microphone access.');
   }
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-  stream.getTracks().forEach((track) => track.stop());
+  const audio = { echoCancellation: true, noiseSuppression: true, autoGainControl: true };
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ audio: deviceId ? { ...audio, deviceId: { exact: deviceId } } : audio });
+  } catch (error) {
+    // A remembered microphone that is no longer plugged in: use the default.
+    if (!deviceId || !['OverconstrainedError', 'NotFoundError', 'NotReadableError'].includes(error.name)) throw error;
+    state.micDeviceId = '';
+    saveMicrophone('');
+    stream = await navigator.mediaDevices.getUserMedia({ audio });
+  }
+  closeMicrophone();
+  state.micStream = stream;
+  startMicMeter(stream);
+  await listMicrophones();
+  return stream;
+}
+
+function closeMicrophone() {
+  if (state.micMeter) {
+    clearInterval(state.micMeter.timer);
+    try {
+      state.micMeter.source.disconnect();
+      state.micMeter.context.close();
+    } catch {
+      // Already disconnected or closed.
+    }
+    state.micMeter = null;
+  }
+  if (state.micStream) state.micStream.getTracks().forEach((track) => track.stop());
+  state.micStream = null;
+  $('mic-meter').hidden = true;
+  $('mic-meter-fill').style.width = '0';
+}
+
+// A bar that moves with the sound the microphone picks up, so the person can
+// see at once whether they are being heard. Nothing is recorded or sent.
+function startMicMeter(stream) {
+  const Context = window.AudioContext || window.webkitAudioContext;
+  if (!Context) return;
+  try {
+    // Its own context: a microphone source on the context that plays Guru Ji's
+    // voice can read as silence in Chrome.
+    const context = new Context();
+    if (context.state === 'suspended') context.resume().catch(() => {});
+    const source = context.createMediaStreamSource(stream);
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 1024;
+    source.connect(analyser);
+    const samples = new Float32Array(analyser.fftSize);
+    const timer = window.setInterval(() => {
+      analyser.getFloatTimeDomainData(samples);
+      let sum = 0;
+      for (const sample of samples) sum += sample * sample;
+      const level = Math.min(1, Math.sqrt(sum / samples.length) * 6);
+      $('mic-meter-fill').style.width = `${Math.round(level * 100)}%`;
+      if (state.recognitionStats) state.recognitionStats.level_peak = Math.max(state.recognitionStats.level_peak, Math.round(level * 100));
+    }, 100);
+    state.micMeter = { context, source, analyser, timer };
+    $('mic-meter').hidden = false;
+  } catch {
+    // The meter is a convenience; voice works without it.
+  }
+}
+
+async function listMicrophones() {
+  const select = $('mic-select');
+  let devices = [];
+  try {
+    devices = (await navigator.mediaDevices.enumerateDevices()).filter((device) => device.kind === 'audioinput');
+  } catch {
+    // Listing devices is best effort.
+  }
+  const current = state.micStream?.getAudioTracks()[0]?.getSettings?.().deviceId || state.micDeviceId;
+  select.replaceChildren(...devices.map((device, index) => {
+    const option = document.createElement('option');
+    option.value = device.deviceId;
+    option.textContent = `🎙 ${device.label || `Microphone ${index + 1}`}`;
+    return option;
+  }));
+  if (current && devices.some((device) => device.deviceId === current)) select.value = current;
+  select.hidden = devices.length < 2 || !state.voiceSessionId;
+}
+
+async function changeMicrophone(deviceId) {
+  state.micDeviceId = deviceId;
+  state.micTrackFailed = false;
+  saveMicrophone(deviceId);
+  if (!state.voiceSessionId) return;
+  try {
+    await openMicrophone(deviceId);
+    showToast('Microphone changed. Speak and watch the bar move.');
+  } catch (error) {
+    showToast(error.message || 'That microphone could not be opened.');
+  }
+  // Restart recognition so it listens to the chosen microphone.
+  try {
+    state.recognition?.abort();
+  } catch {
+    // Not running; it starts again below.
+  }
+  window.setTimeout(startRecognition, 300);
 }
 
 async function openVoiceTransport() {
@@ -1030,7 +1174,7 @@ async function startVoiceSession() {
   setVoiceButtonDisabled(true);
   renderVoiceState('Requesting microphone permission…');
   try {
-    await requestMicrophonePermission();
+    await openMicrophone();
     state.shouldListen = true;
     state.finalResultKeys.clear();
     state.recognition = configureRecognition();
@@ -1087,6 +1231,8 @@ async function cleanupVoiceSession(closeServerSession = true) {
   state.pingTimer = null;
   stopListeningHealth();
   stopRecognition();
+  closeMicrophone();
+  $('mic-select').hidden = true;
   stopSpeaking();
   for (const key of [...state.thinking.keys()]) removeThinking(key);
   if (state.voiceSocket) {
@@ -1159,6 +1305,7 @@ $('voice-button').addEventListener('click', toggleVoiceSession);
 $('interrupt-button').addEventListener('click', () => interruptReply('stop'));
 $('language-select').value = state.language;
 $('language-select').addEventListener('change', (event) => setLanguage(event.target.value));
+$('mic-select').addEventListener('change', (event) => changeMicrophone(event.target.value));
 if (window.speechSynthesis) window.speechSynthesis.addEventListener?.('voiceschanged', () => pickVoice(state.language));
 window.addEventListener('beforeunload', () => {
   state.shouldListen = false;

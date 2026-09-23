@@ -253,6 +253,11 @@ button:disabled { cursor: wait; opacity: .68; }
   font-weight: 800;
 }
 .interrupt-button:hover { background: #bf6322; }
+.mic-meter { display: inline-block; width: 72px; height: 7px; overflow: hidden; background: #e3eef0; border-radius: 99px; }
+.mic-meter[hidden] { display: none; }
+.mic-meter-fill { display: block; width: 0; height: 100%; background: var(--teal); border-radius: 99px; transition: width 90ms linear; }
+.mic-select { max-width: 220px; height: 26px; padding: 0 6px; color: var(--teal-dark); background: #fff; border: 1px solid #cde8ea; border-radius: 8px; font: inherit; font-size: 11px; }
+.mic-select[hidden] { display: none; }
 .interrupt-button[hidden] { display: none; }
 .language-select {
   height: 43px;
