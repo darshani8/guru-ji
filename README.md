@@ -32,6 +32,15 @@ The client assistant (`apps/web/assistant/`, served at `/`) and the developer pl
 - `PUT /v1/intelligence/profile`, `POST /v1/intelligence/investigate`, mentions, digest, monitoring runs.
 - `GET /v1/reports/{id}/download`, notifications, email outbox, institutions.
 
+## Voice conversation
+
+The assistant page holds a two-way spoken conversation. The microphone stays on while Guru Ji speaks, so the person can talk over a reply: it stops at once and the new question is answered. Saying "stop", "ruko", "bas" or "ನಿಲ್ಲಿಸು" only silences it. Phrases said with a short pause become one request, and the echo of Guru Ji's own voice is ignored. On iPhone and iPad, where the microphone and speaker cannot both run, it listens between replies and shows a Stop button.
+
+- **Free conversation.** Greetings, general questions and follow-ups get a real reply. Anything the master agent cannot map becomes conversation with the configured model instead of "could not map this request". Institutional figures come only from the tools. The recent turns travel with each request; the server stores no transcript.
+- **Internet by voice.** "Search the internet for …", "latest news on …", "weather in …" (also in Hindi and Kannada) run an open-web search through the Tavily settings, with cited sources on screen. Results are untrusted data, queries carrying personal data are refused, and each person has a daily allowance (`GURU_WEB_SEARCHES_PER_PERSON_PER_DAY`). Questions about the institution's own presence online still go to the internet-intelligence tools.
+- **Indian voice and languages.** Replies come back in the language spoken: Indian English, Hindi (Devanagari or Hinglish) or Kannada. With `GURU_VOICE_TTS_PROVIDER=polly` they are spoken by Amazon Polly's Kajal (neural, en-IN and hi-IN), sentence by sentence. Otherwise, and for Kannada, the device's own Indian voice speaks.
+- **Protocol.** `POST /v1/voice/sessions` returns a one-use ticket. The client opens `/v1/voice/sessions/{id}/stream`, authenticates with the ticket, and opts into `thinking`, `speech` and `interrupt`. It then sends `utterance` (text, language, history) and `interrupt`, and receives `thinking`, `answer`, `speech` (sentence text, and Polly MP3 when configured) and `cancelled`. A turn that reached the master agent is never cut short; it finishes and is shown without being spoken. Sessions are rows in the control database, so any API task can serve the socket.
+
 ## Current state
 
 The repository now contains the complete all-phase reference implementation for the defined contracts:
@@ -44,7 +53,7 @@ The repository now contains the complete all-phase reference implementation for 
 - P5 providers/operations: deterministic and Ollama adapters, optional LiteLLM streaming/usage adapter, redaction-safe trace export, provider capability declarations, and production configuration guards.
 - P6 edge/integration boundaries: trusted Open edX/Moodle identity adapters, fail-closed OpenFGA checker, allowlisted MCP/agent-gateway targets, and LiveKit/Pipecat-style voice event normalization without raw-audio persistence.
 
-The College A deterministic connector remains available only for development/tests. The API also supports a deployment-managed `GURU_INSTITUTION_CONNECTORS` JSON registry so one universal read-only contract can route to multiple college connector services; each entry supplies its own source ID, institution ID, endpoint, approved tools, and secret-environment reference. The legacy single-connector variables remain supported. The reference compose stack adds PostgreSQL, Cerbos, and the authenticated connector service; it does not create or contact a real college system. The browser voice path receives final transcripts only, rejects binary audio frames, uses one-use tickets, and keeps bounded session/utterance limits.
+The College A deterministic connector remains available only for development/tests. The API also supports a deployment-managed `GURU_INSTITUTION_CONNECTORS` JSON registry so one universal read-only contract can route to multiple college connector services; each entry supplies its own source ID, institution ID, endpoint, approved tools, and secret-environment reference. The legacy single-connector variables remain supported. The reference compose stack adds PostgreSQL, Cerbos, and the authenticated connector service; it does not create or contact a real college system. The browser voice path receives final transcripts only, rejects binary audio frames, uses one-use tickets shared through the control database, and keeps bounded session, idle and utterance limits.
 
 The detailed ledger is in `docs/IMPLEMENTATION_STATUS.md`. The executable staging, production-canary, evidence, rollback, and sign-off sequence is in `docs/EXTERNAL_VALIDATION_PLAN.md`. These documents distinguish repository-complete implementation from production gates requiring real institutional contracts, credentials, deployments, and approvals.
 

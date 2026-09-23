@@ -208,6 +208,38 @@ class AppSettings:
     agent_planner: str = "deterministic"
     approval_ttl_seconds: int = 900
     voice_agent_mode: str = "assistant"
+    # A voice conversation stays open while the person keeps talking: it ends
+    # after voice_idle_timeout_seconds of silence or voice_session_max_seconds
+    # in all. Sessions live in the control database, so the request that opens
+    # one and the WebSocket that uses it may reach different API tasks.
+    voice_session_max_seconds: int = 1800
+    voice_idle_timeout_seconds: int = 180
+    voice_ticket_ttl_seconds: int = 60
+    voice_max_active_sessions: int = 50
+    voice_max_sessions_per_person: int = 2
+    voice_utterances_per_minute: int = 20
+    # Spoken replies: "browser" leaves speech to the browser's own voices;
+    # "polly" speaks with Amazon Polly (Kajal, Indian English and Hindi), with
+    # the browser voice as the fallback for Kannada or when Polly is unavailable.
+    voice_tts_provider: str = "browser"
+    voice_polly_voice_id: str = "Kajal"
+    voice_polly_engine: str = "neural"
+    voice_polly_region: str | None = None
+    voice_tts_timeout_seconds: float = 4.0
+    voice_tts_max_concurrency: int = 8
+    voice_tts_max_chars_per_reply: int = 1500
+    # Free conversation: greetings, general questions and follow-ups get a
+    # spoken reply instead of a refusal; institutional figures still come only
+    # from the tools. GURU_CONVERSATION_MODEL_ID picks a faster Claude model for
+    # these turns (the answer model is used otherwise).
+    conversation_enabled: bool = True
+    conversation_timeout_seconds: float = 8.0
+    conversation_model_id: str = ""
+    # Open-web search by voice or text ("search the internet for ..."), through
+    # the GURU_WEB_SEARCH_* Tavily settings, limited per person per day.
+    assistant_web_search: bool = True
+    web_searches_per_person_per_day: int = 25
+    assistant_web_exclude_domains: tuple[str, ...] = ()
     # The client assistant is always served at ``/``. The developer platform
     # console at ``/console/`` is a separate app; ``None`` means "not configured":
     # served outside production, not served in production unless a deployment
@@ -345,6 +377,25 @@ class AppSettings:
             agent_planner=os.getenv("GURU_AGENT_PLANNER", "deterministic").strip().lower(),
             approval_ttl_seconds=int(os.getenv("GURU_APPROVAL_TTL_SECONDS", "900")),
             voice_agent_mode=os.getenv("GURU_VOICE_AGENT_MODE", "assistant").strip().lower(),
+            voice_session_max_seconds=int(os.getenv("GURU_VOICE_SESSION_MAX_SECONDS", "1800")),
+            voice_idle_timeout_seconds=int(os.getenv("GURU_VOICE_IDLE_TIMEOUT_SECONDS", "180")),
+            voice_ticket_ttl_seconds=int(os.getenv("GURU_VOICE_TICKET_TTL_SECONDS", "60")),
+            voice_max_active_sessions=int(os.getenv("GURU_VOICE_MAX_ACTIVE_SESSIONS", "50")),
+            voice_max_sessions_per_person=int(os.getenv("GURU_VOICE_MAX_SESSIONS_PER_PERSON", "2")),
+            voice_utterances_per_minute=int(os.getenv("GURU_VOICE_UTTERANCES_PER_MINUTE", "20")),
+            voice_tts_provider=os.getenv("GURU_VOICE_TTS_PROVIDER", "browser").strip().lower(),
+            voice_polly_voice_id=os.getenv("GURU_VOICE_POLLY_VOICE_ID", "Kajal").strip(),
+            voice_polly_engine=os.getenv("GURU_VOICE_POLLY_ENGINE", "neural").strip().lower(),
+            voice_polly_region=(os.getenv("GURU_VOICE_POLLY_REGION") or os.getenv("AWS_REGION") or os.getenv("AWS_DEFAULT_REGION") or "").strip() or None,
+            voice_tts_timeout_seconds=float(os.getenv("GURU_VOICE_TTS_TIMEOUT_SECONDS", "4")),
+            voice_tts_max_concurrency=int(os.getenv("GURU_VOICE_TTS_MAX_CONCURRENCY", "8")),
+            voice_tts_max_chars_per_reply=int(os.getenv("GURU_VOICE_TTS_MAX_CHARS_PER_REPLY", "1500")),
+            conversation_enabled=_bool_env("GURU_CONVERSATION_ENABLED", True),
+            conversation_timeout_seconds=float(os.getenv("GURU_CONVERSATION_TIMEOUT_SECONDS", "8")),
+            conversation_model_id=os.getenv("GURU_CONVERSATION_MODEL_ID", "").strip(),
+            assistant_web_search=_bool_env("GURU_ASSISTANT_WEB_SEARCH", True),
+            web_searches_per_person_per_day=int(os.getenv("GURU_WEB_SEARCHES_PER_PERSON_PER_DAY", "25")),
+            assistant_web_exclude_domains=tuple(item.strip().lower().rstrip(".") for item in os.getenv("GURU_ASSISTANT_WEB_EXCLUDE_DOMAINS", "").split(",") if item.strip()),
             web_console_enabled=None if os.getenv("GURU_WEB_CONSOLE_ENABLED") is None else _bool_env("GURU_WEB_CONSOLE_ENABLED", False),
         )
 
@@ -667,6 +718,45 @@ class AppSettings:
             raise ValueError("GURU_APPROVAL_TTL_SECONDS must be positive")
         if self.voice_agent_mode not in {"assistant", "agent"}:
             raise ValueError("GURU_VOICE_AGENT_MODE must be assistant or agent")
+        self._validate_voice()
+
+    def _validate_voice(self) -> None:
+        if not 60 <= self.voice_session_max_seconds <= 14_400:
+            raise ValueError("GURU_VOICE_SESSION_MAX_SECONDS must be between 60 and 14400")
+        if not 15 <= self.voice_idle_timeout_seconds <= self.voice_session_max_seconds:
+            raise ValueError("GURU_VOICE_IDLE_TIMEOUT_SECONDS must be at least 15 and at most GURU_VOICE_SESSION_MAX_SECONDS")
+        if not 5 <= self.voice_ticket_ttl_seconds <= 300:
+            raise ValueError("GURU_VOICE_TICKET_TTL_SECONDS must be between 5 and 300")
+        if not 1 <= self.voice_max_active_sessions <= 10_000:
+            raise ValueError("GURU_VOICE_MAX_ACTIVE_SESSIONS must be between 1 and 10000")
+        if not 1 <= self.voice_max_sessions_per_person <= 20:
+            raise ValueError("GURU_VOICE_MAX_SESSIONS_PER_PERSON must be between 1 and 20")
+        if not 1 <= self.voice_utterances_per_minute <= 120:
+            raise ValueError("GURU_VOICE_UTTERANCES_PER_MINUTE must be between 1 and 120")
+        if self.voice_tts_provider not in {"browser", "polly"}:
+            raise ValueError("GURU_VOICE_TTS_PROVIDER must be browser or polly")
+        if self.voice_tts_provider == "polly":
+            if not self.voice_polly_region:
+                raise ValueError("GURU_VOICE_POLLY_REGION (or AWS_REGION) is required when GURU_VOICE_TTS_PROVIDER=polly")
+            if not re.fullmatch(r"[A-Za-z]{2,32}", self.voice_polly_voice_id):
+                raise ValueError("GURU_VOICE_POLLY_VOICE_ID must be a Polly voice name such as Kajal")
+            if self.voice_polly_engine not in {"neural", "generative", "standard"}:
+                raise ValueError("GURU_VOICE_POLLY_ENGINE must be neural, generative, or standard")
+        if not 0 < self.voice_tts_timeout_seconds <= 30:
+            raise ValueError("GURU_VOICE_TTS_TIMEOUT_SECONDS must be greater than 0 and at most 30")
+        if not 1 <= self.voice_tts_max_concurrency <= 64:
+            raise ValueError("GURU_VOICE_TTS_MAX_CONCURRENCY must be between 1 and 64")
+        if not 100 <= self.voice_tts_max_chars_per_reply <= 6000:
+            raise ValueError("GURU_VOICE_TTS_MAX_CHARS_PER_REPLY must be between 100 and 6000")
+        if not 0 < self.conversation_timeout_seconds <= 60:
+            raise ValueError("GURU_CONVERSATION_TIMEOUT_SECONDS must be greater than 0 and at most 60")
+        if self.conversation_model_id and not re.fullmatch(r"[A-Za-z0-9._:/@-]{1,200}", self.conversation_model_id):
+            raise ValueError("GURU_CONVERSATION_MODEL_ID must be a model identifier")
+        if not 0 <= self.web_searches_per_person_per_day <= 1000:
+            raise ValueError("GURU_WEB_SEARCHES_PER_PERSON_PER_DAY must be between 0 and 1000")
+        for domain in self.assistant_web_exclude_domains:
+            if any(character in domain for character in "/?#:") or urlparse(f"https://{domain}").hostname != domain:
+                raise ValueError("GURU_ASSISTANT_WEB_EXCLUDE_DOMAINS must contain hostnames, not URLs")
 
 
 __all__ = ["AppSettings"]

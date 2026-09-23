@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import logging
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from fastapi import Request
 
 from ..auth.oidc import JwtVerifier
+from ..conversation.dialogue import DialogueManager
+from ..conversation.web_search import OpenWebSearchService
 from ..auth.principal import principal_from_headers
 from ..config.settings import AppSettings
 from ..config.source_registry import SourceDefinition, SourceRegistry
@@ -15,6 +17,7 @@ from ..connectors.college_a.connector import CollegeADemoConnector
 from ..connectors.registry import ConnectorRegistry
 from ..connectors.remote_http import RemoteHttpConnector
 from ..integrations.edge import EdgeIdentityAdapter, MoodleAdapter, OpenEdxAdapter
+from ..internet_intelligence.search import TavilyIntelligenceSearchProvider
 from ..observability.export import HttpJsonTraceExporter
 from ..observability.tracing import TraceRecorder
 from ..orchestration.assistant_service import AssistantService
@@ -29,6 +32,7 @@ from ..tools.college_tools import build_college_tools
 from ..tools.health_tools import build_health_tools
 from ..tools.registry import ToolRegistry
 from ..voice.session_manager import VoiceSessionManager
+from ..voice.tts import NullSynthesizer, SpeechSynthesizer, build_synthesizer
 from ..web_research.extractor import AllowlistedHttpExtractor
 from ..web_research.research_service import PublicWebResearchService
 from ..web_research.search import TavilyHttpSearchProvider
@@ -53,8 +57,11 @@ class Runtime:
     auth_verifier: JwtVerifier | None = None
     edge_identity: EdgeIdentityAdapter | None = None
     platform: PlatformRuntime | None = None
+    dialogue: DialogueManager | None = None
+    tts: SpeechSynthesizer = field(default_factory=NullSynthesizer)
 
     def close(self) -> None:
+        self.tts.close()
         if self.platform is not None:
             self.platform.close()
         self.store.close()
@@ -135,6 +142,57 @@ def _claude(settings: AppSettings, *, effort: str, system: str | None = None) ->
         platform=settings.model_provider,
         aws_region=settings.bedrock_region,
     )
+
+
+def _build_conversation_model(settings: AppSettings, model):
+    """The model that talks with the person: the answer model, or a faster Claude model when one is named."""
+
+    if not settings.conversation_enabled:
+        return None
+    if settings.model_provider in _CLAUDE_PROVIDERS:
+        provider = _claude(settings, effort=settings.anthropic_effort, system=LATENCY_SENSITIVE_SYSTEM)
+        if settings.conversation_model_id:
+            provider = AnthropicProvider(
+                model_id=settings.conversation_model_id, api_key=settings.anthropic_api_key, effort=settings.anthropic_effort,
+                system=LATENCY_SENSITIVE_SYSTEM, timeout_seconds=settings.conversation_timeout_seconds, platform=settings.model_provider,
+                aws_region=settings.bedrock_region,
+            )
+        else:
+            provider.timeout_seconds = settings.conversation_timeout_seconds
+        return provider
+    return model
+
+
+def _build_open_web_search(settings: AppSettings, store, pdp: PolicyDecisionPoint) -> OpenWebSearchService | None:
+    """Open-web search for the assistant: needs the Tavily settings and GURU_ASSISTANT_WEB_SEARCH (on by default)."""
+
+    if not settings.assistant_web_search or settings.web_search_provider != "tavily" or not settings.web_search_api_key:
+        return None
+    provider = TavilyIntelligenceSearchProvider(
+        api_key=settings.web_search_api_key,
+        endpoint=settings.web_search_endpoint,
+        timeout_seconds=settings.web_search_timeout_seconds,
+        exclude_domains=settings.assistant_web_exclude_domains,
+    )
+    return OpenWebSearchService(
+        provider, store, pdp,
+        per_person_per_day=settings.web_searches_per_person_per_day,
+        max_results=settings.web_search_max_results,
+        timeout_seconds=settings.web_search_timeout_seconds,
+    )
+
+
+def _institution_names(platform: PlatformRuntime | None):
+    """The institution's own names, so "search the web about <our college>" stays an institutional task."""
+
+    if platform is None:
+        return None
+
+    def names(college_id: str) -> tuple[str, ...]:
+        record = platform.store.get_institution(college_id) or {}
+        return tuple(str(record.get(key)) for key in ("name", "short_name", "display_name") if record.get(key))
+
+    return names
 
 
 def _build_planner_model(settings: AppSettings, model):
@@ -228,6 +286,7 @@ def build_runtime(settings: AppSettings | None = None, *, start_workers: bool = 
     store = _build_store(settings)
     try:
         store.prune_retention(settings.audit_retention_days)
+        store.prune_ephemeral()
     except Exception as exc:  # noqa: BLE001 - housekeeping must not keep the API from starting
         logging.getLogger(__name__).warning("audit retention pruning skipped at start-up: %s", exc)
     pdp = _build_pdp(settings)
@@ -259,6 +318,19 @@ def build_runtime(settings: AppSettings | None = None, *, start_workers: bool = 
             platform.prune_intelligence(settings.intelligence_retention_days)
         except Exception as exc:  # noqa: BLE001 - housekeeping must not keep the API from starting
             logging.getLogger(__name__).warning("intelligence retention pruning skipped at start-up: %s", exc)
+    dialogue = DialogueManager(
+        assistant=assistant,
+        control_store=store,
+        tracer=tracer,
+        agent=platform.agent if platform is not None else None,
+        model=_build_conversation_model(settings, model),
+        wording_model=model,
+        web=_build_open_web_search(settings, store, pdp),
+        enabled=settings.conversation_enabled,
+        voice_agent_mode=settings.voice_agent_mode,
+        timeout_seconds=settings.conversation_timeout_seconds,
+        institution_names=_institution_names(platform),
+    )
     return Runtime(
         settings=settings,
         sources=sources,
@@ -266,13 +338,21 @@ def build_runtime(settings: AppSettings | None = None, *, start_workers: bool = 
         connectors=connectors,
         store=store,
         assistant=assistant,
-        voice=VoiceSessionManager(ttl_seconds=300, max_active=10),
+        voice=VoiceSessionManager(
+            ttl_seconds=settings.voice_session_max_seconds,
+            max_active=settings.voice_max_active_sessions,
+            store=store,
+            ticket_ttl_seconds=settings.voice_ticket_ttl_seconds,
+            max_per_person=settings.voice_max_sessions_per_person,
+        ),
         pdp=pdp,
         tracer=tracer,
         web_research=web_research,
         auth_verifier=auth_verifier,
         edge_identity=edge_identity,
         platform=platform,
+        dialogue=dialogue,
+        tts=build_synthesizer(settings),
     )
 
 

@@ -15,6 +15,7 @@ _STUDENT = frozenset({
     Capability.START_VOICE_SESSION,
     Capability.AGENT_COMMAND,
     Capability.DOCUMENTS_READ,
+    Capability.WEB_SEARCH,
 })
 
 _FACULTY = _STUDENT | frozenset({

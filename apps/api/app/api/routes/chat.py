@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from ..dependencies import principal_from_request, runtime_from_request
+from ...conversation.contracts import MAX_HISTORY_TURN_CHARS, MAX_HISTORY_TURNS, Turn
 from ...domain.principals import InstitutionScope
 from ...domain.streaming import (
     AnswerEvent,
@@ -31,6 +32,11 @@ class ScopeBody(BaseModel):
     batch_id: str | None = None
 
 
+class ChatHistoryTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    text: str = Field(min_length=1, max_length=MAX_HISTORY_TURN_CHARS * 4)
+
+
 class ChatBody(BaseModel):
     prompt: str = Field(min_length=1, max_length=12_000)
     request_id: str | None = None
@@ -38,6 +44,11 @@ class ChatBody(BaseModel):
     source_ids: list[str] = Field(default_factory=list)
     channel: str = "text"
     institution_scope: ScopeBody = Field(default_factory=ScopeBody)
+    # Opt in to free conversation (small talk, web search, replies in the
+    # person's language) in front of the read-only answer path.
+    conversational: bool = False
+    history: list[ChatHistoryTurn] = Field(default_factory=list, max_length=MAX_HISTORY_TURNS * 2)
+    language: Literal["en-IN", "hi-IN", "kn-IN"] | None = None
 
 
 router = APIRouter(prefix="/v1/chat", tags=["chat"])
@@ -150,7 +161,20 @@ async def chat(body: ChatBody, request: Request, stream: bool = False) -> dict[s
     if stream or accepts_stream:
         return await _stream_answer(body, request, principal)
     runtime = runtime_from_request(request)
-    answer = await runtime.assistant.ask(_build_request(body, request, principal), principal)
+    domain_request = _build_request(body, request, principal)
+    if body.conversational and runtime.dialogue is not None:
+        if not principal.can_access(domain_request.institution_scope):
+            raise HTTPException(status_code=403, detail="the requested institution is outside the authenticated scope")
+        try:
+            turn = Turn(
+                domain_request.request_id, principal, domain_request.institution_scope, body.prompt, channel="text", mode="assistant",
+                language_hint=body.language, history=tuple(item.model_dump() for item in body.history),  # type: ignore[arg-type]
+                conversation_id=body.conversation_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        return (await runtime.dialogue.respond(turn)).as_dict()
+    answer = await runtime.assistant.ask(domain_request, principal)
     return answer.as_dict()
 
 
