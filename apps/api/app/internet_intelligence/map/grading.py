@@ -97,6 +97,12 @@ def grade(asset: Mapping[str, Any], evidence: Sequence[Mapping[str, Any]], *, no
     configured = [item for item in ordered if item.get("kind") == "configured_domain"]
     if configured and configured[-1].get("polarity") == "refutes":
         supports = [item for item in supports if item.get("kind") != "configured_domain"]
+    # A handle that now names another account (the platform reports a new ID)
+    # keeps nothing seen before: that spoke for the old account, until a
+    # reviewer (or a fresh official link) ties the handle to the institution again.
+    reassigned = [_when(item.get("observed_at")) for item in refutes if item.get("kind") == "identity_changed"]
+    if reassigned:
+        supports = [item for item in supports if _when(item.get("observed_at")) > max(reassigned)]
     status = _status(ordered, current)
     takeover = _takeover(ordered)
     live = [item for item in supports if item.get("observed_via") in {"live", "owner", "reviewer"}]
@@ -184,7 +190,9 @@ def grade(asset: Mapping[str, Any], evidence: Sequence[Mapping[str, Any]], *, no
         elif kind == "imported_claim":
             candidates.append(("C", "unverified imported claim"))
         if kind in _CORROBORATING and item.get("channel"):
-            channels.setdefault(str(item["channel"]), str(kind))
+            # Wikidata, OpenStreetMap and user-made directories can all be edited
+            # by anyone (the same person, even), so together they are one channel.
+            channels.setdefault("community" if kind == "community_record" else str(item["channel"]), str(kind))
     if len(channels) >= 2:
         candidates.append(("B", f"{len(channels)} independent channels agree ({', '.join(sorted(channels))[:120]})"))
     if not candidates:

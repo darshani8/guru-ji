@@ -118,7 +118,7 @@ class IncidentDesk:
         the next sighting alerts it once somebody is configured.
         """
 
-        counts = {"new": 0, "repeat": 0, "reopened": 0, "notified": 0, "unrouted": 0, "failed": 0}
+        counts = {"new": 0, "repeat": 0, "reopened": 0, "escalated": 0, "notified": 0, "unrouted": 0, "failed": 0}
         urgent: dict[str, dict[str, Any]] = {}
         for incident in incidents:
             kind = str(incident.get("kind") or "incident")
@@ -231,7 +231,11 @@ class IncidentDesk:
             lines.append(f"... and {len(incidents) - DIGEST_LISTED} more open incident(s) on the incidents list.")
         if waiting:
             lines.append("Waiting for review: " + ", ".join(f"{count} {kind.replace('_', ' ')}" for kind, count in sorted(waiting.items())))
-        return {"institution_id": institution_id, "since": since, "incidents": incidents, "review_waiting": waiting, "found": found, "raised": raised, "passes": len(runs), "held": len(held), "summary": "\n".join(lines)}
+        # News items that name an institution and raise no court or controversy words are only counted here.
+        mentions = sum(int((run.get("counts") or {}).get("mentions", 0)) for run in runs)
+        if mentions:
+            lines.append(f"News: {mentions} item(s) mentioning a mapped institution.")
+        return {"institution_id": institution_id, "since": since, "incidents": incidents, "review_waiting": waiting, "found": found, "raised": raised, "passes": len(runs), "held": len(held), "mentions": mentions, "summary": "\n".join(lines)}
 
     def send_digest(self, institution_id: str, *, now: datetime | None = None, only_if_due: bool = False) -> dict[str, Any]:
         """Send the digest if there is anything to say; medium incidents are notified this way.

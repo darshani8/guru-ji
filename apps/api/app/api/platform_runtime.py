@@ -27,10 +27,11 @@ from ..internet_intelligence.map.connectors.apis import CourtRecordsConnector, W
 from ..internet_intelligence.map.connectors.archive import WaybackConnector
 from ..internet_intelligence.map.connectors.base import ConnectorRegistry
 from ..internet_intelligence.map.connectors.common import ApiClient
-from ..internet_intelligence.map.connectors.feeds import FeedConnector
+from ..internet_intelligence.map.connectors.feeds import FeedConnector, NewsFeedConnector
 from ..internet_intelligence.map.connectors.hubs import DirectoryConnector, LinkHubConnector
 from ..internet_intelligence.map.connectors.infrastructure import CertificateConnector, DnsConnector, RdapConnector
-from ..internet_intelligence.map.connectors.places import GooglePlayConnector, OpenStreetMapConnector
+from ..internet_intelligence.map.connectors.lookalikes import LookalikeDomainConnector
+from ..internet_intelligence.map.connectors.places import GooglePlayConnector, GooglePlaySearchConnector, OpenStreetMapConnector
 from ..internet_intelligence.map.connectors.search import SearchConnector, SpamProbeConnector
 from ..internet_intelligence.map.connectors.web import LeadPageConnector, OfficialSiteConnector, RecheckConnector
 from ..internet_intelligence.map.engine import EngineConfig, MapEngine
@@ -252,9 +253,11 @@ def map_connectors(settings: AppSettings, *, transport: Any | None = None, cache
         YouTubeConnector(api_key=settings.intelligence_youtube_api_key or "", active="youtube" in on, client=client),
         WikidataConnector(active="wikidata" in on, client=shared),
         CourtRecordsConnector(api_token=settings.intelligence_indiankanoon_token or "", active="court_records" in on, client=client),
-        CertificateConnector(active="certificates" in on, client=shared), RdapConnector(active="rdap" in on, client=shared), DnsConnector(active="dns" in on, client=client),
+        CertificateConnector(active="certificates" in on, client=shared, token=settings.intelligence_certspotter_token or ""), RdapConnector(active="rdap" in on, client=shared), DnsConnector(active="dns" in on, client=client),
         WaybackConnector(active="wayback" in on, client=client), LinkHubConnector(active="link_hub" in on), DirectoryConnector(active="directory" in on),
         OpenStreetMapConnector(active="openstreetmap" in on, client=shared), GooglePlayConnector(active="google_play" in on),
+        NewsFeedConnector(active="news_feed" in on), LookalikeDomainConnector(active="lookalike_domains" in on, client=client, token=settings.intelligence_certspotter_token or ""),
+        GooglePlaySearchConnector(active="google_play_search" in on),
         # Reads only the institution's own domains; its DNS TXT method is always offered, so it always has the DNS-over-HTTPS
         # client (one public lookup of a domain the institution named, whether or not the dns connector explores).
         OwnerClaimsConnector(key=_suppression_key(settings), dns=client),

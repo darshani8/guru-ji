@@ -332,7 +332,7 @@ ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
 TENANT_TABLES: tuple[str, ...] = ("intel_entities", "intel_assets", "intel_evidence", "intel_gold_items", "intel_suppression", "intel_map_runs", "intel_sources", "intel_quota", "intel_review_items", "intel_incidents", "intel_fetch_validators", "intel_owner_tokens")
 GLOBAL_TABLES: tuple[str, ...] = ("intel_budget_ledger", "intel_shared_cache", "intel_host_slots")
 SOURCE_CLASSES = frozenset({"rotation", "recheck", "explore"})
-REVIEW_KINDS = frozenset({"impersonation_candidate", "court_record", "dispute", "canary_leak", "run_gate", "candidate_account"})
+REVIEW_KINDS = frozenset({"impersonation_candidate", "court_record", "dispute", "canary_leak", "run_gate", "candidate_account", "news_mention", "lookalike_domain", "authority_nomination", "handle_reassigned"})
 REVIEW_STATUSES = frozenset({"open", "decided", "expired"})
 # The queue is for people: past this many open items, new ones are refused
 # (and counted) rather than burying the ones already waiting.
@@ -971,10 +971,13 @@ class MapStoreIncidents:
         self, institution_id: str, *, kind: str, target: str, severity: str, title: str, signals: Sequence[str] = (), examples: Sequence[str] = (), guidance: str = "",
         connector: str = "", run_id: str | None = None, now: str | None = None,
     ) -> tuple[dict[str, Any], str]:
-        """Record an incident once per (kind, target); returns (row, 'new' | 'repeat' | 'reopened').
+        """Record an incident once per (kind, target); returns (row, 'new' | 'repeat' | 'reopened' | 'escalated').
 
         Seeing it again only moves last_seen_at and counts it; a resolved
         incident that comes back is reopened (and will be notified again).
+        One seen again at a higher severity (a domain expiring within days,
+        not weeks) is escalated: it is open again and not yet notified, so
+        the urgent alert goes out even though the digest already named it.
         """
 
         if severity not in {"low", "medium", "high"}:
@@ -994,13 +997,15 @@ class MapStoreIncidents:
             else:
                 incident_id = str(existing["incident_id"])
                 reopened = existing["status"] == "resolved"
+                ranks = {"low": 0, "medium": 1, "high": 2}
+                rises = ranks[severity] > ranks.get(str(existing["severity"]), 0)
                 self.backend.execute(
                     "UPDATE intel_incidents SET last_seen_at = ?, times_seen = times_seen + 1, signals_json = ?, examples_json = ?, run_id = COALESCE(?, run_id), "
-                    "severity = CASE WHEN ? = 'high' THEN 'high' ELSE severity END, status = CASE WHEN status = 'resolved' THEN 'open' ELSE status END, "
-                    "notified_at = CASE WHEN status = 'resolved' THEN NULL ELSE notified_at END WHERE institution_id = ? AND incident_id = ?",
-                    (stamp, _json(list(signals)[:20]), _json(list(examples)[:10]), run_id, severity, institution_id, incident_id),
+                    "severity = ?, status = CASE WHEN status = 'resolved' OR ? = 1 THEN 'open' ELSE status END, "
+                    "notified_at = CASE WHEN status = 'resolved' OR ? = 1 THEN NULL ELSE notified_at END WHERE institution_id = ? AND incident_id = ?",
+                    (stamp, _json(list(signals)[:20]), _json(list(examples)[:10]), run_id, severity if rises else str(existing["severity"]), int(rises), int(rises), institution_id, incident_id),
                 )
-                verdict = "reopened" if reopened else "repeat"
+                verdict = "reopened" if reopened else "escalated" if rises else "repeat"
             row = self.backend.fetchone("SELECT * FROM intel_incidents WHERE institution_id = ? AND incident_id = ?", (institution_id, incident_id))
         return self._incident_row(row), verdict
 

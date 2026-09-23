@@ -455,7 +455,9 @@ ${payload.headers.map((header) => `<div>${escapeHtml(header)}</div><div><select 
         const truth = data.ground_truth || {};
         manager = `<h4>Open incidents</h4>${incidents}<p class="result-meta">Waiting for review: ${waiting}. Ground truth: holdout recall ${percent(truth.holdout_recall)}, precision ${percent(truth.precision)}, seed verification ${percent(truth.seed_verification_rate)}, look-alike leaks ${(truth.canary_leaks || []).length}.</p>${runSeries(data.series || [], data.cost)}`;
       }
-      box.innerHTML = `<p>${data.verified} verified of ${data.assets} mapped. ${grades}</p><p class="result-meta">Coverage: ${data.grid ? `${data.grid.covered} of ${data.grid.cells} entity–platform cells have a verified account` : ''}; ${estimate}.${shown}</p><p class="result-meta">${freshness}${overdue}.</p>${grid}${manager}`;
+      // Rows the OpenStreetMap connector found carry its ODbL attribution wherever they are shown.
+      const osm = (data.connectors || []).some((row) => row.connector === 'openstreetmap' && row.runs) ? '<p class="result-meta">Includes place data © OpenStreetMap contributors (ODbL).</p>' : '';
+      box.innerHTML = `<p>${data.verified} verified of ${data.assets} mapped. ${grades}</p><p class="result-meta">Coverage: ${data.grid ? `${data.grid.covered} of ${data.grid.cells} entity–platform cells have a verified account` : ''}; ${estimate}.${shown}</p><p class="result-meta">${freshness}${overdue}.</p>${grid}${manager}${osm}`;
     } catch (error) {
       box.innerHTML = `<p class="muted">${escapeHtml(error.message)}</p>`;
     }

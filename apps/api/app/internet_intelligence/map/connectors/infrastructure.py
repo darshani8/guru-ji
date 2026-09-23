@@ -6,11 +6,18 @@ nobody remembered. These connectors watch for that directly:
 
 * certificates: subdomains of an official domain seen in certificate
   transparency logs become leads (a live, healthy one is one step from its
-  parent's grade, because only the domain's owner controls its DNS);
+  parent's grade, because only the domain's owner controls its DNS). The
+  logs are read through SSLMate's Cert Spotter API (unauthenticated at a
+  low rate, or with GURU_INTELLIGENCE_CERTSPOTTER_TOKEN); crt.sh is not
+  used because its robots.txt disallows every path;
 * rdap: registration expiry and hold / redemption status, raised as an
-  incident well before a domain lapses;
+  incident well before a domain lapses (urgent within two weeks);
 * dns: a name that no longer resolves, or whose name servers are a parking
   service, is recorded as such.
+
+RDAP and DNS watch only domains the institution, a reviewer or a regulator
+named, or that the map grades B or better: a domain only a community edit
+(Wikidata, OpenStreetMap) calls official must not raise urgent alerts.
 """
 
 from __future__ import annotations
@@ -21,16 +28,18 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from ..pipeline import nominated
 from .base import ConnectorContext, ConnectorResult, Lead
 from .common import ApiClient
 
-CRTSH = "https://crt.sh/"
+CERTSPOTTER = "https://api.certspotter.com/v1/issuances"
 RDAP = "https://rdap.org/domain/"
 DOH = "https://dns.google/resolve"
 _SECOND_LEVEL = ("ac.in", "edu.in", "org.in", "co.in", "gov.in", "net.in", "res.in", "nic.in", "ernet.in", "co.uk", "ac.uk", "org.uk", "com.au", "edu.au")
 _PARKING_NS = re.compile(r"sedoparking|parkingcrew|bodis|above\.com|dan\.com|afternic|parklogic|namebrightdns|domaincontrol-parking|parked|uniregistrymarket|hugedomains", re.IGNORECASE)
 _HOST = re.compile(r"^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,}$")
 EXPIRY_WARNING = timedelta(days=45)
+EXPIRY_URGENT = timedelta(days=14)
 _LAPSING = ("redemption period", "pending delete", "client hold", "server hold", "inactive")
 
 
@@ -47,6 +56,19 @@ def _official_domains(context: ConnectorContext, *, grades: frozenset[str] | Non
         domain for domain in context.store.iter_assets(context.institution_id, kind="domain", relation="official")
         if grades is None or domain["grade"] in grades
     ]
+
+
+def _watched_domains(context: ConnectorContext) -> list[dict[str, Any]]:
+    """Official domains the institution, a reviewer or a regulator named, or graded B or better (the official_site rule)."""
+
+    return [domain for domain in _official_domains(context) if domain["grade"] in {"O", "A", "A-arch", "B"} or nominated(context.store, context.institution_id, domain["asset_id"])]
+
+
+def certificate_names(client: ApiClient, domain: str, *, token: str = "", include_subdomains: bool = True) -> Any:
+    """Ask Cert Spotter for the unexpired certificates issued for ``domain`` (and its subdomains)."""
+
+    headers = {"Authorization": f"Bearer {token}"} if token else None
+    return client.request(CERTSPOTTER, params={"domain": domain, "include_subdomains": "true" if include_subdomains else "false", "expand": "dns_names"}, headers=headers)
 
 
 def _plan(connector: Any, context: ConnectorContext, domains: list[dict[str, Any]], work_class: str = "recheck") -> list[Lead]:
@@ -66,9 +88,10 @@ def _domain(context: ConnectorContext, source: Mapping[str, Any]) -> dict[str, A
 class CertificateConnector:
     active: bool = False
     client: ApiClient = field(default_factory=ApiClient)
+    token: str = field(default="", repr=False)  # an optional Cert Spotter API key (Bearer)
     name: str = "certificates"
     access_mode: str = "registry"
-    budget_key: str = "crtsh"
+    budget_key: str = "certificates"
     max_grade: str = "B"
     default_interval: int = 30 * 86400
     max_subdomains: int = 40
@@ -87,14 +110,15 @@ class CertificateConnector:
         if domain is None:
             return ConnectorResult(outcome="asset_missing", prune=True)
         host = domain["asset_key"].removeprefix("web:")
-        response = await self.client.request(CRTSH, params={"q": f"%.{host}", "output": "json", "exclude": "expired"})
+        response = await certificate_names(self.client, host, token=self.token)
         if not response.ok:
             return ConnectorResult(outcome=response.outcome, failed=True)
         rows = response.json()
         names: list[str] = []
         for row in rows if isinstance(rows, list) else []:
-            for name in str((row or {}).get("name_value", "")).lower().split("\n"):
-                name = name.strip().removeprefix("*.").removeprefix("www.")
+            listed = row.get("dns_names") if isinstance(row, dict) and str(row.get("not_after") or "9999")[:19] >= context.now.isoformat()[:19] else None
+            for name in listed if isinstance(listed, list) else []:
+                name = str(name).lower().strip().removeprefix("*.").removeprefix("www.")
                 if name != host and name.endswith("." + host) and _HOST.match(name) and name not in names:
                     names.append(name)
         result = ConnectorResult(outcome="ok")
@@ -122,9 +146,9 @@ class RdapConnector:
         return 1.0
 
     def plan(self, context: ConnectorContext) -> list[Lead]:
-        # Every domain the map calls official, whatever its grade: a lapsing
-        # domain matters most when it is already failing.
-        return _plan(self, context, _official_domains(context))
+        # Every watched domain, whatever its grade: a lapsing domain matters
+        # most when it is already failing (a nominated one stays watched).
+        return _plan(self, context, _watched_domains(context))
 
     async def run(self, source: Mapping[str, Any], context: ConnectorContext) -> ConnectorResult:
         domain = _domain(context, source)
@@ -153,7 +177,8 @@ class RdapConnector:
             expires = expires if expires.tzinfo else expires.replace(tzinfo=timezone.utc)
             context.store.set_observation(context.institution_id, domain["asset_id"], registration_expires_at=expires.isoformat())
             if expires - context.now <= EXPIRY_WARNING:
-                result.incidents.append({"kind": "domain_expiring", "target": name, "signals": [f"registration expires {expires.date().isoformat()}"], "severity": "high" if expires <= context.now else "medium"})
+                # Urgent within two weeks: the store escalates the incident the digest already named.
+                result.incidents.append({"kind": "domain_expiring", "target": name, "signals": [f"registration expires {expires.date().isoformat()}"], "severity": "high" if expires - context.now <= EXPIRY_URGENT else "medium"})
         lapsing = [status for status in statuses if any(flag in status for flag in _LAPSING)]
         if lapsing:
             result.incidents.append({"kind": "domain_lapsing", "target": name, "signals": lapsing[:5], "severity": "high"})
@@ -193,7 +218,7 @@ class DnsConnector:
         return 2.0
 
     def plan(self, context: ConnectorContext) -> list[Lead]:
-        return _plan(self, context, _official_domains(context))
+        return _plan(self, context, _watched_domains(context))
 
     async def run(self, source: Mapping[str, Any], context: ConnectorContext) -> ConnectorResult:
         domain = _domain(context, source)
@@ -218,4 +243,4 @@ class DnsConnector:
         return result
 
 
-__all__ = ["CertificateConnector", "DnsConnector", "RdapConnector", "registrable", "resolve"]
+__all__ = ["CERTSPOTTER", "CertificateConnector", "DnsConnector", "RdapConnector", "certificate_names", "registrable", "resolve"]

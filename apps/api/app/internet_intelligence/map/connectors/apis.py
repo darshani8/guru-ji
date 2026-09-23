@@ -22,6 +22,7 @@ from .base import ConnectorContext, ConnectorResult, Lead
 from .common import ApiClient, _compact, unique
 
 YOUTUBE_CHANNELS = "https://www.googleapis.com/youtube/v3/channels"
+YOUTUBE_PLAYLIST_ITEMS = "https://www.googleapis.com/youtube/v3/playlistItems"
 WIKIDATA_API = "https://www.wikidata.org/w/api.php"
 INDIANKANOON_SEARCH = "https://api.indiankanoon.org/search/"
 _URL = re.compile(r"https?://[^\s<>\"')\]]+", re.IGNORECASE)
@@ -38,7 +39,16 @@ def _existing(context: ConnectorContext, name: str) -> set[str]:
 
 @dataclass(slots=True)
 class YouTubeConnector:
-    """channels.list for each mapped channel: existence, subscriber count, and the links it declares."""
+    """channels.list for each mapped channel: existence, subscriber count, the last upload, and the links it declares.
+
+    The last upload comes from the channel's uploads playlist
+    (playlistItems.list, one more unit of quota), because youtube.com's
+    robots.txt disallows the channel feeds to crawlers. A handle that now
+    names a different channel ID than the one stored is recorded as an
+    identity change and sent for review: what was seen before no longer
+    speaks for it. A channel graded B or better also passes on the websites
+    and link hubs its description names, as leads within the hop cap.
+    """
 
     api_key: str = field(default="", repr=False)
     active: bool = False
@@ -53,7 +63,7 @@ class YouTubeConnector:
         return self.active and bool(self.api_key)
 
     def cost(self, source: Mapping[str, Any]) -> float:
-        return 1.0
+        return 2.0  # channels.list, then playlistItems.list for the last upload
 
     def plan(self, context: ConnectorContext) -> list[Lead]:
         existing = _existing(context, self.name)
@@ -68,7 +78,7 @@ class YouTubeConnector:
         if asset is None or asset["platform"] != "youtube":
             return ConnectorResult(outcome="asset_missing", prune=True)
         key = asset["asset_key"].removeprefix("youtube:")
-        params: dict[str, Any] = {"part": "snippet,statistics", "key": self.api_key, "maxResults": 1}
+        params: dict[str, Any] = {"part": "snippet,statistics,contentDetails", "key": self.api_key, "maxResults": 1}
         if key.startswith("channel:"):
             params["id"] = key.removeprefix("channel:")
         elif key.startswith("@"):
@@ -82,7 +92,7 @@ class YouTubeConnector:
             return ConnectorResult(outcome=response.outcome, failed=True)
         payload = response.json() or {}
         items = payload.get("items") if isinstance(payload, dict) else None
-        result = ConnectorResult(outcome="ok", touched={asset["asset_id"]})
+        result = ConnectorResult(outcome="ok", touched={asset["asset_id"]}, cost=1.0)
         if not items:
             # The API is the platform's own answer: the channel does not exist (any more).
             context.store.add_evidence(context.institution_id, asset_id=asset["asset_id"], kind="liveness", polarity="refutes", detail="not_found:api", source_url=asset["url"], channel="youtube_api", observed_via="live", run_id=context.run_id)
@@ -92,6 +102,7 @@ class YouTubeConnector:
         snippet = channel.get("snippet") or {}
         statistics = channel.get("statistics") or {}
         channel_id = str(channel.get("id") or "")[:40]
+        reassigned = self._reassigned(context, asset, key, channel_id, result)
         followers = None if statistics.get("hiddenSubscriberCount") else _int(statistics.get("subscriberCount"))
         context.store.set_observation(context.institution_id, asset["asset_id"], platform_id=channel_id or None, followers=followers, followers_source="youtube_api" if followers is not None else None)
         title = str(snippet.get("title") or "")[:120]
@@ -99,7 +110,8 @@ class YouTubeConnector:
         context.store.add_evidence(context.institution_id, asset_id=asset["asset_id"], kind="api_identity", detail=f"youtube {channel_id}: {title}", source_url=asset["url"], channel="youtube_api", observed_via="live", run_id=context.run_id)
         # A channel that names one of the entity's official sites in its description links back to it.
         official_hosts = {domain["asset_key"].removeprefix("web:") for domain in context.store.iter_assets(context.institution_id, kind="domain", relation="official") if domain["entity_id"] == asset["entity_id"]}
-        for url in unique(_URL.findall(str(snippet.get("description") or ""))):
+        described = unique(_URL.findall(str(snippet.get("description") or "")))
+        for url in described:
             host = (urlparse(url).hostname or "").lower().removeprefix("www.")
             if host in official_hosts:
                 context.store.add_evidence(context.institution_id, asset_id=asset["asset_id"], kind="backlink", detail=f"channel description links {host}", source_url=asset["url"], channel="youtube_api", observed_via="live", run_id=context.run_id)
@@ -108,7 +120,77 @@ class YouTubeConnector:
             twin = context.store.find_asset(context.institution_id, f"youtube:channel:{channel_id}")
             if twin and twin["asset_id"] != asset["asset_id"]:
                 result.notes.append(f"same channel as {twin['asset_key']}")
+        uploads = str(((channel.get("contentDetails") or {}).get("relatedPlaylists") or {}).get("uploads") or "")
+        if re.fullmatch(r"UU[\w-]{10,60}", uploads):
+            await self._last_upload(context, asset, uploads, result)
+        if not reassigned:
+            self._described_leads(context, source, asset, described, official_hosts, result)
         return result
+
+    def _reassigned(self, context: ConnectorContext, asset: Mapping[str, Any], key: str, channel_id: str, result: ConnectorResult) -> bool:
+        """Whether a handle now names another channel than the one stored (released, renamed, taken over).
+
+        Recorded before anything else from this run, so the grader treats all
+        earlier support as history until a reviewer links the account again.
+        """
+
+        stored = str(asset.get("platform_id") or "")
+        if not key.startswith(("@", "user:")) or not stored or not channel_id or stored == channel_id:
+            return False
+        context.store.add_evidence(context.institution_id, asset_id=asset["asset_id"], kind="identity_changed", polarity="refutes", detail=f"youtube {stored} -> {channel_id}", source_url=asset["url"], channel="youtube_api", observed_via="live", run_id=context.run_id)
+        result.review.append({
+            "kind": "handle_reassigned", "asset_id": asset["asset_id"], "entity_id": asset["entity_id"], "url": asset["url"], "severity": "high",
+            "title": f"{asset['handle']} now names a different YouTube channel",
+            "detail": f"The map knew {asset['handle']} as channel {stored}; the YouTube Data API now returns {channel_id}. What was seen before no longer counts until a reviewer confirms the account again.",
+        })
+        return True
+
+    async def _last_upload(self, context: ConnectorContext, asset: Mapping[str, Any], playlist_id: str, result: ConnectorResult) -> None:
+        """Date the channel from the newest item of its uploads playlist (one more unit of quota)."""
+
+        from ...relevance import parse_published
+        from .feeds import DORMANT_AFTER
+
+        result.cost = 2.0
+        response = await self.client.request(YOUTUBE_PLAYLIST_ITEMS, params={"part": "contentDetails", "playlistId": playlist_id, "maxResults": 1, "key": self.api_key})
+        payload = response.json() if response.ok else None
+        items = payload.get("items") if isinstance(payload, dict) else None
+        details = (items[0].get("contentDetails") or {}) if items and isinstance(items[0], dict) else {}
+        latest = parse_published(details.get("videoPublishedAt"))
+        if latest is None:
+            return
+        context.store.set_observation(context.institution_id, asset["asset_id"], last_activity_at=latest.isoformat())
+        if context.now - latest > DORMANT_AFTER:
+            result.notes.append(f"dormant: nothing uploaded since {latest.date().isoformat()}")
+
+    @staticmethod
+    def _described_leads(context: ConnectorContext, source: Mapping[str, Any], asset: Mapping[str, Any], urls: list[str], official_hosts: set[str], result: ConnectorResult) -> None:
+        """A verified channel (B or better) vouches for where its description points, one hop on.
+
+        Websites become lead_page leads; a Linktree becomes a link hub the
+        channel links to (one grade below the channel) and is read in turn.
+        """
+
+        hops = int(source.get("hops") or 0) + 1
+        if asset["grade"] not in {"O", "A", "B"} or hops > context.max_hops:
+            return
+        for url in urls[:10]:
+            try:
+                ref = asset_ref(url[:500])
+            except ValueError:
+                continue
+            if context.store.is_suppressed(context.institution_id, ref.key):
+                continue
+            if ref.platform == "website" and ref.kind in {"domain", "page"} and (urlparse(ref.url).hostname or "").removeprefix("www.") not in official_hosts:
+                result.leads.append(Lead("lead_page", ref.url, entity_id=asset["entity_id"], hops=hops))
+            elif ref.platform == "linktree" and ref.kind == "account":
+                hub_id, created = context.store.upsert_asset(context.institution_id, ref, entity_id=asset["entity_id"], relation="official" if asset["relation"] == "official" else "unknown", note=f"named in the description of {asset['handle']}")
+                context.store.add_evidence(context.institution_id, asset_id=hub_id, kind="hub_link", detail=f"{asset['grade']}:channel description", source_url=asset["url"], source_asset_id=asset["asset_id"], channel="youtube_api", observed_via="live", run_id=context.run_id)
+                result.touched.add(hub_id)
+                result.leads.append(Lead("link_hub", hub_id, entity_id=asset["entity_id"], asset_id=hub_id, hops=hops))
+                if created:
+                    result.new_assets.append(ref.key)
+                    result.yield_count += 1
 
 
 def _int(value: Any) -> int | None:

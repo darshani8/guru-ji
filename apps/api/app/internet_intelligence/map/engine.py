@@ -66,7 +66,7 @@ DEFAULT_CLASS_SHARES: dict[str, tuple[tuple[str, float], ...]] = {"search": (("r
 DRY_PASSES_TO_PAUSE = 2
 
 DEFAULT_BUDGETS: dict[str, float] = {
-    "fetch": 3000, "search": 100, "feed": 2000, "youtube_api": 5000, "wikidata": 300, "crtsh": 100, "rdap": 200, "wayback": 300, "dns": 200, "indiankanoon": 20, "openstreetmap": 100,
+    "fetch": 3000, "search": 100, "feed": 2000, "youtube_api": 5000, "wikidata": 300, "certificates": 100, "rdap": 200, "wayback": 300, "dns": 200, "indiankanoon": 20, "openstreetmap": 100, "lookalikes": 1000,
 }
 
 
@@ -300,6 +300,7 @@ class MapEngine:
         counts["new_assets"] += len(result.new_assets)
         counts["raised"] += max(0, result.yield_count - len(result.new_assets))
         counts["failed"] += int(result.failed)
+        counts["mentions"] = counts.get("mentions", 0) + result.mentions
         touched |= result.touched
         incidents.extend({**incident, "connector": connector.name, "source_id": source["source_id"]} for incident in result.incidents)
         review.extend({**item, "connector": connector.name, "source_id": source["source_id"]} for item in result.review)

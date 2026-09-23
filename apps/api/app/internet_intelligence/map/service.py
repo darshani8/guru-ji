@@ -32,12 +32,16 @@ MAX_SEED_BYTES = 2_000_000
 # The bundled sweep has about 440 rows; a larger file is split into several imports.
 MAX_SEED_ROWS = 5_000
 MAX_HARVEST_DOMAINS = 10
-MANUAL_SOURCE_CONNECTORS = frozenset({"directory", "lead_page", "feed"})
+MANUAL_SOURCE_CONNECTORS = frozenset({"directory", "lead_page", "feed", "news_feed"})
 # What a person may decide about each kind of review item.
 _ON_ASSETS = frozenset({"confirm", "reject", "lookalike", "impersonation", "personal", "dismiss"})
 DECISIONS: dict[str, frozenset[str]] = {
     "impersonation_candidate": _ON_ASSETS, "dispute": _ON_ASSETS, "candidate_account": _ON_ASSETS, "canary_leak": frozenset({"acknowledge", "dismiss"}),
     "court_record": frozenset({"acknowledge", "dismiss"}), "run_gate": frozenset({"publish", "discard"}),
+    # A news item, or a similar domain someone registered, is only ever noted; an authority's listing
+    # or a reassigned handle is decided about the domain or account it names.
+    "news_mention": frozenset({"acknowledge", "dismiss"}), "lookalike_domain": frozenset({"acknowledge", "dismiss"}),
+    "authority_nomination": _ON_ASSETS, "handle_reassigned": _ON_ASSETS,
 }
 ASSET_DECISIONS = frozenset({"confirm", "reject", "lookalike", "impersonation", "personal"})
 # The summary's grid is cut here for display (and says so); the engine searches every entity.
@@ -246,7 +250,9 @@ class MapService:
             raise ValueError("the target must be a public http(s) URL")
         if self.store.is_suppressed(institution_id, target.strip()):
             raise ValueError("that address is suppressed for this institution")
-        source_id, created = self.store.upsert_source(institution_id, connector=connector, target=target.strip(), origin="seed", work_class="explore" if connector == "lead_page" else "rotation", hops=0, interval_seconds=30 * 86400)
+        # Each connector's own pace: a news feed daily, a directory page monthly.
+        intervals = {row["name"]: int(row["interval_seconds"]) for row in self.engine.registry.describe()} if self.engine else {}
+        source_id, created = self.store.upsert_source(institution_id, connector=connector, target=target.strip(), origin="seed", work_class="explore" if connector == "lead_page" else "rotation", hops=0, interval_seconds=intervals.get(connector, 30 * 86400))
         return {"source_id": source_id, "created": created, "enabled": bool(self.engine and self.engine.registry.get(connector))}
 
     # ------------------------------------------------------------ review queue
