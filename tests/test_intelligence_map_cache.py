@@ -31,18 +31,18 @@ class SharedSearchCacheTests(unittest.IsolatedAsyncioTestCase):
         for institution in ("bgscet", "bgsit"):
             self.store.upsert_entity(institution, name=MATH, kind="organisation", locations=["Nagamangala"])
         provider = StaticSearchProvider((MATH_HIT,))
-        engine = MapEngine(self.store, ConnectorRegistry([SearchConnector(active=True)]), EngineConfig(sources_per_tick=len(PLATFORM_DOMAINS)), search=provider, clock=Clock(), profile_loader=lambda institution: None)
+        engine = MapEngine(self.store, ConnectorRegistry([SearchConnector(active=True)]), EngineConfig(sources_per_tick=len(PLATFORM_DOMAINS) + 1), search=provider, clock=Clock(), profile_loader=lambda institution: None)
         first, second = await engine.tick_all(["bgscet", "bgsit"])
-        self.assertEqual((first["counts"]["sources"], second["counts"]["sources"]), (len(PLATFORM_DOMAINS), len(PLATFORM_DOMAINS)))
-        self.assertEqual(len(provider.calls), len(PLATFORM_DOMAINS), "each question is paid for once, not once per institution")
+        self.assertEqual((first["counts"]["sources"], second["counts"]["sources"]), (len(PLATFORM_DOMAINS) + 1, len(PLATFORM_DOMAINS) + 1))
+        self.assertEqual(len(provider.calls), len(PLATFORM_DOMAINS) + 1, "each question (every platform, and the open web) is paid for once, not once per institution")
         costs = {institution: {row["connector"]: row["cost"] for row in self.store.source_yields(institution)} for institution in ("bgscet", "bgsit")}
-        self.assertEqual(costs, {"bgscet": {"search": float(len(PLATFORM_DOMAINS))}, "bgsit": {"search": 0.0}}, "an answer from the shared cache costs 0")
+        self.assertEqual(costs, {"bgscet": {"search": float(len(PLATFORM_DOMAINS) + 1)}, "bgsit": {"search": 0.0}}, "an answer from the shared cache costs 0")
         for institution in ("bgscet", "bgsit"):
             self.assertIsNotNone(self.store.find_asset(institution, "instagram:adichunchanagiri_math"), "the cached answer is as good as a fresh one")
         # A later run, from anywhere, is still answered from the cache.
         wrapper = cached_search(provider, self.store, clock=Clock())
         await wrapper.search(f'"{MATH}" Nagamangala', max_results=10, include_domains=["instagram.com"])
-        self.assertEqual((wrapper.provider_calls, len(provider.calls)), (0, len(PLATFORM_DOMAINS)))
+        self.assertEqual((wrapper.provider_calls, len(provider.calls)), (0, len(PLATFORM_DOMAINS) + 1))
 
     async def test_the_key_is_the_provider_the_normalised_query_and_the_parameters(self):
         base = search_cache_key("tavily", '"BGS  College" Bengaluru', {"max_results": 10, "include_domains": ["x.com", "instagram.com"]})

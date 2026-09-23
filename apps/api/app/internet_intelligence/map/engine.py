@@ -59,6 +59,9 @@ from .store import MapStore
 # What one budget unit costs, relative to the others: work on a free budget is
 # claimed before any paid work, and paid work cheapest first.
 DEFAULT_UNIT_PRICES: dict[str, float] = {"search": 1.0, "indiankanoon": 1.0}
+# Paid search is spent about 60% on rotating name x topic queries, 20% on
+# re-verifying what the map knows and 20% on new leads.
+DEFAULT_CLASS_SHARES: dict[str, tuple[tuple[str, float], ...]] = {"search": (("rotation", 0.6), ("recheck", 0.2), ("explore", 0.2))}
 # How many passes in a row may explore without finding anything before discovery pauses.
 DRY_PASSES_TO_PAUSE = 2
 
@@ -80,6 +83,8 @@ class EngineConfig:
     budgets: Mapping[str, float] = field(default_factory=lambda: dict(DEFAULT_BUDGETS))
     tenant_share: float = 0.5
     unit_prices: Mapping[str, float] = field(default_factory=lambda: dict(DEFAULT_UNIT_PRICES))
+    # A budget split by work class: each class may spend only its share of the day's cap.
+    class_shares: Mapping[str, tuple[tuple[str, float], ...]] = field(default_factory=lambda: dict(DEFAULT_CLASS_SHARES))
 
 
 @dataclass(slots=True)
@@ -172,6 +177,12 @@ class MapEngine:
             if need == 0 or (cap * self.config.tenant_share - used_here >= need and cap - used_all >= need):
                 names.append(name)
         return names
+
+    def _class_budget(self, budget_key: str, work_class: str | None) -> tuple[str, float] | None:
+        """(the class's own budget key, its share of the cap) when this budget is split by work class."""
+
+        share = dict(self.config.class_shares.get(budget_key, ())).get(str(work_class or ""))
+        return (f"{budget_key}:{work_class}", float(share)) if share is not None else None
 
     def _price(self, name: str) -> float:
         connector = self.registry.get(name)
@@ -281,6 +292,9 @@ class MapEngine:
         actual = max(0.0, float(result.cost)) if result.cost is not None else estimate
         if day is not None and actual < estimate:
             self.store.refund_budget(institution_id, connector=connector.budget_key, units=estimate - actual, day=day)
+            split = self._class_budget(connector.budget_key, source.get("work_class"))
+            if split is not None:
+                self.store.refund_budget(institution_id, connector=split[0], units=estimate - actual, day=day)
         spend[connector.budget_key] = spend.get(connector.budget_key, 0.0) + actual
         counts["sources"] += 1
         counts["new_assets"] += len(result.new_assets)
@@ -362,7 +376,19 @@ class MapEngine:
                         continue
                     estimate = float(connector.cost(source))
                     cap = float(self.config.budgets.get(connector.budget_key, 0))
+                    split = self._class_budget(connector.budget_key, source.get("work_class"))
+                    if estimate > 0 and split is not None:
+                        # This class's share of the day is spent: its sources wait, the other classes go on.
+                        class_key, share = split
+                        # A share never rounds a class out altogether: it may always spend one run's worth (the whole cap still binds).
+                        class_cap, class_tenant = max(cap * share, estimate), max(cap * share * self.config.tenant_share, estimate)
+                        if not self.store.reserve_budget(institution_id, connector=class_key, units=estimate, day=day, global_cap=class_cap, tenant_cap=class_tenant):
+                            counts["deferred_budget"] += 1
+                            self.store.release_source(institution_id, source["source_id"])
+                            continue
                     if estimate > 0 and not self.store.reserve_budget(institution_id, connector=connector.budget_key, units=estimate, day=day, global_cap=cap, tenant_cap=cap * self.config.tenant_share):
+                        if split is not None:
+                            self.store.refund_budget(institution_id, connector=split[0], units=estimate, day=day)
                         counts["deferred_budget"] += 1
                         self.store.release_source(institution_id, source["source_id"])
                         spent_key = connector.budget_key
@@ -433,4 +459,4 @@ class MapEngine:
         return results
 
 
-__all__ = ["DEFAULT_BUDGETS", "DEFAULT_UNIT_PRICES", "DRY_PASSES_TO_PAUSE", "EngineConfig", "MapEngine", "SECURITY_STATUSES"]
+__all__ = ["DEFAULT_BUDGETS", "DEFAULT_CLASS_SHARES", "DEFAULT_UNIT_PRICES", "DRY_PASSES_TO_PAUSE", "EngineConfig", "MapEngine", "SECURITY_STATUSES"]

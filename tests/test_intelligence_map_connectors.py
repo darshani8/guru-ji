@@ -149,7 +149,8 @@ class SearchConnectorTests(Fixture):
         search = StaticSearchProvider(self.HITS)
         connector = SearchConnector(active=True)
         planned = connector.plan(self.context(search=search))
-        self.assertEqual(len(planned), len(PLATFORM_DOMAINS), "one source per platform for the one mapped entity (never the look-alike)")
+        self.assertEqual(len([lead for lead in planned if lead.work_class == "rotation"]), len(PLATFORM_DOMAINS), "one source per platform for the one mapped entity (never the look-alike)")
+        self.assertEqual([lead.target.split("|")[1] for lead in planned if lead.work_class == "explore"], ["*"], "and one open-web search for new leads")
         self.assertEqual(connector.plan(self.context(search=None)), [], "no provider, no plan")
         for lead in planned:
             self.store.upsert_source(INSTITUTION, connector=lead.connector, target=lead.target, entity_id=lead.entity_id, origin=lead.origin, work_class=lead.work_class)

@@ -216,7 +216,7 @@ class ReachTests(Base):
         entities = self.seed_default()
         context = ConnectorContext(self.store, INSTITUTION, "planning", NOW, search=NoHits())
         leads = SearchConnector(active=True).plan(context)
-        self.assertEqual(len(leads), len(entities) * len(PLATFORM_DOMAINS), "the budget, not a cap, limits what the rotation costs")
+        self.assertEqual(len([lead for lead in leads if lead.work_class == "rotation"]), len(entities) * len(PLATFORM_DOMAINS), "the budget, not a cap, limits what the rotation costs")
         self.assertEqual({lead.entity_id for lead in leads}, {entity["entity_id"] for entity in entities})
         self.assertEqual(leads[0].entity_id, gap_grid(self.store, INSTITUTION)["rows"][0]["entity_id"], "planned in the grid's order")
 
