@@ -1,5 +1,6 @@
 import importlib.util
 import unittest
+from uuid import uuid4
 from pathlib import Path
 from unittest import mock
 
@@ -315,8 +316,9 @@ class MapServiceTests(unittest.TestCase):
 @unittest.skipUnless(FASTAPI_AVAILABLE, "FastAPI dependencies are not installed")
 class MapRouteTests(unittest.TestCase):
     def test_routes_seed_list_and_measure(self):
+        college = f"map_college_{uuid4().hex[:8]}"  # a fresh tenant, so the test passes on a reused database too
         client = TestClient(app)
-        headers = {"Authorization": "Bearer dev-token", "X-Demo-Principal": "map-principal", "X-Demo-Role": "principal", "X-Demo-College": "map_college"}
+        headers = {"Authorization": "Bearer dev-token", "X-Demo-Principal": "map-principal", "X-Demo-Role": "principal", "X-Demo-College": college}
         self.assertEqual(client.get("/v1/intelligence/map/assets", headers=headers).status_code, 503, "the map is off unless enabled")
         platform = app.state.runtime.platform
         service = MapService(MapStore(backend=platform.store.backend, suppression_key=b"test-key"))

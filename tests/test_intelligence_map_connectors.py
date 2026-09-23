@@ -1,6 +1,7 @@
 import importlib.util
 import json
 import unittest
+from uuid import uuid4
 from datetime import timedelta
 from unittest import mock
 
@@ -437,8 +438,9 @@ class WiringTests(unittest.TestCase):
 @unittest.skipUnless(FASTAPI_AVAILABLE, "FastAPI is not installed")
 class SourceRouteTests(unittest.TestCase):
     def test_managers_add_directory_pages(self):
+        college = f"dir_college_{uuid4().hex[:8]}"  # a fresh tenant, so the test passes on a reused database too
         client = TestClient(app)
-        headers = {"Authorization": "Bearer dev-token", "X-Demo-Principal": "dir-principal", "X-Demo-Role": "principal", "X-Demo-College": "dir_college"}
+        headers = {"Authorization": "Bearer dev-token", "X-Demo-Principal": "dir-principal", "X-Demo-Role": "principal", "X-Demo-College": college}
         platform = app.state.runtime.platform
         store = MapStore(backend=platform.store.backend, suppression_key=b"test-key")
         with mock.patch.object(platform, "intelligence_map", MapService(store)):

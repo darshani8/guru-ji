@@ -1,6 +1,7 @@
 import asyncio
 import importlib.util
 import unittest
+from uuid import uuid4
 from datetime import datetime, timedelta, timezone
 from unittest import mock
 
@@ -232,13 +233,14 @@ class ReaderAccessTests(unittest.IsolatedAsyncioTestCase):
 @unittest.skipUnless(FASTAPI_AVAILABLE, "FastAPI is not installed")
 class ReviewRouteTests(unittest.TestCase):
     def test_the_queue_routes_are_for_managers(self):
+        college = f"rev_college_{uuid4().hex[:8]}"  # a fresh tenant, so the test passes on a reused database too
         client = TestClient(app)
-        headers = {"Authorization": "Bearer dev-token", "X-Demo-Principal": "rev-principal", "X-Demo-Role": "principal", "X-Demo-College": "rev_college"}
+        headers = {"Authorization": "Bearer dev-token", "X-Demo-Principal": "rev-principal", "X-Demo-Role": "principal", "X-Demo-College": college}
         faculty = {**headers, "X-Demo-Principal": "rev-faculty", "X-Demo-Role": "faculty"}
         platform = app.state.runtime.platform
         store = MapStore(backend=platform.store.backend, suppression_key=b"test-key")
-        asset_id, _ = store.upsert_asset("rev_college", asset_ref("https://www.instagram.com/rev_college_official/"), entity_id=None)
-        review_id, _ = store.add_review_item("rev_college", kind="impersonation_candidate", title="calls itself official", asset_id=asset_id, url="https://www.instagram.com/rev_college_official/")
+        asset_id, _ = store.upsert_asset(college, asset_ref("https://www.instagram.com/rev_college_official/"), entity_id=None)
+        review_id, _ = store.add_review_item(college, kind="impersonation_candidate", title="calls itself official", asset_id=asset_id, url="https://www.instagram.com/rev_college_official/")
         with mock.patch.object(platform, "intelligence_map", MapService(store)):
             self.assertEqual(client.get("/v1/intelligence/map/review", headers=faculty).status_code, 403)
             listed = client.get("/v1/intelligence/map/review", headers=headers)
@@ -248,7 +250,7 @@ class ReviewRouteTests(unittest.TestCase):
             self.assertEqual(client.post("/v1/intelligence/map/review/irev-nope/decision", headers=headers, json={"decision": "reject"}).status_code, 404)
             decided = client.post(f"/v1/intelligence/map/review/{review_id}/decision", headers=headers, json={"decision": "reject", "note": "not ours"})
             self.assertEqual(decided.status_code, 200, decided.text)
-            self.assertEqual(store.get_asset("rev_college", asset_id)["grade"], "D")
+            self.assertEqual(store.get_asset(college, asset_id)["grade"], "D")
             self.assertEqual(client.post("/v1/intelligence/map/rescore", headers=headers, json={}).json()["passed"], True)
             events = {event.event_type for event in app.state.runtime.store.recent_audit(limit=50)}
             self.assertTrue({"intelligence.map.review_decision", "intelligence.map.rescore"} <= events)
