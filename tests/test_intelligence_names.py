@@ -7,7 +7,7 @@ from datetime import datetime, timedelta, timezone
 
 import httpx
 
-from app.internet_intelligence.entity_resolution import HIGH, LOW, resolve_entity
+from app.internet_intelligence.entity_resolution import HIGH, LOW, NOT_MATCHED, resolve_entity
 from app.internet_intelligence.map.assets import asset_ref
 from app.internet_intelligence.map.connectors.apis import WikidataConnector
 from app.internet_intelligence.map.connectors.base import ConnectorContext
@@ -54,6 +54,19 @@ class ShortAliasTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(survey.level, LOW)
         self.assertIn("generic_name_without_location", survey.reasons)
         self.assertEqual(resolve_entity(self.BGS, url="https://news.example/x", title="BGSCET fest, Bengaluru", text="The BGSCET fest in Bengaluru drew crowds.").level, HIGH, "the place makes the short name ours")
+
+    def test_an_acronym_is_a_name_only_as_written(self):
+        aims = InstitutionProfile(I, "Adichunchanagiri Institute of Medical Sciences", "Mandya", aliases=["AIMS"])
+        verb = resolve_entity(aims, url="https://news.example/x", title="Mandya police aims to curb sand mining; case registered", text="Police in Mandya aims to stop illegal sand mining.")
+        self.assertEqual((verb.level, verb.reasons), (NOT_MATCHED, ("name_not_found",)), "the verb 'aims' beside the place is not AIMS")
+        self.assertEqual(resolve_entity(aims, url="https://news.example/y", title="AIMS, B.G. Nagara holds a health camp", text="Doctors from AIMS examined 400 villagers in Mandya.").level, HIGH)
+        ait = InstitutionProfile(I, "Adichunchanagiri Institute of Technology", "Chikkamagaluru", aliases=["AIT"])
+        self.assertEqual(resolve_entity(ait, url="https://news.example/z", title="Chikkamagaluru: govt ait scheme", text="").level, NOT_MATCHED)
+        # Only prose is case-sensitive: a handle or host in the URL counts in any case, and so does a name that is not an acronym.
+        bgscet = InstitutionProfile(I, "BGS College of Engineering and Technology", "Bengaluru", aliases=["BGSCET"], official_domains=["bgscet.ac.in"], social_accounts=["bgscet"])
+        self.assertIn("known_social_account", resolve_entity(bgscet, url="https://www.instagram.com/BGSCET/", title="", text="").reasons)
+        self.assertIn("official_domain", resolve_entity(bgscet, url="https://www.BGSCET.ac.in/news", title="aims and objectives", text="").reasons)
+        self.assertIn("name_in_title:BGS College of Engineering and Technology", resolve_entity(bgscet, url="https://news.example/w", title="bgs college of engineering and technology, bengaluru", text="").reasons)
 
     async def test_the_investigation_keeps_it_out_of_the_findings(self):
         store = IntelligenceStore(":memory:")

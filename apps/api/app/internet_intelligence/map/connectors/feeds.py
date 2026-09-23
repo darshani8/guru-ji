@@ -111,6 +111,11 @@ NEWS_FEEDS = SEEDS_DIR / "news_feeds.tsv"
 KANNADA_SENSITIVE_TERMS: tuple[str, ...] = (
     "ನ್ಯಾಯಾಲಯ", "ಹೈಕೋರ್ಟ್", "ಸುಪ್ರೀಂ ಕೋರ್ಟ್", "ಪ್ರಕರಣ", "ದೂರು", "ಆರೋಪ", "ಪೊಲೀಸ್", "ಬಂಧನ", "ಪ್ರತಿಭಟನೆ", "ಮುಷ್ಕರ", "ವಂಚನೆ", "ರ್ಯಾಗಿಂಗ್", "ಕಿರುಕುಳ", "ಅಮಾನತು",
 )
+# Phrases that hold a term without its meaning, taken out before matching:
+# "ರಕ್ಷಾ ಬಂಧನ" (Raksha Bandhan, the festival) is not "ಬಂಧನ" (arrest). The
+# verb "ಬಂಧಿಸ" (arrested) is not a term: it sits inside "ಸಂಬಂಧಿಸಿದ" ("related
+# to"), which nearly every Kannada news item uses.
+_KANNADA_NOT_SENSITIVE = re.compile(r"ರಕ್ಷಾ[\s\u200c\u200d-]*ಬಂಧನ")  # spaced, hyphenated or joined (zero-width joiners too)
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,7 +144,8 @@ def load_news_feeds(path: Path = NEWS_FEEDS) -> tuple[NewsFeed, ...]:
 def sensitive_mention(title: str, summary: str) -> bool:
     """Whether a news item carries court or controversy words (the English "controversy" topic, or Kannada terms)."""
 
-    return bool(SENSITIVE_TOPICS & set(topic_tags(summary, title))) or any(term in f"{title} {summary}" for term in KANNADA_SENSITIVE_TERMS)
+    kannada = _KANNADA_NOT_SENSITIVE.sub(" ", f"{title} {summary}")
+    return bool(SENSITIVE_TOPICS & set(topic_tags(summary, title))) or any(term in kannada for term in KANNADA_SENSITIVE_TERMS)
 
 
 def _read_at(value: Any) -> datetime | None:

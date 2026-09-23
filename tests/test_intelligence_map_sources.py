@@ -10,8 +10,8 @@ from app.internet_intelligence.map.assets import asset_ref
 from app.internet_intelligence.map.connectors.apis import YouTubeConnector
 from app.internet_intelligence.map.connectors.archive import HOSTS_SUFFIX, WaybackConnector
 from app.internet_intelligence.map.connectors.base import ConnectorRegistry
-from app.internet_intelligence.map.connectors.feeds import NewsFeed, NewsFeedConnector, load_news_feeds
-from app.internet_intelligence.map.connectors.hubs import DirectoryConnector, authority_of
+from app.internet_intelligence.map.connectors.feeds import NewsFeed, NewsFeedConnector, load_news_feeds, sensitive_mention
+from app.internet_intelligence.map.connectors.hubs import DirectoryConnector, LinkHubConnector, authority_of
 from app.internet_intelligence.map.connectors.infrastructure import DnsConnector, RdapConnector
 from app.internet_intelligence.map.connectors.lookalikes import LookalikeDomainConnector, variants
 from app.internet_intelligence.map.connectors.places import GooglePlayConnector, GooglePlaySearchConnector, OpenStreetMapConnector
@@ -84,10 +84,10 @@ class YouTubeDataApiTests(Fixture):
 
     async def test_a_verified_channel_passes_on_the_links_in_its_description(self):
         channel_id = self.channel(anchored=True)
-        description = "Admissions: https://admissions.bgscet-portal.example/apply Links: https://linktr.ee/bgscet_links Site: https://www.bgscet.ac.in/"
+        description = "Admissions: https://admissions.bgscet-portal.example/apply Links: https://linktr.ee/bgscet_official Site: https://www.bgscet.ac.in/"
         client = api({CHANNELS: (200, channel_body(description=description, uploads=False))})
         result = await YouTubeConnector(api_key="k", active=True, client=client).run({"target": channel_id, "hops": 0}, self.context())
-        hub = self.store.find_asset(INSTITUTION, "linktree:bgscet_links")
+        hub = self.store.find_asset(INSTITUTION, "linktree:bgscet_official")
         self.assertEqual(sorted((lead.connector, lead.target, lead.hops) for lead in result.leads), [("lead_page", "https://admissions.bgscet-portal.example/apply", 1), ("link_hub", hub["asset_id"], 1)])
         regrade(self.store, INSTITUTION, [hub["asset_id"]])
         self.assertEqual(self.store.get_asset(INSTITUTION, hub["asset_id"])["grade"], "B", "one grade below the A channel")
@@ -96,6 +96,19 @@ class YouTubeDataApiTests(Fixture):
         unverified = self.channel("https://www.youtube.com/@bgscet_fan")
         loose = await YouTubeConnector(api_key="k", active=True, client=api({CHANNELS: (200, channel_body("UC" + "c" * 22, description=description, uploads=False))})).run({"target": unverified, "hops": 0}, self.context())
         self.assertEqual(loose.leads, [], "an unverified channel vouches for nothing")
+
+    async def test_a_persons_hub_in_a_verified_channels_description_stays_off_the_map(self):
+        channel_id = self.channel("https://www.youtube.com/@PRINCIPAL_BGSCET", anchored=True)
+        description = "Principal, BGSCET. My links: https://linktr.ee/ravikumar_gk College: https://linktr.ee/bgscet"
+        client = api({CHANNELS: (200, channel_body(description=description, uploads=False))})
+        result = await YouTubeConnector(api_key="k", active=True, client=client).run({"target": channel_id, "hops": 0}, self.context())
+        self.assertIsNone(self.store.find_asset(INSTITUTION, "linktree:ravikumar_gk"), "the principal's own hub is a person's, not the college's")
+        hub = self.store.find_asset(INSTITUTION, "linktree:bgscet")
+        self.assertEqual([(lead.connector, lead.target) for lead in result.leads], [("link_hub", hub["asset_id"])], "no lead for the person's hub either")
+        self.assertEqual((result.new_assets, hub["relation"]), (["linktree:bgscet"], "official"), "a hub named like the college still is")
+        self.assertEqual([lead.target for lead in LinkHubConnector(active=True).plan(self.context())], [hub["asset_id"]], "the person's hub is never read, so what it lists never arrives")
+        for key in ("linkedin:in:ravi-kumar-gk-12345", "instagram:ravikumar.gk"):
+            self.assertIsNone(self.store.find_asset(INSTITUTION, key), key)
 
 
 RSS_EN = """<?xml version="1.0"?><rss version="2.0"><channel><title>The Hindu - Karnataka</title>
@@ -150,6 +163,22 @@ class NewsFeedTests(Fixture):
         self.assertEqual((again.outcome, again.mentions), ("not_modified", 0), "reads are conditional")
         reread = await connector.run({"target": EN_FEED}, self.context(fetcher=Site({EN_FEED: (200, RSS_EN, "application/rss+xml")}).fetcher()))
         self.assertEqual(reread.mentions, 0, "items already read are not counted twice")
+
+    async def test_an_acronym_counts_only_as_written_and_raksha_bandhan_is_no_arrest(self):
+        self.store.upsert_entity(INSTITUTION, name="Adichunchanagiri Institute of Medical Sciences", kind="institution", names=["AIMS"], locations=["Nagamangala", "Mandya", "B.G. Nagara"])
+        when = "<pubDate>Tue, 22 Sep 2026 10:00:00 GMT</pubDate>"
+        rss = f"""<?xml version="1.0"?><rss version="2.0"><channel><title>Karnataka</title>
+<item><title>Mandya police aims to curb sand mining; case registered</title><link>https://news.example/aims-to</link><description>Police in Mandya aims to stop illegal sand mining; a case was registered.</description>{when}</item>
+<item><title>Parents file police complaint against AIMS, B.G. Nagara over fees</title><link>https://news.example/aims</link><description>Parents said AIMS, B.G. Nagara raised its fees.</description>{when}</item>
+<item><title>{KANNADA_NAME} ವಿದ್ಯಾರ್ಥಿಗಳಿಂದ ರಕ್ಷಾ ಬಂಧನ ಆಚರಣೆ</title><link>https://kn-news.example/rakhi</link><description>ಬೆಂಗಳೂರು: {KANNADA_NAME} ವಿದ್ಯಾರ್ಥಿಗಳು ರಕ್ಷಾ ಬಂಧನ ಹಬ್ಬ ಆಚರಿಸಿದರು.</description>{when}</item>
+</channel></rss>"""
+        feed = "https://news.example/karnataka.rss"
+        result = await NewsFeedConnector(active=True, feeds=(NewsFeed("Example", "en", feed),)).run({"target": feed}, self.context(fetcher=Site({feed: (200, rss, "application/rss+xml")}).fetcher()))
+        self.assertFalse(any("aims to" in note for note in result.notes), "the verb 'aims' is not AIMS, whatever place the item names")
+        self.assertEqual([(item["kind"], item["url"]) for item in result.review], [("news_mention", "https://news.example/aims")], "AIMS written as a name, beside its place, still is")
+        self.assertEqual(result.mentions, 1, "Raksha Bandhan is a festival, not an arrest (ಬಂಧನ)")
+        self.assertFalse(sensitive_mention("ರಕ್ಷಾ ಬಂಧನ ಆಚರಣೆ", "ರಕ್ಷಾಬಂಧನದ ಸಂಭ್ರಮ; ಈ ಕಾರ್ಯಕ್ರಮಕ್ಕೆ ಸಂಬಂಧಿಸಿದಂತೆ"))
+        self.assertTrue(sensitive_mention("ಆರೋಪಿಯ ಬಂಧನ", ""), "an arrest still is")
 
     async def test_a_tick_counts_mentions_for_the_digest(self):
         site = Site({EN_FEED: (200, RSS_EN, "application/rss+xml")})

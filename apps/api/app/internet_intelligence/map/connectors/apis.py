@@ -19,7 +19,7 @@ from urllib.parse import urlparse
 from ...redaction import names_of, strip_person_names
 from ..assets import asset_ref
 from .base import ConnectorContext, ConnectorResult, Lead
-from .common import ApiClient, _compact, unique
+from .common import ApiClient, _compact, names_entity, unique
 
 YOUTUBE_CHANNELS = "https://www.googleapis.com/youtube/v3/channels"
 YOUTUBE_PLAYLIST_ITEMS = "https://www.googleapis.com/youtube/v3/playlistItems"
@@ -168,12 +168,17 @@ class YouTubeConnector:
         """A verified channel (B or better) vouches for where its description points, one hop on.
 
         Websites become lead_page leads; a Linktree becomes a link hub the
-        channel links to (one grade below the channel) and is read in turn.
+        channel links to (one grade below the channel) and is read in turn,
+        but only one whose own handle is the entity's name ("linktr.ee/bgscet").
+        A principal's channel saying "My links: linktr.ee/ravikumar_gk" names
+        a person's hub; taken as official, it would make every account it
+        lists (their LinkedIn /in/ profile, their Instagram) official too.
         """
 
         hops = int(source.get("hops") or 0) + 1
         if asset["grade"] not in {"O", "A", "B"} or hops > context.max_hops:
             return
+        entity = context.store.get_entity(context.institution_id, str(asset["entity_id"])) if asset.get("entity_id") else None
         for url in urls[:10]:
             try:
                 ref = asset_ref(url[:500])
@@ -183,7 +188,7 @@ class YouTubeConnector:
                 continue
             if ref.platform == "website" and ref.kind in {"domain", "page"} and (urlparse(ref.url).hostname or "").removeprefix("www.") not in official_hosts:
                 result.leads.append(Lead("lead_page", ref.url, entity_id=asset["entity_id"], hops=hops))
-            elif ref.platform == "linktree" and ref.kind == "account":
+            elif ref.platform == "linktree" and ref.kind == "account" and entity is not None and names_entity(entity, handle=ref.handle, title=""):
                 hub_id, created = context.store.upsert_asset(context.institution_id, ref, entity_id=asset["entity_id"], relation="official" if asset["relation"] == "official" else "unknown", note=f"named in the description of {asset['handle']}")
                 context.store.add_evidence(context.institution_id, asset_id=hub_id, kind="hub_link", detail=f"{asset['grade']}:channel description", source_url=asset["url"], source_asset_id=asset["asset_id"], channel="youtube_api", observed_via="live", run_id=context.run_id)
                 result.touched.add(hub_id)
