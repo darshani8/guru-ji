@@ -36,6 +36,8 @@ FALLBACK_MODELS = frozenset({"claude-opus-5", "claude-fable-5-1"})
 # Bedrock has no server-side fallbacks, so the SDK middleware retries a declined
 # request there instead, on the model the "default" mode sends cyber refusals to.
 BEDROCK_FALLBACK_MODEL = "anthropic.claude-opus-4-8"
+# Models that reject output_config.effort; they run at their single default.
+NO_EFFORT_MODELS = ("claude-haiku-4-5",)
 # Cuts the thinking Claude does before its first visible text on routes a
 # person is waiting on (voice and chat answers).
 LATENCY_SENSITIVE_SYSTEM = "Latency-sensitive; begin your visible answer immediately."
@@ -125,6 +127,10 @@ class AnthropicProvider:
         return _base_model(self.model_id) in FALLBACK_MODELS
 
     @property
+    def _takes_effort(self) -> bool:
+        return not _base_model(self.model_id).startswith(NO_EFFORT_MODELS)
+
+    @property
     def capabilities(self) -> ProviderCapabilities:
         return ProviderCapabilities(
             supports_streaming=True,
@@ -174,8 +180,9 @@ class AnthropicProvider:
             "model": self.model_id,
             "max_tokens": max(max_tokens, MIN_MAX_TOKENS),
             "messages": [{"role": "user", "content": prompt}],
-            "output_config": {"effort": self.effort},
         }
+        if self._takes_effort:
+            request["output_config"] = {"effort": self.effort}
         if self.system:
             request["system"] = self.system
         if self.platform == "anthropic" and self._falls_back:

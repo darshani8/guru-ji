@@ -190,6 +190,16 @@ class ClaudeProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("system", request)
         self.assertEqual(request["output_config"], {"effort": "medium"})
 
+    async def test_haiku_4_5_is_sent_no_effort_because_it_rejects_one(self):
+        for model_id in ("claude-haiku-4-5", "claude-haiku-4-5-20251001", "anthropic.claude-haiku-4-5"):
+            with self.subTest(model_id=model_id):
+                messages = _FakeMessages(_message(("text", "ok")))
+                await _claude(messages, model_id=model_id, system=LATENCY_SENSITIVE_SYSTEM).complete("approved answer")
+                request = messages.requests[0]
+                self.assertNotIn("output_config", request)
+                self.assertEqual(request["model"], model_id)
+                self.assertEqual(request["system"], LATENCY_SENSITIVE_SYSTEM)
+
     async def test_refused_or_truncated_answers_fall_back_to_the_approved_answer(self):
         answer = AssistantAnswer(request_id="req-claude", status="complete", answer="Approved answer 1240.")
         for stop_reason in ("refusal", "max_tokens"):
