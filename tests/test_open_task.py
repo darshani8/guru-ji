@@ -416,6 +416,29 @@ class ProviderToolTurnTests(unittest.IsolatedAsyncioTestCase):
         provider = AnthropicProvider(model_id=OPEN_TASK_MODEL_ID, platform="bedrock", aws_region="ap-south-1")
         self.assertEqual(provider.model_id, "anthropic.claude-opus-5-5")
 
+    async def test_inference_profiles_on_bedrock_send_no_top_level_cache_control(self):
+        requests = []
+
+        class Stream:
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *exc):
+                return False
+
+            async def get_final_message(self):
+                return _message("end_turn", _text("done"))
+
+        class Messages:
+            def stream(self, **request):
+                requests.append(request)
+                return Stream()
+
+        client = SimpleNamespace(beta=SimpleNamespace(messages=Messages()))
+        provider = AnthropicProvider(model_id="global.anthropic.claude-opus-5-5", platform="bedrock", aws_region="ap-south-1", client=client)
+        await provider.tool_turn(system="sys", tools=[], messages=[{"role": "user", "content": "hi"}], max_tokens=64_000)
+        self.assertNotIn("cache_control", requests[0])
+
 
 class OpenTaskSettingsTests(unittest.TestCase):
     def _settings(self, **overrides):

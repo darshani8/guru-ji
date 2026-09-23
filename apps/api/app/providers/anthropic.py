@@ -273,9 +273,11 @@ class AnthropicProvider:
             "system": system,
             "tools": tools,
             "messages": messages,
-            # The history is resent every turn; caching it keeps a long task affordable.
-            "cache_control": {"type": "ephemeral"},
         }
+        if not (self.platform == "bedrock" and self._invoke_model):
+            # The history is resent every turn; caching it keeps a long task affordable.
+            # The InvokeModel path can reject top-level cache_control, so it is left out there.
+            request["cache_control"] = {"type": "ephemeral"}
         if self._takes_effort:
             request["output_config"] = {"effort": self.effort}
         if self.platform == "anthropic" and self._falls_back:
