@@ -1,3 +1,19 @@
+# The internet map's settings, shared by the API (routes, console, review
+# decisions), the map engine and the digest, so all three read the same
+# connectors, keys, budgets and the one suppression key that fingerprints
+# and ownership tokens are keyed on.
+x-internet-map: &internet-map
+  GURU_INTELLIGENCE_MAP_ENABLED: "true"
+  GURU_INTELLIGENCE_SEARCH_PROVIDER: ${GURU_INTELLIGENCE_SEARCH_PROVIDER:-disabled}
+  GURU_WEB_SEARCH_API_KEY: ${GURU_WEB_SEARCH_API_KEY:-}
+  GURU_INTELLIGENCE_CRAWLER_CONTACT: ${GURU_INTELLIGENCE_CRAWLER_CONTACT:-}
+  GURU_INTELLIGENCE_SUPPRESSION_KEY: ${GURU_INTELLIGENCE_SUPPRESSION_KEY:-}
+  GURU_INTELLIGENCE_CONNECTORS: ${GURU_INTELLIGENCE_CONNECTORS:-}
+  GURU_INTELLIGENCE_YOUTUBE_API_KEY: ${GURU_INTELLIGENCE_YOUTUBE_API_KEY:-}
+  GURU_INTELLIGENCE_INDIANKANOON_TOKEN: ${GURU_INTELLIGENCE_INDIANKANOON_TOKEN:-}
+  GURU_INTELLIGENCE_BUDGETS: ${GURU_INTELLIGENCE_BUDGETS:-}
+  GURU_INTELLIGENCE_SEED_GROUPS: ${GURU_INTELLIGENCE_SEED_GROUPS:-}
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -68,6 +84,7 @@ services:
       GURU_OBJECT_STORE: local
       GURU_OBJECT_STORE_PATH: /app/data/objects
       GURU_JOB_QUEUE: thread
+      <<: *internet-map
     depends_on:
       postgres:
         condition: service_healthy
@@ -148,11 +165,7 @@ services:
       GURU_OBJECT_STORE: local
       GURU_OBJECT_STORE_PATH: /app/data/objects
       GURU_JOB_QUEUE: inline
-      GURU_INTELLIGENCE_MAP_ENABLED: "true"
-      GURU_INTELLIGENCE_SEARCH_PROVIDER: ${GURU_INTELLIGENCE_SEARCH_PROVIDER:-disabled}
-      GURU_WEB_SEARCH_API_KEY: ${GURU_WEB_SEARCH_API_KEY:-}
-      GURU_INTELLIGENCE_CRAWLER_CONTACT: ${GURU_INTELLIGENCE_CRAWLER_CONTACT:-}
-      GURU_INTELLIGENCE_SUPPRESSION_KEY: ${GURU_INTELLIGENCE_SUPPRESSION_KEY:-}
+      <<: *internet-map
     depends_on:
       postgres:
         condition: service_healthy
@@ -177,11 +190,7 @@ services:
       GURU_OBJECT_STORE: local
       GURU_OBJECT_STORE_PATH: /app/data/objects
       GURU_JOB_QUEUE: inline
-      GURU_INTELLIGENCE_MAP_ENABLED: "true"
-      GURU_INTELLIGENCE_SEARCH_PROVIDER: ${GURU_INTELLIGENCE_SEARCH_PROVIDER:-disabled}
-      GURU_WEB_SEARCH_API_KEY: ${GURU_WEB_SEARCH_API_KEY:-}
-      GURU_INTELLIGENCE_CRAWLER_CONTACT: ${GURU_INTELLIGENCE_CRAWLER_CONTACT:-}
-      GURU_INTELLIGENCE_SUPPRESSION_KEY: ${GURU_INTELLIGENCE_SUPPRESSION_KEY:-}
+      <<: *internet-map
     depends_on:
       postgres:
         condition: service_healthy
