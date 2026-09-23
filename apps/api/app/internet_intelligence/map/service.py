@@ -20,7 +20,7 @@ from .incidents import IncidentDesk
 from .learning import coverage_estimate, gap_grid
 from .ownership import OwnerClaimsConnector, instructions, owned_domains
 from .harvest import OfficialSiteHarvester
-from .metrics import map_metrics, record_baseline
+from .metrics import map_metrics, record_baseline, run_series
 from .pipeline import nominated, regrade, sync_profile
 from .seed import DEFAULT_SWEEP, Lookalike, SeedRow, SeedSummary, import_seed, parse_lookalikes, parse_sweep
 from .store import MapStore
@@ -37,6 +37,18 @@ DECISIONS: dict[str, frozenset[str]] = {
     "court_record": frozenset({"acknowledge", "dismiss"}), "run_gate": frozenset({"publish", "discard"}),
 }
 ASSET_DECISIONS = frozenset({"confirm", "reject", "lookalike", "impersonation", "personal"})
+# The summary's grid is cut here for display (and says so); the engine searches every entity.
+SUMMARY_GRID_ENTITIES = 300
+
+
+def _shown(metrics: Mapping[str, Any], *, manager: bool) -> dict[str, Any]:
+    """The measures anyone who may read the map sees; grades below B and the engine's backlog are for managers."""
+
+    return {
+        "assets": metrics["assets"], "verified": metrics["verified"], "by_platform": metrics["by_platform"],
+        "by_grade": {grade: count for grade, count in metrics["by_grade"].items() if manager or grade in {"O", "A", "A-arch", "B"}},
+        "freshness": {key: value for key, value in metrics["freshness"].items() if manager or key != "sources_overdue"},
+    }
 
 
 @dataclass(slots=True)
@@ -80,9 +92,14 @@ class MapService:
             raise KeyError("asset not found")
         return {"asset": asset, "evidence": self.store.list_evidence(institution_id, asset_id=asset_id)}
 
-    def metrics(self, principal: Principal, institution_id: str) -> dict[str, Any]:
+    def metrics(self, principal: Principal, institution_id: str, *, kind: str | None = None, limit: int = 10) -> dict[str, Any]:
+        """Readers get what the summary shows them; the ground truth and the runs (their spend, who approved an import) are for managers."""
+
         self.guard(principal, institution_id, Capability.INTELLIGENCE_READ)
-        return {**map_metrics(self.store, institution_id), "runs": self.store.list_map_runs(institution_id, limit=10)}
+        metrics = map_metrics(self.store, institution_id)
+        if not principal.has_capability(Capability.INTELLIGENCE_MANAGE):
+            return _shown(metrics, manager=False)
+        return {**metrics, "runs": self.store.list_map_runs(institution_id, kind=kind, limit=limit)}
 
     # --------------------------------------------------------------- seeding
     def seed(
@@ -282,31 +299,37 @@ class MapService:
         """One view of the map: what it stands behind, where it has gaps, how complete it probably is.
 
         Readers see grades of B and better only (a cell below that just shows
-        as not yet covered); managers also see incidents, the review queue,
-        runs, spend and what each connector yields.
+        as not yet covered) and how fresh those are; managers also see the
+        ground truth, incidents, the review queue, runs (and the series of
+        ticks, each with its recall change, look-alikes caught and cost),
+        spend and what each connector yields. The grid lists the institution's
+        own entities first and says when it is cut short.
         """
 
         self.guard(principal, institution_id, Capability.INTELLIGENCE_READ)
         manager = principal.has_capability(Capability.INTELLIGENCE_MANAGE)
         metrics = map_metrics(self.store, institution_id)
-        grid = gap_grid(self.store, institution_id)
+        grid = gap_grid(self.store, institution_id, max_entities=SUMMARY_GRID_ENTITIES, own_groups=self.seed_groups.get(institution_id, ()))
         if not manager:
             for row in grid["rows"]:
                 for cell in row["cells"].values():
                     if not cell["covered"]:
                         cell["grade"] = None
         result: dict[str, Any] = {
-            "institution_id": institution_id, "assets": metrics["assets"], "verified": metrics["verified"], "by_platform": metrics["by_platform"],
-            "by_grade": {grade: count for grade, count in metrics["by_grade"].items() if manager or grade in {"O", "A", "A-arch", "B"}},
+            "institution_id": institution_id, **_shown(metrics, manager=manager),
             "grid": {key: value for key, value in grid.items() if key != "gaps"}, "coverage": coverage_estimate(self.store, institution_id),
         }
         if manager:
             today = datetime.now(timezone.utc).date().isoformat()
+            connectors = self.store.source_yields(institution_id)
+            # Budget units (requests, or a provider's quota units) every source has used so far, over what the map now stands behind.
+            cost_total = round(sum(float(row["cost"] or 0) for row in connectors), 2)
             result.update({
-                "ground_truth": {key: metrics[key] for key in ("holdout_recall", "holdout_total", "seed_verification_rate", "seed_total", "canary_total", "canary_leaks")},
+                "ground_truth": {key: metrics[key] for key in ("holdout_recall", "holdout_total", "precision", "seed_verification_rate", "seed_verified", "seed_total", "canary_total", "canary_leaks")},
                 "incidents_open": [{key: row[key] for key in ("incident_id", "kind", "target", "severity", "status", "times_seen", "last_seen_at")} for row in self.store.list_incidents(institution_id, limit=50) if row["status"] != "resolved"],
-                "review_waiting": self.store.review_counts(institution_id), "runs": self.store.list_map_runs(institution_id, limit=5),
-                "connectors": self.store.source_yields(institution_id), "spend_today": self.store.tenant_spend(institution_id, day=today),
+                "review_waiting": self.store.review_counts(institution_id), "runs": self.store.list_map_runs(institution_id, limit=5), "series": run_series(self.store, institution_id),
+                "cost": {"cost_total": cost_total, "verified": metrics["verified"], "cost_per_verified": round(cost_total / metrics["verified"], 2) if metrics["verified"] else None},
+                "connectors": connectors, "spend_today": self.store.tenant_spend(institution_id, day=today),
             })
         return result
 

@@ -144,14 +144,15 @@ class GateTests(Base):
 
     def test_a_rescore_that_loses_ground_truth_waits_for_a_person(self):
         stale = self.store.upsert_asset(INSTITUTION, asset_ref("https://www.instagram.com/bgscet_engg_coll/"), entity_id=self.entity_id, relation="official")[0]
-        # Graded B under an older rule, with no evidence the current rule accepts.
+        # Graded B under an older rule from one search snippet, which the current rule grades C.
         self.store.set_grade(INSTITUTION, stale, grade="B", reasons=["old rule"], scorer_version="grader-0")
+        self.store.add_evidence(INSTITUTION, asset_id=stale, kind="search_snippet", channel="search:t", observed_via="index")
         self.store.add_gold(INSTITUTION, asset_key="instagram:bgscet_engg_coll", platform="instagram", split="seed", expected_min_grade="B")
         held = self.service.rescore(self.manager, INSTITUTION)
         self.assertFalse(held["passed"])
         self.assertIn("seed verification would fall", held["reasons"][0])
         self.assertEqual(self.store.get_asset(INSTITUTION, stale)["grade"], "B", "nothing is published while held")
-        self.assertEqual(self.store.get_asset(INSTITUTION, stale)["proposed_grade"], "unrated")
+        self.assertEqual(self.store.get_asset(INSTITUTION, stale)["proposed_grade"], "C")
         [gate] = self.store.list_review_items(INSTITUTION, kind="run_gate")
         self.service.decide(self.manager, INSTITUTION, gate["review_id"], decision="discard")
         self.assertIsNone(self.store.get_asset(INSTITUTION, stale)["proposed_grade"])

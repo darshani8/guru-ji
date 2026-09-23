@@ -411,6 +411,24 @@ ${payload.headers.map((header) => `<div>${escapeHtml(header)}</div><div><select 
   function gradePill(grade) {
     return grade ? `<span class="pill ${GRADE_KIND[grade] || ''}">${escapeHtml(grade)}</span>` : '<span class="muted">—</span>';
   }
+  const percent = (value) => (value == null ? '—' : `${Math.round(value * 1000) / 10}%`);
+  const points = (value) => (value == null ? '—' : `${value > 0 ? '+' : ''}${Math.round(value * 1000) / 10} pts`);
+  const when = (stamp) => escapeHtml((stamp || '').slice(0, 16).replace('T', ' '));
+  // The plan's one number: did the latest tick re-find more of the hidden list without letting a known look-alike through?
+  function runSeries(series, cost) {
+    const latest = series[0];
+    const verdict = latest
+      ? `Latest run (${when(latest.started_at)}): holdout recall ${percent(latest.holdout_recall)} (${points(latest.holdout_recall_change)} on the run before), ${latest.canary_leaks_caught ?? '—'} known look-alike(s) caught and set back, precision ${percent(latest.precision)}.`
+      : 'The engine has not run yet.';
+    const rows = table(['Started', 'Status', 'Sources', 'New', 'Raised', 'Leads', 'Verified', 'Holdout recall', 'Change', 'Look-alikes caught', 'Spend', 'Per verified'], series, (run) => [
+      when(run.started_at), `${pill(run.status)}${run.gate ? ` <span class="pill ${run.gate === 'passed' ? 'ok' : 'bad'}">${escapeHtml(run.gate.replace(/_/g, ' '))}</span>` : ''}`,
+      String(run.sources ?? '—'), String(run.new_assets ?? '—'), String(run.raised ?? '—'), String(run.leads ?? '—'),
+      `${run.verified ?? '—'}${run.verified_change ? ` (${run.verified_change > 0 ? '+' : ''}${run.verified_change})` : ''}`, percent(run.holdout_recall), points(run.holdout_recall_change),
+      String(run.canary_leaks_caught ?? '—'), String(run.spend ?? '—'), String(run.cost_per_verified ?? '—'),
+    ]);
+    const spent = cost ? `Spend so far: ${cost.cost_total} budget units, ${cost.cost_per_verified ?? '—'} per verified item. Units are requests (or a provider's quota units), not money.` : '';
+    return `<h4>Runs</h4><p>${verdict}</p>${rows}<p class="result-meta">${spent}</p>`;
+  }
   async function loadMap() {
     const box = $('map-result');
     box.hidden = false;
@@ -419,17 +437,23 @@ ${payload.headers.map((header) => `<div>${escapeHtml(header)}</div><div><select 
       const data = await api('/v1/intelligence/map/summary');
       const grades = Object.entries(data.by_grade || {}).filter(([, count]) => count).map(([grade, count]) => `${gradePill(grade)} ${count}`).join(' ');
       const coverage = data.coverage || {};
-      const estimate = coverage.estimated_total ? `about ${Math.round(coverage.estimated_total)} accounts estimated to exist (${Math.round((coverage.coverage || 0) * 100)}% found; ${escapeHtml(coverage.assumption)})` : 'not enough independent sightings yet to estimate how many accounts exist';
+      const estimate = coverage.estimated_total ? `about ${Math.round(coverage.estimated_total)} accounts estimated to exist (${Math.round((coverage.coverage || 0) * 100)}% found by the site or the indexes${coverage.other_known ? `; ${coverage.other_known} more known otherwise, such as imported claims` : ''}; ${escapeHtml(coverage.assumption)})` : 'not enough independent sightings yet to estimate how many accounts exist';
       const platforms = (data.grid && data.grid.platforms) || [];
       const grid = table(['Entity', ...platforms], (data.grid && data.grid.rows) || [], (row) => [escapeHtml(row.entity), ...platforms.map((platform) => gradePill(row.cells[platform].grade))]);
+      const shown = data.grid && data.grid.truncated ? ` Showing the first ${data.grid.rows.length} of ${data.grid.entities_total} entities, the institution's own first.` : '';
+      const fresh = data.freshness || {};
+      const freshness = fresh.verified
+        ? `Freshness: of ${fresh.verified} verified, ${percent(fresh.within_7_days)} checked within 7 days, ${percent(fresh.within_30_days)} within 30 and ${percent(fresh.within_90_days)} within 90; median age ${fresh.median_age_days ?? '—'} days${fresh.never_verified ? ` (${fresh.never_verified} never checked live)` : ''}`
+        : 'Freshness: nothing verified yet';
+      const overdue = fresh.sources_overdue != null ? `; ${fresh.sources_overdue} sources more than a day overdue` : '';
       let manager = '';
       if (data.incidents_open) {
         const incidents = table(['Severity', 'Incident', 'Seen', 'Last seen'], data.incidents_open, (item) => [`<span class="pill ${item.severity === 'high' ? 'bad' : 'warn'}">${escapeHtml(item.severity)}</span>`, escapeHtml(`${item.kind.replace(/_/g, ' ')}: ${item.target}`), String(item.times_seen), escapeHtml((item.last_seen_at || '').slice(0, 10))]);
         const waiting = Object.entries(data.review_waiting || {}).map(([kind, count]) => `${count} ${escapeHtml(kind.replace(/_/g, ' '))}`).join(', ') || 'nothing';
         const truth = data.ground_truth || {};
-        manager = `<h4>Open incidents</h4>${incidents}<p class="result-meta">Waiting for review: ${waiting}. Ground truth: holdout recall ${truth.holdout_recall ?? '—'}, seed verification ${truth.seed_verification_rate ?? '—'}, look-alike leaks ${(truth.canary_leaks || []).length}.</p>`;
+        manager = `<h4>Open incidents</h4>${incidents}<p class="result-meta">Waiting for review: ${waiting}. Ground truth: holdout recall ${percent(truth.holdout_recall)}, precision ${percent(truth.precision)}, seed verification ${percent(truth.seed_verification_rate)}, look-alike leaks ${(truth.canary_leaks || []).length}.</p>${runSeries(data.series || [], data.cost)}`;
       }
-      box.innerHTML = `<p>${data.verified} verified of ${data.assets} mapped. ${grades}</p><p class="result-meta">Coverage: ${data.grid ? `${data.grid.covered} of ${data.grid.cells} entity–platform cells have a verified account` : ''}; ${estimate}.</p>${grid}${manager}`;
+      box.innerHTML = `<p>${data.verified} verified of ${data.assets} mapped. ${grades}</p><p class="result-meta">Coverage: ${data.grid ? `${data.grid.covered} of ${data.grid.cells} entity–platform cells have a verified account` : ''}; ${estimate}.${shown}</p><p class="result-meta">${freshness}${overdue}.</p>${grid}${manager}`;
     } catch (error) {
       box.innerHTML = `<p class="muted">${escapeHtml(error.message)}</p>`;
     }

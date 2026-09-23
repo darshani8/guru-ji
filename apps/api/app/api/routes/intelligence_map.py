@@ -105,13 +105,13 @@ async def asset_evidence(asset_id: str, request: Request, institution_id: str | 
         raise translate(exc) from exc
 
 
-@router.get("/metrics", summary="Coverage and accuracy against the hidden ground truth")
-async def metrics(request: Request, institution_id: str | None = None) -> dict[str, Any]:
+@router.get("/metrics", summary="Coverage and accuracy against the hidden ground truth (the ground truth and runs for managers only)")
+async def metrics(request: Request, institution_id: str | None = None, kind: str | None = None, limit: int = 10) -> dict[str, Any]:
     service = map_service(request)
     principal = require_principal(request, Capability.INTELLIGENCE_READ)
     target = resolve_institution(principal, institution_id)
     try:
-        return service.metrics(principal, target)
+        return service.metrics(principal, target, kind=kind, limit=limit)
     except (ValueError, PermissionError) as exc:
         raise translate(exc) from exc
 
