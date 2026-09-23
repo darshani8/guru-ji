@@ -23,7 +23,7 @@ from uuid import uuid4
 
 from ...persistence.schema_tools import add_missing_columns, apply_schema, begin_migration, existing_policies, idempotent_tenant_isolation_sql, row_level_security_state, tenant_isolation_statements
 from ...persistence.sql_backend import SqlBackend, open_backend
-from .assets import AssetRef
+from .assets import AssetRef, asset_ref
 
 SCHEMA_VERSION = "004_intelligence_map"
 
@@ -302,6 +302,8 @@ ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("intel_assets", "proposed_reasons_json", "TEXT"),
     ("intel_assets", "proposed_scorer", "TEXT"),
     ("intel_assets", "proposed_run_id", "TEXT"),
+    # The asset a lead was found on (a hub, a site), so rejecting or forgetting it takes the lead too.
+    ("intel_sources", "parent_asset_id", "TEXT"),
 )
 TENANT_TABLES: tuple[str, ...] = ("intel_entities", "intel_assets", "intel_evidence", "intel_gold_items", "intel_suppression", "intel_map_runs", "intel_sources", "intel_quota", "intel_review_items", "intel_incidents", "intel_fetch_validators")
 GLOBAL_TABLES: tuple[str, ...] = ("intel_budget_ledger", "intel_shared_cache")
@@ -311,6 +313,9 @@ REVIEW_STATUSES = frozenset({"open", "decided", "expired"})
 # The queue is for people: past this many open items, new ones are refused
 # (and counted) rather than burying the ones already waiting.
 MAX_OPEN_REVIEW = 500
+# Kinds that are never refused for a full queue: a held run, a leaked look-alike,
+# a possible impersonator or a court record must reach a person whatever else waits.
+URGENT_REVIEW_KINDS = frozenset({"run_gate", "canary_leak", "impersonation_candidate", "court_record"})
 REVIEW_TTL_DAYS = 90
 SOURCE_ORIGINS = frozenset({"seed", "recurring", "lead", "gap", "profile"})
 
@@ -358,7 +363,7 @@ class MapStoreScheduling:
     # ---------------------------------------------------------------- sources
     def upsert_source(
         self, institution_id: str, *, connector: str, target: str, entity_id: str | None = None, asset_id: str | None = None, topic: str = "", origin: str = "seed",
-        work_class: str = "rotation", hops: int = 0, interval_seconds: int = 86400, due_at: str | None = None, expires_at: str | None = None,
+        work_class: str = "rotation", hops: int = 0, interval_seconds: int = 86400, due_at: str | None = None, expires_at: str | None = None, parent_asset_id: str | None = None,
     ) -> tuple[str, bool]:
         """Add a source unless it exists; an existing one keeps its schedule and history."""
 
@@ -377,9 +382,9 @@ class MapStoreScheduling:
                 return str(existing["source_id"]), False
             source_id = f"isrc-{uuid4().hex}"
             self.backend.execute(
-                "INSERT INTO intel_sources(source_id, institution_id, connector, target, entity_id, asset_id, topic, origin, work_class, hops, due_at, interval_seconds, base_interval_seconds, expires_at, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (source_id, institution_id, connector, target, entity_id, asset_id, topic[:100], origin, work_class, max(0, hops), due_at or stamp, max(60, int(interval_seconds)), max(60, int(interval_seconds)), expires_at, stamp, stamp),
+                "INSERT INTO intel_sources(source_id, institution_id, connector, target, entity_id, asset_id, parent_asset_id, topic, origin, work_class, hops, due_at, interval_seconds, base_interval_seconds, expires_at, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (source_id, institution_id, connector, target, entity_id, asset_id, parent_asset_id, topic[:100], origin, work_class, max(0, hops), due_at or stamp, max(60, int(interval_seconds)), max(60, int(interval_seconds)), expires_at, stamp, stamp),
             )
             return source_id, True
 
@@ -647,11 +652,14 @@ class MapStoreReview:
         self, institution_id: str, *, kind: str, title: str, fingerprint: str | None = None, detail: str = "", url: str = "", asset_id: str | None = None, entity_id: str | None = None,
         severity: str = "normal", connector: str = "", source_id: str | None = None, run_id: str | None = None, now: str | None = None,
     ) -> tuple[str | None, str]:
-        """Queue an item once; returns (review_id, 'added' | 'exists' | 'full').
+        """Queue an item once; returns (review_id, 'added' | 'exists' | 'reopened' | 'full').
 
         The fingerprint makes it idempotent: the same court record or the same
         suspected impersonator found again is the same item, open or decided,
-        so a decision is never asked for twice.
+        so a decision is never asked for twice. It names the asset when there
+        is one (a search hit spells the same account's URL many ways), else
+        the URL as ``asset_ref`` normalises it. An item that expired
+        undecided was never answered, so finding it again reopens it.
         """
 
         if kind not in REVIEW_KINDS:
@@ -659,16 +667,30 @@ class MapStoreReview:
         if severity not in {"low", "normal", "high"}:
             raise ValueError("severity must be low, normal or high")
         stamp = now or now_iso()
-        key = fingerprint or hashlib.sha256(f"{kind}|{asset_id or ''}|{url}|{'' if asset_id or url else title}".encode("utf-8")).hexdigest()
+        try:
+            spelled = asset_ref(url).url if url.strip() else ""
+        except ValueError:
+            spelled = url.strip()
+        key = fingerprint or hashlib.sha256((f"{kind}|{asset_id}" if asset_id else f"{kind}||{spelled}|{'' if url else title}").encode("utf-8")).hexdigest()
+        # Items queued before the fingerprint named the asset are still found under their old one.
+        legacy = fingerprint or hashlib.sha256(f"{kind}|{asset_id or ''}|{url}|{'' if asset_id or url else title}".encode("utf-8")).hexdigest()
+        expires = (datetime.fromisoformat(stamp) + timedelta(days=REVIEW_TTL_DAYS)).isoformat()
         with self._tenant(institution_id):
-            existing = self.backend.fetchone("SELECT review_id FROM intel_review_items WHERE institution_id = ? AND fingerprint = ?", (institution_id, key))
-            if existing is not None:
+            existing = self.backend.fetchone(
+                "SELECT review_id, status FROM intel_review_items WHERE institution_id = ? AND fingerprint IN (?, ?) ORDER BY CASE WHEN fingerprint = ? THEN 0 ELSE 1 END LIMIT 1", (institution_id, key, legacy, key),
+            )
+            if existing is not None and existing["status"] != "expired":
                 return str(existing["review_id"]), "exists"
             waiting = self.backend.fetchone("SELECT COUNT(*) AS open_items FROM intel_review_items WHERE institution_id = ? AND status = 'open'", (institution_id,))
-            if waiting and int(waiting["open_items"]) >= MAX_OPEN_REVIEW:
+            if severity != "high" and kind not in URGENT_REVIEW_KINDS and waiting and int(waiting["open_items"]) >= MAX_OPEN_REVIEW:
                 return None, "full"
+            if existing is not None:
+                self.backend.execute(
+                    "UPDATE intel_review_items SET status = 'open', title = ?, detail = ?, run_id = COALESCE(?, run_id), expires_at = ?, updated_at = ? WHERE institution_id = ? AND review_id = ? AND status = 'expired'",
+                    (title[:300], detail[:2000], run_id, expires, stamp, institution_id, existing["review_id"]),
+                )
+                return str(existing["review_id"]), "reopened"
             review_id = f"irev-{uuid4().hex}"
-            expires = (datetime.fromisoformat(stamp) + timedelta(days=REVIEW_TTL_DAYS)).isoformat()
             self.backend.execute(
                 "INSERT INTO intel_review_items(review_id, institution_id, kind, fingerprint, severity, asset_id, entity_id, title, detail, url, connector, source_id, run_id, created_at, updated_at, expires_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -727,23 +749,57 @@ class MapStoreReview:
         with self._tenant(institution_id):
             self.backend.execute("UPDATE intel_assets SET relation = ?, updated_at = ? WHERE institution_id = ? AND asset_id = ?", (relation, now_iso(), institution_id, asset_id))
 
-    def prune_sources_for(self, institution_id: str, *, asset_id: str, url: str, whole_host: bool = False) -> int:
-        """Stop following a rejected asset, and (for a rejected website) the leads found on its host.
+    def _sources_from(self, institution_id: str, asset_id: str, *, max_hops: int) -> list[str]:
+        """The sources found on an asset, and on what those led to, up to ``max_hops`` steps (each lead names its parent)."""
+
+        found: dict[str, None] = {}
+        parents, seen = [asset_id], {asset_id}
+        for _ in range(max(0, max_hops)):
+            rows = [
+                row for chunk in iter_chunks(parents, 200)
+                for row in self.backend.fetchall(f"SELECT source_id, asset_id FROM intel_sources WHERE institution_id = ? AND parent_asset_id IN ({', '.join('?' for _ in chunk)})", (institution_id, *chunk))
+            ]
+            found.update((str(row["source_id"]), None) for row in rows)
+            parents = list(dict.fromkeys(str(row["asset_id"]) for row in rows if row["asset_id"] and row["asset_id"] not in seen))
+            seen.update(parents)
+            if not parents:
+                break
+        return list(found)
+
+    def prune_sources_for(self, institution_id: str, *, asset_id: str, url: str, whole_host: bool = False, max_hops: int = 2) -> int:
+        """Stop following a rejected asset, the leads found on it, and (for a rejected website) the leads on its host.
 
         A social account shares its host with every other account on that
-        platform, so only the account's own sources are pruned for it.
+        platform, so only the account's own sources are pruned for it. Leads
+        name a host as they found it, so every spelling (www. or not, http or
+        https) of a rejected site's host is pruned.
         """
 
         stamp = now_iso()
         with self._tenant(institution_id):
             pruned = self.backend.execute("UPDATE intel_sources SET status = 'pruned', updated_at = ? WHERE institution_id = ? AND status = 'active' AND (asset_id = ? OR target = ? OR target = ?)", (stamp, institution_id, asset_id, asset_id, url))
-            host = (urlparse(url).hostname or "").lower()
+            for chunk in iter_chunks(self._sources_from(institution_id, asset_id, max_hops=max_hops), 200):
+                pruned += self.backend.execute(f"UPDATE intel_sources SET status = 'pruned', updated_at = ? WHERE institution_id = ? AND status = 'active' AND source_id IN ({', '.join('?' for _ in chunk)})", (stamp, institution_id, *chunk))
+            host = (urlparse(url).hostname or "").lower().removeprefix("www.")
             if whole_host and host:
+                bases = [f"{scheme}://{name}" for scheme in ("https", "http") for name in (host, f"www.{host}")]
                 pruned += self.backend.execute(
-                    "UPDATE intel_sources SET status = 'pruned', updated_at = ? WHERE institution_id = ? AND status = 'active' AND (target LIKE ? OR target LIKE ?)",
-                    (stamp, institution_id, f"https://{host}/%", f"http://{host}/%"),
+                    f"UPDATE intel_sources SET status = 'pruned', updated_at = ? WHERE institution_id = ? AND status = 'active' AND ({' OR '.join('target = ? OR target LIKE ?' for _ in bases)})",
+                    (stamp, institution_id, *[value for base in bases for value in (base, f"{base}/%")]),
                 )
         return pruned
+
+    def cited_by(self, institution_id: str, asset_id: str) -> list[str]:
+        """The other assets holding evidence this one gave them (as its source), which ``forget_asset`` deletes with it."""
+
+        with self._tenant(institution_id):
+            asset = self.backend.fetchone("SELECT url FROM intel_assets WHERE institution_id = ? AND asset_id = ?", (institution_id, asset_id))
+            if asset is None:
+                return []
+            rows = self.backend.fetchall(
+                "SELECT DISTINCT asset_id FROM intel_evidence WHERE institution_id = ? AND asset_id <> ? AND (source_asset_id = ? OR source_url = ?)", (institution_id, asset_id, asset_id, asset["url"]),
+            )
+        return sorted(str(row["asset_id"]) for row in rows)
 
     def forget_asset(self, institution_id: str, asset_id: str, *, keep_review_id: str | None = None) -> bool:
         """Remove an asset, its evidence and its sources entirely.
@@ -752,14 +808,32 @@ class MapStoreReview:
         for an account that turned out to be a person's: the map keeps only a
         keyed fingerprint (the suppression list) so it is never added again.
         Every review item and incident that named it is redacted too
-        (``keep_review_id`` is left for the caller that is deciding it).
+        (``keep_review_id`` is left for the caller that is deciding it). So
+        is what it left elsewhere: the evidence it gave other assets (a hub
+        link names the hub in its source URL and channel; the caller regrades
+        them, ``cited_by`` lists them first), the leads found on it, its
+        conditional-fetch validators (a hash of a guessable URL still names
+        it) and any other asset's note that mentions its handle.
         """
+
+        from .connectors.feeds import youtube_feed_url  # a module-level import would be circular
 
         stamp = now_iso()
         with self._tenant(institution_id):
-            asset = self.backend.fetchone("SELECT asset_key, url FROM intel_assets WHERE institution_id = ? AND asset_id = ?", (institution_id, asset_id))
+            asset = self.backend.fetchone("SELECT asset_key, url, handle FROM intel_assets WHERE institution_id = ? AND asset_id = ?", (institution_id, asset_id))
             if asset is None:
                 return False
+            for chunk in iter_chunks(self._sources_from(institution_id, asset_id, max_hops=2), 200):
+                self.backend.execute(f"DELETE FROM intel_sources WHERE institution_id = ? AND source_id IN ({', '.join('?' for _ in chunk)})", (institution_id, *chunk))
+            self.backend.execute("DELETE FROM intel_evidence WHERE institution_id = ? AND (source_asset_id = ? OR source_url = ?)", (institution_id, asset_id, asset["url"]))
+            fetched = [asset["url"], *([youtube_feed_url(asset["asset_key"].removeprefix("youtube:channel:"))] if asset["asset_key"].startswith("youtube:channel:") else [])]
+            self.backend.execute(
+                f"DELETE FROM intel_fetch_validators WHERE institution_id = ? AND url_sha256 IN ({', '.join('?' for _ in fetched)})", (institution_id, *[hashlib.sha256(url.encode("utf-8")).hexdigest() for url in fetched]),
+            )
+            handle = str(asset["handle"] or "").lstrip("@")
+            if len(handle) >= 3:
+                pattern = "%" + handle.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+                self.backend.execute("UPDATE intel_assets SET note = '', updated_at = ? WHERE institution_id = ? AND asset_id <> ? AND note LIKE ? ESCAPE '\\'", (stamp, institution_id, asset_id, pattern))
             self.backend.execute(
                 "UPDATE intel_review_items SET title = 'a personal account (removed from the map)', detail = '', url = '', asset_id = NULL, updated_at = ?, "
                 "status = CASE WHEN status = 'open' THEN 'decided' ELSE status END, decision = CASE WHEN status = 'open' THEN 'personal' ELSE decision END, "

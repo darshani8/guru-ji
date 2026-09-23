@@ -89,7 +89,7 @@ class LinkHubConnector:
                 continue
             if ref.platform == "website":
                 if ref.kind == DOMAIN and hops <= context.max_hops:
-                    result.leads.append(Lead("lead_page", ref.url, entity_id=hub["entity_id"], hops=hops))
+                    result.leads.append(Lead("lead_page", ref.url, entity_id=hub["entity_id"], hops=hops, parent_asset_id=hub["asset_id"]))
                 continue
             if ref.kind not in {ACCOUNT, GROUP} or context.store.is_suppressed(context.institution_id, ref.key):
                 continue

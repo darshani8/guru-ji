@@ -137,7 +137,9 @@ class MapEngine:
         # Each run gets its own cache wrapper: a search another institution already paid for costs this run 0.
         return ConnectorContext(self.store, institution_id, run_id, self.clock(), fetcher=self.fetcher, search=cached_search(self.search, self.store, clock=self.clock), profile=profile, max_hops=self.config.max_hops, extras=self.extras)
 
-    def _add_lead(self, institution_id: str, lead: Lead, *, origin_override: str | None = None) -> bool:
+    def _add_lead(self, institution_id: str, lead: Lead, *, origin_override: str | None = None, found_on: str | None = None) -> bool:
+        """Schedule a lead; it remembers the asset it was found on (its own say, else ``found_on``: the running source's asset)."""
+
         if lead.hops > self.config.max_hops:
             return False
         if self.store.is_suppressed(institution_id, lead.target):
@@ -146,7 +148,7 @@ class MapEngine:
         expires = None if origin in {"recurring", "profile", "gap", "seed"} else (self.clock() + timedelta(days=self.config.lead_ttl_days)).isoformat()
         _, created = self.store.upsert_source(
             institution_id, connector=lead.connector, target=lead.target, entity_id=lead.entity_id, asset_id=lead.asset_id, topic=lead.topic, origin=origin,
-            work_class=lead.work_class, hops=lead.hops, interval_seconds=lead.interval_seconds, due_at=self.clock().isoformat(), expires_at=expires,
+            work_class=lead.work_class, hops=lead.hops, interval_seconds=lead.interval_seconds, due_at=self.clock().isoformat(), expires_at=expires, parent_asset_id=lead.parent_asset_id or found_on,
         )
         return created
 
@@ -288,7 +290,7 @@ class MapEngine:
         review.extend({**item, "connector": connector.name, "source_id": source["source_id"]} for item in result.review)
         added = 0
         for lead in result.leads:
-            added += int(self._add_lead(institution_id, lead))
+            added += int(self._add_lead(institution_id, lead, found_on=source.get("asset_id")))
         counts["leads"] += added
         if source.get("work_class") == "explore":
             counts["explore_run"] = counts.get("explore_run", 0) + 1
@@ -385,7 +387,7 @@ class MapEngine:
             self.store.expire_review_items(institution_id, now=self.clock().isoformat())
             queued = [self._queue(institution_id, item, run_id) for item in review]
             counts["incidents"] = len(incidents)
-            counts["review"] = queued.count("added")
+            counts["review"] = queued.count("added") + queued.count("reopened")
             counts["review_full"] = queued.count("full")
             stop_reason = "budget" if counts["deferred_budget"] else ("dry" if counts["sources"] and not (counts["new_assets"] or counts["raised"]) else ("idle" if not counts["sources"] else "completed"))
             if paused and stop_reason in {"dry", "idle"}:

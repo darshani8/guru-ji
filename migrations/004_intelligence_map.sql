@@ -31,6 +31,7 @@ ALTER TABLE intel_sources ADD COLUMN IF NOT EXISTS base_interval_seconds INTEGER
 ALTER TABLE intel_assets ADD COLUMN IF NOT EXISTS proposed_reasons_json TEXT;
 ALTER TABLE intel_assets ADD COLUMN IF NOT EXISTS proposed_scorer TEXT;
 ALTER TABLE intel_assets ADD COLUMN IF NOT EXISTS proposed_run_id TEXT;
+ALTER TABLE intel_sources ADD COLUMN IF NOT EXISTS parent_asset_id TEXT;
 -- PostgreSQL row-level security (skipped on SQLite)
 ALTER TABLE intel_entities ENABLE ROW LEVEL SECURITY;
 ALTER TABLE intel_entities FORCE ROW LEVEL SECURITY;

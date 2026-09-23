@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import importlib.util
 import unittest
 from uuid import uuid4
@@ -6,13 +7,18 @@ from datetime import datetime, timedelta, timezone
 from unittest import mock
 
 from app.domain.principals import PrincipalType
+from app.internet_intelligence.fetch import Retrieval
 from app.internet_intelligence.map.assets import asset_ref
 from app.internet_intelligence.map.connectors.apis import CourtRecordsConnector
-from app.internet_intelligence.map.connectors.base import ConnectorRegistry, ConnectorResult
+from app.internet_intelligence.map.connectors.base import ConnectorContext, ConnectorRegistry, ConnectorResult
+from app.internet_intelligence.map.connectors.feeds import youtube_feed_url
+from app.internet_intelligence.map.connectors.hubs import LinkHubConnector
+from app.internet_intelligence.map.connectors.web import LeadPageConnector
 from app.internet_intelligence.map.engine import MapEngine
 from app.internet_intelligence.map.gate import compare
+from app.internet_intelligence.map.incidents import IncidentDesk
 from app.internet_intelligence.map.metrics import map_metrics
-from app.internet_intelligence.map.pipeline import regrade, sync_profile
+from app.internet_intelligence.map.pipeline import nominated, regrade, sync_profile
 from app.internet_intelligence.map.service import MapService
 from app.internet_intelligence.map.store import MapStore
 from app.internet_intelligence.profile import InstitutionProfile
@@ -31,6 +37,17 @@ if FASTAPI_AVAILABLE:
 NOW = datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)
 INSTITUTION = "bgscet"
 PROFILE = InstitutionProfile(INSTITUTION, "BGS College of Engineering and Technology", "Bengaluru", aliases=["BGSCET"], official_domains=["bgscet.ac.in"])
+HUB_PAGE = '<html><head><title>links</title></head><body><a href="https://www.instagram.com/{account}/">Instagram</a> <a href="https://{site}/">site</a></body></html>'
+
+
+class PageFetcher:
+    """Answers every URL with the same public page, as a hub or a site would."""
+
+    def __init__(self, page):
+        self.page = page
+
+    async def retrieve(self, url, **kwargs):
+        return Retrieval(url=url, outcome="ok", http_status=200, body=self.page.encode(), content_type="text/html")
 
 
 class Base(unittest.TestCase):
@@ -61,11 +78,59 @@ class QueueStoreTests(Base):
         with self.assertRaises(ValueError):
             self.store.add_review_item(INSTITUTION, kind="gossip", title="x")
         with mock.patch("app.internet_intelligence.map.store.MAX_OPEN_REVIEW", 1):
-            self.assertEqual(self.store.add_review_item(INSTITUTION, kind="court_record", title="another", url="https://indiankanoon.org/doc/2/"), (None, "full"))
+            self.assertEqual(self.store.add_review_item(INSTITUTION, kind="candidate_account", title="another", url="https://www.instagram.com/someone/"), (None, "full"))
         self.assertEqual(self.store.review_counts(INSTITUTION), {"court_record": 1})
         self.assertEqual(self.store.expire_review_items(INSTITUTION, now=(NOW + timedelta(days=400)).isoformat()), 1)
         self.assertEqual(self.store.list_review_items(INSTITUTION), [])
         self.assertEqual(self.store.list_review_items("other", status=None), [], "the queue is per institution")
+
+    def test_a_full_queue_still_takes_what_cannot_wait(self):
+        with mock.patch("app.internet_intelligence.map.store.MAX_OPEN_REVIEW", 2):
+            for number in range(2):
+                self.store.add_review_item(INSTITUTION, kind="dispute", title=f"dispute {number}", url=f"https://www.instagram.com/claimant{number}/")
+            self.assertEqual(self.store.add_review_item(INSTITUTION, kind="candidate_account", title="one more", url="https://www.instagram.com/someone/")[1], "full")
+            for kind in ("court_record", "impersonation_candidate", "canary_leak", "run_gate"):
+                self.assertEqual(self.store.add_review_item(INSTITUTION, kind=kind, title=kind, url=f"https://example.org/{kind}")[1], "added", kind)
+            self.assertEqual(self.store.add_review_item(INSTITUTION, kind="dispute", title="urgent", severity="high", url="https://www.instagram.com/x9/")[1], "added")
+            # A held re-scoring still reaches a manager, who can publish or discard it.
+            stale = self.store.upsert_asset(INSTITUTION, asset_ref("https://www.instagram.com/bgscet_engg_coll/"), entity_id=self.entity_id, relation="official")[0]
+            # One live search result: a seed counts as verified only on the map's own evidence.
+            self.store.add_evidence(INSTITUTION, asset_id=stale, kind="search_snippet", channel="search:t", observed_via="index")
+            self.store.set_grade(INSTITUTION, stale, grade="B", reasons=["old rule"], scorer_version="grader-0")
+            self.store.add_gold(INSTITUTION, asset_key="instagram:bgscet_engg_coll", platform="instagram", split="seed", expected_min_grade="B")
+            self.assertFalse(self.service.rescore(self.manager, INSTITUTION)["passed"])
+        self.assertEqual(len(self.store.list_review_items(INSTITUTION, kind="run_gate")), 2)
+
+    def test_an_item_that_expired_undecided_is_asked_again(self):
+        account = self.account("https://www.instagram.com/bgscet.official/")
+        first = self.store.add_review_item(INSTITUTION, kind="impersonation_candidate", title="calls itself official", asset_id=account, url="https://www.instagram.com/bgscet.official/")
+        court = self.store.add_review_item(INSTITUTION, kind="court_record", title="State v. BGSCET", url="https://indiankanoon.org/doc/7/")
+        later = (datetime.now(timezone.utc) + timedelta(days=91)).isoformat()
+        self.assertEqual(self.store.expire_review_items(INSTITUTION, now=later), 2)
+        again = self.store.add_review_item(INSTITUTION, kind="impersonation_candidate", title="still calls itself official", detail="found again", asset_id=account, url="https://www.instagram.com/bgscet.official/", run_id="imrn-2", now=later)
+        self.assertEqual(again, (first[0], "reopened"))
+        self.assertEqual(self.store.add_review_item(INSTITUTION, kind="court_record", title="State v. BGSCET", url="https://indiankanoon.org/doc/7/", now=later), (court[0], "reopened"))
+        item = self.store.get_review_item(INSTITUTION, first[0])
+        self.assertEqual((item["status"], item["title"], item["detail"], item["run_id"]), ("open", "still calls itself official", "found again", "imrn-2"))
+        self.assertGreater(item["expires_at"], later, "it gets a fresh lease on the queue")
+        # A decided item is never asked again.
+        self.service.decide(self.manager, INSTITUTION, first[0], decision="dismiss")
+        self.assertEqual(self.store.add_review_item(INSTITUTION, kind="impersonation_candidate", title="again", asset_id=account, url="https://www.instagram.com/bgscet.official/")[1], "exists")
+
+    def test_one_account_is_one_item_however_its_url_is_spelled(self):
+        account = self.account("https://www.instagram.com/bgscet.official/")
+        first, _ = self.store.add_review_item(INSTITUTION, kind="impersonation_candidate", title="calls itself official", asset_id=account, url="https://www.instagram.com/bgscet.official/")
+        self.service.decide(self.manager, INSTITUTION, first, decision="dismiss", note="a fan page")
+        for url in ("https://instagram.com/bgscet.official", "https://www.instagram.com/bgscet.official/?hl=en", "https://m.instagram.com/BGSCET.official/"):
+            self.assertEqual(self.store.add_review_item(INSTITUTION, kind="impersonation_candidate", title="calls itself official", asset_id=account, url=url), (first, "exists"), url)
+        court, _ = self.store.add_review_item(INSTITUTION, kind="court_record", title="State v. BGSCET", url="https://indiankanoon.org/doc/7/")
+        self.assertEqual(self.store.add_review_item(INSTITUTION, kind="court_record", title="State v. BGSCET", url="https://indiankanoon.org/doc/7?utm_source=feed"), (court, "exists"))
+        self.assertEqual(self.store.list_review_items(INSTITUTION), [self.store.get_review_item(INSTITUTION, court)])
+        # An item queued under the old fingerprint (asset and raw URL) is still the same item.
+        other = self.account("https://www.instagram.com/bgscet_admissions/")
+        legacy = hashlib.sha256(f"dispute|{other}|https://www.instagram.com/bgscet_admissions/|".encode()).hexdigest()
+        old, _ = self.store.add_review_item(INSTITUTION, kind="dispute", title="two official accounts", asset_id=other, url="https://www.instagram.com/bgscet_admissions/", fingerprint=legacy)
+        self.assertEqual(self.store.add_review_item(INSTITUTION, kind="dispute", title="two official accounts", asset_id=other, url="https://www.instagram.com/bgscet_admissions/"), (old, "exists"))
 
 
 class DecisionTests(Base):
@@ -113,6 +178,165 @@ class DecisionTests(Base):
         with self.assertRaisesRegex(ValueError, "acknowledge"):
             self.service.decide(self.manager, INSTITUTION, review_id, decision="confirm")
         self.assertEqual(self.service.decide(self.manager, INSTITUTION, review_id, decision="acknowledge")["kind"], "court_record")
+
+
+class RejectionTests(Base):
+    def test_a_rejected_lookalike_takes_back_the_grade_it_lent(self):
+        # An outdated AICTE listing names a look-alike domain: it anchors (A), and so does its footer account.
+        domain, _ = self.store.upsert_asset(INSTITUTION, asset_ref("https://bgscet-edu.in/"), entity_id=self.entity_id, relation="official")
+        self.store.add_evidence(INSTITUTION, asset_id=domain, kind="directory_record", detail="authority:aicte listing", channel="directory:aicte", observed_via="live")
+        footer, _ = self.store.upsert_asset(INSTITUTION, asset_ref("https://www.instagram.com/bgscet_edu/"), entity_id=self.entity_id, relation="official")
+        self.store.add_evidence(INSTITUTION, asset_id=footer, kind="official_link", detail="A:footer", source_url="https://bgscet-edu.in/", source_asset_id=domain, channel="site:bgscet-edu.in", observed_via="live")
+        self.store.upsert_source(INSTITUTION, connector="lead_page", target="https://bgscet-edu.in/partners", origin="lead", work_class="explore")
+        regrade(self.store, INSTITUTION, [domain, footer])
+        self.assertEqual((self.store.get_asset(INSTITUTION, domain)["grade"], self.store.get_asset(INSTITUTION, footer)["grade"]), ("A", "A"))
+        self.assertTrue(nominated(self.store, INSTITUTION, domain))
+        result = self.service.decide(self.manager, INSTITUTION, self.queue(domain), decision="lookalike", note="registered by someone else")
+        self.assertEqual((result["links_refuted"], result["sources_pruned"]), (1, 1))
+        self.assertEqual(self.store.get_asset(INSTITUTION, domain)["grade"], "D")
+        self.assertEqual(self.store.get_asset(INSTITUTION, footer)["grade"], "unrated", "no A, and no A-arch either")
+        self.assertFalse(nominated(self.store, INSTITUTION, domain), "a reviewer's later rejection withdraws the regulator's listing")
+        self.assertEqual([source["status"] for source in self.store.list_sources(INSTITUTION, connector="lead_page")], ["pruned"])
+        self.assertNotIn(footer, {asset["asset_id"] for asset in self.service.assets(self.reader, INSTITUTION)})
+        # A link the refuted site gives afterwards counts no more than the old one.
+        self.store.add_evidence(INSTITUTION, asset_id=footer, kind="official_link", detail="A:footer", source_url="https://bgscet-edu.in/", source_asset_id=domain, channel="site:bgscet-edu.in", observed_via="live")
+        regrade(self.store, INSTITUTION, [footer])
+        self.assertEqual(self.store.get_asset(INSTITUTION, footer)["grade"], "unrated")
+        # Only a person naming it again (a later confirmation) makes it the institution's again.
+        self.store.add_evidence(INSTITUTION, asset_id=domain, kind="reviewer_confirm", channel="reviewer:x", observed_via="reviewer")
+        self.assertTrue(nominated(self.store, INSTITUTION, domain))
+
+    def test_a_hub_rejected_as_an_impostor_takes_back_what_it_listed(self):
+        home = self.store.find_asset(INSTITUTION, "web:bgscet.ac.in")["asset_id"]
+        hub, _ = self.store.upsert_asset(INSTITUTION, asset_ref("https://linktr.ee/bgscet_links"), entity_id=self.entity_id, relation="official")
+        self.store.add_evidence(INSTITUTION, asset_id=hub, kind="official_link", detail="A:footer", source_url="https://bgscet.ac.in/", source_asset_id=home, channel="site:bgscet.ac.in", observed_via="live")
+        listed, _ = self.store.upsert_asset(INSTITUTION, asset_ref("https://www.facebook.com/bgscet.alumni/"), entity_id=self.entity_id, relation="official")
+        self.store.add_evidence(INSTITUTION, asset_id=listed, kind="hub_link", detail="A:hub", source_url="https://linktr.ee/bgscet_links", source_asset_id=hub, channel="hub:bgscet_links", observed_via="live")
+        regrade(self.store, INSTITUTION, [home, hub, listed])
+        self.assertEqual((self.store.get_asset(INSTITUTION, hub)["grade"], self.store.get_asset(INSTITUTION, listed)["grade"]), ("A", "B"))
+        self.service.decide(self.manager, INSTITUTION, self.queue(hub), decision="impersonation", note="not ours")
+        self.assertEqual(self.store.get_asset(INSTITUTION, listed)["grade"], "unrated")
+        [refuted] = [row for row in self.store.list_evidence(INSTITUTION, asset_id=listed) if row["kind"] == "source_refuted"]
+        self.assertEqual((refuted["polarity"], refuted["source_asset_id"], refuted["observed_via"]), ("refutes", hub, "reviewer"))
+        self.assertEqual(self.store.get_asset(INSTITUTION, home)["grade"], "A", "the site that linked the hub is not touched")
+
+    def test_the_leads_a_rejected_hub_gave_go_with_it(self):
+        hub = self.account("https://linktr.ee/bgs_fake")
+        self.store.add_evidence(INSTITUTION, asset_id=hub, kind="community_record", channel="wikidata", observed_via="index")
+        regrade(self.store, INSTITUTION, [hub])
+        engine = MapEngine(self.store, ConnectorRegistry([LinkHubConnector(active=True)]), fetcher=PageFetcher(HUB_PAGE.format(account="bgs_fake_ig", site="bgs-fake-site.com")), clock=lambda: NOW)
+        asyncio.run(engine.tick(INSTITUTION))
+        [lead] = self.store.list_sources(INSTITUTION, connector="lead_page")
+        self.assertEqual((lead["target"], lead["parent_asset_id"]), ("https://bgs-fake-site.com/", hub), "a lead remembers the hub it was found on")
+        listed = self.store.find_asset(INSTITUTION, "instagram:bgs_fake_ig")["asset_id"]
+        self.store.add_evidence(INSTITUTION, asset_id=listed, kind="search_snippet", channel="search:tavily", observed_via="index")
+        regrade(self.store, INSTITUTION, [listed])
+        self.assertEqual(self.store.get_asset(INSTITUTION, listed)["grade"], "B", "the hub and a search agree")
+        result = self.service.decide(self.manager, INSTITUTION, self.queue(hub), decision="lookalike", note="not ours")
+        self.assertEqual(result["sources_pruned"], 2, "the hub's own watch and the lead found on it")
+        self.assertEqual(self.store.get_source(INSTITUTION, lead["source_id"])["status"], "pruned")
+        self.assertEqual(self.store.get_asset(INSTITUTION, listed)["grade"], "C", "only the search is left")
+
+    def test_a_rejected_site_loses_its_leads_under_every_spelling_and_vouches_no_more(self):
+        site, _ = self.store.upsert_asset(INSTITUTION, asset_ref("https://www.bgscet-admissions.example/"), entity_id=None)
+        self.store.add_evidence(INSTITUTION, asset_id=site, kind="backlink", channel="lead", observed_via="live")
+        spellings = ("https://www.bgscet-admissions.example/", "https://www.bgscet-admissions.example/apply", "http://bgscet-admissions.example/fees", "https://www.bgscet-admissions.example")
+        for target in (*spellings, "https://bgscet-admissions.example.org/"):
+            self.store.upsert_source(INSTITUTION, connector="lead_page", target=target, origin="lead", work_class="explore", hops=1)
+        result = self.service.decide(self.manager, INSTITUTION, self.queue(site), decision="impersonation", note="takes fees in our name")
+        self.assertEqual(result["sources_pruned"], len(spellings))
+        self.assertEqual({source["target"]: source["status"] for source in self.store.list_sources(INSTITUTION)}, {**{target: "pruned" for target in spellings}, "https://bgscet-admissions.example.org/": "active"})
+        # A lead that slipped through finds the site refuted, before fetching or recording anything.
+        account = self.account("https://www.instagram.com/bgscet_admission_desk/")
+        page = (
+            '<html><head><title>BGS College of Engineering and Technology - Admissions</title></head><body><header><a href="https://www.instagram.com/bgscet_admission_desk/">Instagram</a></header>'
+            "<p>BGS College of Engineering and Technology, Bengaluru. BGSCET admissions 2026.</p></body></html>"
+        )
+        context = ConnectorContext(self.store, INSTITUTION, "run-2", NOW, fetcher=PageFetcher(page))
+        for parked in (False, True):
+            if parked:  # a grade parked under an older one still leaves the reviewer's rejection standing
+                self.store.set_grade(INSTITUTION, site, grade="C", reasons=["older rule"], scorer_version="grader-0")
+            outcome = asyncio.run(LeadPageConnector().run({"target": "https://www.bgscet-admissions.example/", "hops": 1}, context))
+            self.assertEqual((outcome.outcome, outcome.prune), ("refuted", True))
+        self.assertEqual(self.store.get_asset(INSTITUTION, account)["grade"], "C")
+        self.assertEqual([row["kind"] for row in self.store.list_evidence(INSTITUTION, asset_id=account)], ["search_snippet"])
+
+    def test_forgetting_a_personal_hub_leaves_nothing_that_names_the_person(self):
+        hub = self.account("https://linktr.ee/rahul.k")
+        engine = MapEngine(self.store, ConnectorRegistry([LinkHubConnector(active=True)]), fetcher=PageFetcher(HUB_PAGE.format(account="rahul.k.photos", site="rahulk-portfolio.example")), clock=lambda: NOW)
+        asyncio.run(engine.tick(INSTITUTION))
+        listed = self.store.find_asset(INSTITUTION, "instagram:rahul.k.photos")
+        self.assertEqual((listed["note"], listed["grade"]), ("listed on rahul.k", "C"))
+        self.assertEqual(len(self.store.list_sources(INSTITUTION)), 2, "the hub's watch and the lead found on it")
+        self.store.record_fetch(INSTITUTION, "https://linktr.ee/rahul.k", outcome="ok", etag='"v1"', last_modified=None, content_sha256=None)
+        self.service.decide(self.manager, INSTITUTION, self.queue(hub), decision="personal", note="a student's own page")
+        self.assertIsNone(self.store.get_asset(INSTITUTION, hub))
+        for row in self.store.list_evidence(INSTITUTION):
+            self.assertNotIn("rahul.k", f"{row['source_url']} {row['channel']} {row['detail']}")
+        self.assertEqual(self.store.list_sources(INSTITUTION), [])
+        listed = self.store.get_asset(INSTITUTION, listed["asset_id"])
+        self.assertEqual((listed["note"], listed["grade"]), ("", "unrated"), "regraded without the hub's link")
+        self.assertIsNone(self.store.fetch_state(INSTITUTION, "https://linktr.ee/rahul.k"))
+        self.assertNotIn("rahul", " ".join(f"{item['title']} {item['url']}" for item in self.store.list_review_items(INSTITUTION, status=None)))
+        # A personal YouTube channel takes its feed's validator with it.
+        channel = self.account("https://www.youtube.com/channel/UCabcdefghijklmnopqrstuv")
+        feed = youtube_feed_url("UCabcdefghijklmnopqrstuv")
+        self.store.record_fetch(INSTITUTION, feed, outcome="ok", etag='"v1"', last_modified=None, content_sha256=None)
+        self.service.decide(self.manager, INSTITUTION, self.queue(channel), decision="personal")
+        self.assertIsNone(self.store.fetch_state(INSTITUTION, feed))
+
+
+class ConcurrentDecisionTests(Base):
+    """Two managers with the same item open: only the decision whose claim wins has any effect."""
+
+    def setUp(self):
+        super().setUp()
+        self.sent = []
+        self.service = MapService(self.store, desk=IncidentDesk(self.store, recipients=lambda _: ["it@bgscet.ac.in"], notify=lambda *args: self.sent.append(args[2])))
+        self.other = principal(PrincipalType.PRINCIPAL, "manager-2", college_id=INSTITUTION)
+        self.target = self.account("https://www.instagram.com/bgscet_mba/")
+        self.store.upsert_source(INSTITUTION, connector="lead_page", target="https://www.instagram.com/bgscet_mba/", asset_id=self.target, origin="lead", work_class="explore")
+        self.review_id = self.queue(self.target)
+        # What the second manager's page loaded while the item was still open.
+        self.stale = self.store.get_review_item(INSTITUTION, self.review_id)
+
+    def late_decision(self, decision):
+        with mock.patch.object(self.store, "get_review_item", return_value=self.stale), self.assertRaisesRegex(ValueError, "someone else, or expired"):
+            self.service.decide(self.other, INSTITUTION, self.review_id, decision=decision, note="fake")
+
+    def assert_untouched(self, grade):
+        self.assertEqual(self.store.get_asset(INSTITUTION, self.target)["grade"], grade)
+        self.assertEqual({row["kind"] for row in self.store.list_evidence(INSTITUTION, asset_id=self.target)} & {"impersonation", "lookalike", "reviewer_reject"}, set())
+        self.assertEqual([source["status"] for source in self.store.list_sources(INSTITUTION)], ["active"])
+        self.assertEqual((self.store.list_incidents(INSTITUTION), self.sent), ([], []))
+        self.assertFalse(self.store.is_suppressed(INSTITUTION, "instagram:bgscet_mba"))
+
+    def test_the_second_decision_changes_nothing(self):
+        self.service.decide(self.manager, INSTITUTION, self.review_id, decision="confirm", relation="official")
+        for decision in ("impersonation", "personal"):
+            self.late_decision(decision)
+        self.assert_untouched("B")
+        item = self.store.get_review_item(INSTITUTION, self.review_id)
+        self.assertEqual((item["decision"], item["decided_by"], item["url"]), ("confirm", self.manager.principal_id, "https://www.instagram.com/bgscet_mba/"))
+
+    def test_an_item_that_expired_meanwhile_changes_nothing(self):
+        self.store.expire_review_items(INSTITUTION, now=(datetime.now(timezone.utc) + timedelta(days=400)).isoformat())
+        self.late_decision("impersonation")
+        self.assert_untouched("C")
+        self.assertEqual(self.store.get_review_item(INSTITUTION, self.review_id)["status"], "expired")
+
+    def test_a_decision_that_fails_part_way_leaves_the_item_open(self):
+        for decision, broken in (("impersonation", "prune_sources_for"), ("personal", "forget_asset")):
+            with mock.patch.object(self.store, broken, side_effect=RuntimeError("the database went away")), self.assertRaises(RuntimeError):
+                self.service.decide(self.manager, INSTITUTION, self.review_id, decision=decision)
+            self.assert_untouched("C")
+            item = self.store.get_review_item(INSTITUTION, self.review_id)
+            self.assertEqual((item["status"], item["url"], item["asset_id"]), ("open", "https://www.instagram.com/bgscet_mba/", self.target))
+        # Tried again, the forgetting and the item's redaction commit together.
+        self.service.decide(self.manager, INSTITUTION, self.review_id, decision="personal")
+        item = self.store.get_review_item(INSTITUTION, self.review_id)
+        self.assertEqual((item["status"], item["url"], item["asset_id"]), ("decided", "", None))
+        self.assertIsNone(self.store.get_asset(INSTITUTION, self.target))
 
 
 class GateTests(Base):

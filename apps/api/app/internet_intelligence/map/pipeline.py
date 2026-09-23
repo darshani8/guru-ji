@@ -121,17 +121,65 @@ def sync_profile(store: MapStore, profile: InstitutionProfile, *, run_id: str | 
 # Evidence that the institution itself (or a person acting for it, or a
 # regulator) says a domain is its own. Only such a domain vouches for accounts.
 _NOMINATING = frozenset({"configured_domain", "owner_claim", "reviewer_confirm"})
+# A reviewer's rejection; it stands until the owner or a reviewer confirms the asset again.
+REVIEWER_REFUTATIONS = frozenset({"reviewer_reject", "lookalike", "impersonation"})
+# Evidence one asset gives another by linking to it.
+LINK_KINDS = ("official_link", "hub_link", "subdomain", "backlink")
+
+
+def _last(rows: Iterable[dict[str, Any]], kinds: Iterable[str], polarity: str) -> str:
+    wanted = set(kinds)
+    return max((str(row["observed_at"]) for row in rows if row["polarity"] == polarity and row["kind"] in wanted), default="")
 
 
 def nominated(store: MapStore, institution_id: str, asset_id: str) -> bool:
-    """Whether the institution, a reviewer or a regulator named this domain as the institution's."""
+    """Whether the institution, a reviewer or a regulator named this domain as the institution's.
 
-    for row in store.evidence_for(institution_id, [asset_id])[asset_id]:
-        if row["polarity"] != "supports":
-            continue
-        if row["kind"] in _NOMINATING or (row["kind"] == "directory_record" and str(row["detail"]).startswith("authority:")):
-            return True
-    return False
+    A later reviewer rejection takes the nomination back until someone names
+    it again: an outdated regulator listing of a look-alike must neither
+    keep it vouching nor keep its host's leads alive.
+    """
+
+    rows = store.evidence_for(institution_id, [asset_id])[asset_id]
+    named = max((str(row["observed_at"]) for row in rows if row["polarity"] == "supports" and (row["kind"] in _NOMINATING or (row["kind"] == "directory_record" and str(row["detail"]).startswith("authority:")))), default="")
+    return bool(named) and named > _last(rows, REVIEWER_REFUTATIONS, "refutes")
+
+
+def reviewer_refuted(store: MapStore, institution_id: str, asset_id: str) -> bool:
+    """Whether a reviewer's rejection of the asset stands (no owner or reviewer confirmed it since)."""
+
+    rows = store.evidence_for(institution_id, [asset_id])[asset_id]
+    refuted = _last(rows, REVIEWER_REFUTATIONS, "refutes")
+    return bool(refuted) and refuted >= _last(rows, {"owner_claim", "reviewer_confirm"}, "supports")
+
+
+def refute_source(store: MapStore, institution_id: str, source_asset_id: str, *, reason: str, channel: str = "reviewer", run_id: str | None = None) -> list[str]:
+    """A reviewer rejected a site or hub: what it linked keeps nothing it lent.
+
+    Each asset it linked gets one ``source_refuted`` row naming it, and the
+    grader drops every link from that source, earlier or later, with no
+    "was official then" fallback (``lose_anchor``'s A-arch): a look-alike's
+    footer never was official. Returns the assets affected, already regraded.
+    """
+
+    linked = {row["asset_id"] for kind in LINK_KINDS for row in store.links_from(institution_id, source_asset_id, kind=kind) if row["polarity"] == "supports"}
+    linked -= {row["asset_id"] for row in store.links_from(institution_id, source_asset_id, kind="source_refuted")} | {source_asset_id}
+    for asset_id in sorted(linked):
+        store.add_evidence(institution_id, asset_id=asset_id, kind="source_refuted", polarity="refutes", detail=reason[:120], source_asset_id=source_asset_id, channel=channel, observed_via="reviewer", run_id=run_id)
+    if linked:
+        regrade(store, institution_id, sorted(linked))
+    return sorted(linked)
+
+
+def forget(store: MapStore, institution_id: str, asset_id: str, *, keep_review_id: str | None = None) -> bool:
+    """Take a person's asset out of the map with every trace (``MapStore.forget_asset``), then regrade what it had vouched for."""
+
+    with store.batch(institution_id):
+        cited = store.cited_by(institution_id, asset_id)
+        if not store.forget_asset(institution_id, asset_id, keep_review_id=keep_review_id):
+            return False
+        regrade(store, institution_id, cited)
+    return True
 
 
 def lose_anchor(store: MapStore, institution_id: str, source_asset_id: str, *, reason: str, run_id: str | None = None) -> list[str]:
@@ -177,4 +225,4 @@ def unique(items: Sequence[str]) -> list[str]:
     return list(dict.fromkeys(items))
 
 
-__all__ = ["anchor_grade", "entity_key", "find_entity", "lose_anchor", "nominated", "regrade", "sync_profile", "unique"]
+__all__ = ["LINK_KINDS", "REVIEWER_REFUTATIONS", "anchor_grade", "entity_key", "find_entity", "forget", "lose_anchor", "nominated", "refute_source", "regrade", "reviewer_refuted", "sync_profile", "unique"]

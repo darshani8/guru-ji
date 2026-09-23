@@ -85,6 +85,42 @@ class PostgresMapStoreTests(unittest.TestCase):
         self.assertEqual(store.apply_proposed(institution), 0)
         self.assertEqual(store.list_review_items(institution, status=None)[0]["url"], "")
 
+    def test_two_decisions_on_one_item_take_effect_once(self):
+        """The second claim waits for the first decision's transaction, then finds the item closed and applies nothing."""
+
+        from app.domain.principals import PrincipalType
+        from app.internet_intelligence.map.assets import asset_ref
+        from app.internet_intelligence.map.service import MapService
+        from app.internet_intelligence.map.store import MapStore
+        from platform_fixtures import principal
+
+        first, second = MapStore(POSTGRES_URL, suppression_key=b"k"), MapStore(POSTGRES_URL, suppression_key=b"k")
+        institution = f"pgt-{uuid4().hex[:10]}"
+        url = "https://www.instagram.com/someone_official/"
+        asset_id, _ = first.upsert_asset(institution, asset_ref(url), entity_id=None)
+        first.upsert_source(institution, connector="lead_page", target=url, asset_id=asset_id, origin="lead", work_class="explore")
+        review_id, _ = first.add_review_item(institution, kind="impersonation_candidate", title="calls itself official", asset_id=asset_id, url=url)
+        late, manager = MapService(second), principal(PrincipalType.PRINCIPAL, "manager-2", college_id=institution)
+        outcome: dict[str, str] = {}
+
+        def decide() -> None:
+            try:
+                outcome["second"] = str(late.decide(manager, institution, review_id, decision="impersonation", note="fake")["decision"])
+            except ValueError as exc:
+                outcome["second"] = str(exc)
+
+        with first.batch(institution):
+            self.assertTrue(first.decide_review_item(institution, review_id, decision="confirm", decided_by="manager-1"))
+            thread = threading.Thread(target=decide)
+            thread.start()
+            thread.join(timeout=1.0)
+            self.assertTrue(thread.is_alive(), "the second claim waits for the first transaction")
+        thread.join(timeout=15)
+        self.assertIn("someone else", outcome["second"])
+        self.assertEqual(first.list_evidence(institution, asset_id=asset_id), [])
+        self.assertEqual([source["status"] for source in first.list_sources(institution)], ["active"])
+        self.assertEqual((first.list_incidents(institution), first.get_review_item(institution, review_id)["decision"]), ([], "confirm"))
+
     def test_incidents_recur_and_reopen(self):
         from app.internet_intelligence.map.incidents import IncidentDesk
         from app.internet_intelligence.map.store import MapStore
