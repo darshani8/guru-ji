@@ -4,7 +4,8 @@ Each is used within its terms and only with the institution's own key where
 one is needed. None of them can make anything official on its own: YouTube
 confirms a channel exists and what it says about itself, Wikidata is
 community-edited (one channel, C), and court records only ever go to a
-person for review.
+person for review, with the litigants' names taken out: the reviewer needs
+to know that the institution is a party, not who the other party is.
 """
 
 from __future__ import annotations
@@ -15,6 +16,7 @@ from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
 
+from ...redaction import names_of, strip_person_names
 from ..assets import asset_ref
 from .base import ConnectorContext, ConnectorResult, Lead
 from .common import ApiClient, _compact, unique
@@ -267,6 +269,7 @@ class CourtRecordsConnector:
         docs = (response.json() or {}).get("docs") or []
         wanted = _compact(entity["name"])
         result = ConnectorResult(outcome="ok")
+        keep = names_of(context.entities())
         for doc in docs[:20] if isinstance(docs, list) else []:
             if not isinstance(doc, dict) or not str(doc.get("tid", "")).isdigit():
                 continue
@@ -275,8 +278,8 @@ class CourtRecordsConnector:
             if wanted not in _compact(f"{title} {headline}"):
                 continue
             result.review.append({
-                "kind": "court_record", "entity_id": entity["entity_id"], "title": title, "url": f"https://indiankanoon.org/doc/{doc['tid']}/",
-                "detail": f"{str(doc.get('docsource') or '')[:80]} {str(doc.get('publishdate') or '')[:10]}: {headline}".strip(),
+                "kind": "court_record", "entity_id": entity["entity_id"], "title": strip_person_names(title, keep=keep), "url": f"https://indiankanoon.org/doc/{doc['tid']}/",
+                "detail": strip_person_names(f"{str(doc.get('docsource') or '')[:80]} {str(doc.get('publishdate') or '')[:10]}: {headline}".strip(), keep=keep),
             })
         result.yield_count = 0
         return result

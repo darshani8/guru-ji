@@ -23,6 +23,7 @@ from .entity_resolution import HIGH, LOW, MEDIUM, NOT_MATCHED, resolve_entity
 from .fetch import PublicPageFetcher
 from .profile import InstitutionProfile
 from .query_generator import generate_queries
+from .redaction import strip_person_names
 from .relevance import importance, relevance_score, topic_tags, within_window
 from .search import IntelligenceSearchProvider, IntelligenceSearchUnavailable
 from .source_classification import SOURCE_LABELS, classify_source
@@ -194,7 +195,10 @@ class InternetIntelligenceService:
                 status, reason = "excluded", "date_unknown"
             elif relevance < 0.3:
                 status, reason = "excluded", "not_relevant"
-            excerpt = text.strip()[:600]
+            # The excerpt is stored and reported, so people's names come out of it
+            # (the institution's own names stay; matching above used the full text).
+            # It is scrubbed before the cut, so a name across the 600th character still goes whole.
+            excerpt = strip_person_names(text.strip()[:800], keep=profile.all_names())[:600]
             record = {
                 "url": source_url, "requested_url": hit.url, "canonical_url": canonical, "domain": domain_of(source_url), "title": title[:300] or source_url, "excerpt": excerpt, "content_sha256": hashlib.sha256(f"{title}\n{text}".encode("utf-8")).hexdigest(),
                 "published_at": published.isoformat() if published else None, "date_status": date_status, "retrieved_at": hit.retrieved_at.isoformat(), "match_level": match.level, "match_score": match.score,

@@ -6,7 +6,8 @@ so every seeded asset still has to be re-verified. A fixed share of rows is
 held out: those become hidden ground truth and are never seeded, so the
 map's ability to find them again honestly measures whether it "reaches more".
 Lookalikes become entities a page must beat, and the ones with a URL become
-canaries the map must never grade as official.
+canaries the map must never grade as official. A row's label and note are
+stored with people's names taken out; the entities' own names stay.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..redaction import names_of, strip_person_names
 from .assets import asset_ref
 from .store import GRADE_RANK, RELATIONS, MapStore
 
@@ -130,6 +132,12 @@ def import_seed(
     summary = SeedSummary()
     wanted = {group.strip().lower() for group in groups} if groups else None
     entity_ids: dict[tuple[str, str], str] = {}
+    lookalikes = list(lookalikes)
+    # The sweep names its subjects (the Math, its colleges, the Swamiji); those stay in the notes, people's names do not.
+    keep = [
+        *names_of(store.list_entities(institution_id)), *(name for row in rows for name in (row.subject, row.parent) if name),
+        *(name for lookalike in lookalikes for name in (lookalike.name, *lookalike.names)),
+    ]
 
     def entity(name: str, kind: str, group: str, parent: str = "") -> str:
         key = (kind, name)
@@ -184,10 +192,11 @@ def import_seed(
             continue
         store.add_gold(institution_id, asset_key=ref.key, platform=ref.platform, split="seed", entity_name=row.subject, relation=row.relation, expected_min_grade=expected, source=source)
         label = row.label if row.label != row.subject else ""
-        asset_id, created = store.upsert_asset(institution_id, ref, entity_id=entity_id, relation=row.relation, note=" · ".join(part for part in (label, row.note) if part))
+        note = strip_person_names(row.note, keep=keep)
+        asset_id, created = store.upsert_asset(institution_id, ref, entity_id=entity_id, relation=row.relation, note=" · ".join(part for part in (strip_person_names(label, keep=keep), note) if part))
         summary.assets_created += int(created)
         summary.assets_existing += int(not created)
-        store.add_evidence(institution_id, asset_id=asset_id, kind="imported_claim", detail=f"claimed {row.claimed_grade}: {row.note}", channel=source, observed_via="import", source_url="")
+        store.add_evidence(institution_id, asset_id=asset_id, kind="imported_claim", detail=f"claimed {row.claimed_grade}: {note}", channel=source, observed_via="import", source_url="")
         summary.evidence += 1
     return summary
 
