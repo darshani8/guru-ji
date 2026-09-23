@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import re
+import xml.etree.ElementTree as ElementTree
 from dataclasses import dataclass, field
 from html.parser import HTMLParser
 from urllib.parse import urljoin, urlparse
@@ -23,6 +24,17 @@ _HIDDEN_STYLE = re.compile(
     r"(?:width|height)\s*:\s*[01]px[^;]*;[^\"']*overflow\s*:\s*hidden|overflow\s*:\s*hidden[^\"']*(?:width|height)\s*:\s*[01]px",
     re.IGNORECASE,
 )
+# Classes that hide an element wherever a site's framework defines them (Bootstrap,
+# Tailwind, WordPress themes), unless another class shows it again: "d-none
+# d-md-block", "hidden lg:flex" and "hidden group-hover:block" are a desktop-only
+# or drop-down menu, not hidden spam.
+_HIDING_CLASSES = frozenset({"d-none", "hidden", "sr-only", "visually-hidden", "screen-reader-text", "invisible"})
+_SHOWN_AT_BREAKPOINT = re.compile(r"d-(?:sm|md|lg|xl|xxl)-(?!none$)[a-z-]+|(?:[\w-]+:)+(?:block|inline|inline-block|flex|inline-flex|grid|inline-grid|table|contents|flow-root|visible|not-sr-only)")
+_STYLE_BLOCK = re.compile(r"<style\b[^>]*>(.*?)</style\s*>", re.IGNORECASE | re.DOTALL)
+_CSS_COMMENT = re.compile(r"/\*.*?\*/", re.DOTALL)
+_CSS_TOKEN = re.compile(r"([^{}]*)([{}])")
+_SELECTOR_NAME = re.compile(r"[.#][A-Za-z_][\w-]*")  # one class or id; a whole selector only when it is nothing more
+_SHOWN_STYLE = re.compile(r"display\s*:\s*(?!none)[a-z]|visibility\s*:\s*visible|opacity\s*:\s*(?:1|0?\.\d)", re.IGNORECASE)
 # Whole class or id tokens that name the page's own chrome. Substrings do not
 # count: "card-footer", "modal-header" and a theme's body class such as
 # "et_pb_footer_columns4" describe content, not the site's footer.
@@ -79,10 +91,41 @@ def _bare_host(url: str) -> str:
     return (urlparse(url).hostname or "").lower().removeprefix("www.")
 
 
+def hidden_selectors(html: str) -> frozenset[str]:
+    """The ``.class`` and ``#id`` selectors a page's own <style> blocks hide (lower-cased).
+
+    Injected spam often hides behind a made-up class instead of an inline
+    style. Only top-level rules with a lone class or id count: a rule inside
+    @media hides something on some screens only, and a class the stylesheet
+    also shows somewhere (".collapse.in", "li:hover > .sub-menu") is a
+    toggled menu, not a hidden one.
+    """
+
+    hidden: set[str] = set()
+    shown: set[str] = set()
+    for block in _STYLE_BLOCK.findall(html):
+        selectors: list[str] = []
+        for text, brace in _CSS_TOKEN.findall(_CSS_COMMENT.sub(" ", block)):
+            if brace == "{":
+                selectors.append(text.rsplit(";", 1)[-1].strip())  # past any "@import ...;" before it
+                continue
+            if not selectors:
+                continue
+            selector = selectors.pop()
+            if selector.startswith("@"):
+                continue
+            if _SHOWN_STYLE.search(text):
+                shown.update(name.lower() for name in _SELECTOR_NAME.findall(selector))
+            if not selectors and _HIDDEN_STYLE.search(text):
+                hidden.update(part.strip().lower() for part in selector.split(",") if _SELECTOR_NAME.fullmatch(part.strip()))
+    return frozenset(hidden - shown)
+
+
 class _StructureParser(HTMLParser):
-    def __init__(self, base_url: str) -> None:
+    def __init__(self, base_url: str, hidden: frozenset[str] = frozenset()) -> None:
         super().__init__(convert_charrefs=True)
         self.base = base_url
+        self.hidden_selectors = hidden
         self.stack: list[tuple[str, str | None, bool]] = []  # (tag, position set here, hidden set here)
         self.out = PageStructure(url=base_url)
         self._link: dict[str, object] | None = None
@@ -117,12 +160,17 @@ class _StructureParser(HTMLParser):
                 return None if inside_content else position
         return None
 
-    @staticmethod
-    def _element_hidden(attributes: dict[str, str]) -> bool:
+    def _element_hidden(self, attributes: dict[str, str]) -> bool:
         if "hidden" in attributes:
             return True
         style = attributes.get("style", "")
-        return bool(style and _HIDDEN_STYLE.search(style))
+        if style and _HIDDEN_STYLE.search(style):
+            return True
+        classes = attributes.get("class", "").lower().split()
+        if any(name in _HIDING_CLASSES for name in classes) and not any(_SHOWN_AT_BREAKPOINT.fullmatch(name) for name in classes):
+            return True
+        ident = attributes.get("id", "").strip().lower()
+        return any(f".{name}" in self.hidden_selectors for name in classes) or (bool(ident) and f"#{ident}" in self.hidden_selectors)
 
     # -- events ----------------------------------------------------------
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -252,7 +300,7 @@ HEAD_LINK = "head"
 
 
 def parse_structure(html: str, url: str) -> PageStructure:
-    parser = _StructureParser(url)
+    parser = _StructureParser(url, hidden_selectors(html))
     try:
         parser.feed(html)
         parser.close()
@@ -261,4 +309,33 @@ def parse_structure(html: str, url: str) -> PageStructure:
     return parser.result()
 
 
-__all__ = ["ASIDE", "BODY", "FOOTER", "HEADER", "HEAD_LINK", "HIDDEN", "IDENTITY_POSITIONS", "NAV", "PageLink", "PageStructure", "parse_structure"]
+_XML_DECLARATIONS = re.compile(rb"<!\s*(?:DOCTYPE|ENTITY)", re.IGNORECASE)
+
+
+def parse_sitemap(body: bytes, *, limit: int = 5000) -> tuple[list[str], list[str]]:
+    """(page URLs, nested sitemap URLs) from a sitemap or sitemap index; nothing for anything else.
+
+    As with feeds, a document that declares a DOCTYPE or entities is refused
+    outright, so no entity expansion or external lookup can happen.
+    """
+
+    if _XML_DECLARATIONS.search(body):
+        return [], []
+    try:
+        root = ElementTree.fromstring(body)
+    except ElementTree.ParseError:
+        return [], []
+    kind = root.tag.rsplit("}", 1)[-1].lower()
+    if kind not in {"urlset", "sitemapindex"}:
+        return [], []
+    found: list[str] = []
+    for element in root.iter():
+        location = (element.text or "").strip()
+        if element.tag.rsplit("}", 1)[-1].lower() == "loc" and location.startswith(("http://", "https://")):
+            found.append(location[:1000])
+            if len(found) >= limit:
+                break
+    return (found, []) if kind == "urlset" else ([], found)
+
+
+__all__ = ["ASIDE", "BODY", "FOOTER", "HEADER", "HEAD_LINK", "HIDDEN", "IDENTITY_POSITIONS", "NAV", "PageLink", "PageStructure", "parse_sitemap", "parse_structure"]

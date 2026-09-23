@@ -200,8 +200,9 @@ _SHARED_ONLY_URLS = frozenset({":memory:", "sqlite:///:memory:", ""})
 def _map_service(
     settings: AppSettings, backend: Any, intelligence_store: IntelligenceStore, provider: Any | None, notifications: NotificationService | None = None, email: EmailService | None = None,
 ) -> MapService:
-    fetcher = PublicPageFetcher(timeout_seconds=settings.web_extract_timeout_seconds, max_response_bytes=settings.web_extract_max_bytes, user_agent=crawler_user_agent(settings.intelligence_crawler_contact)) if settings.intelligence_fetch_pages else None
     store = MapStore(backend=backend, suppression_key=_suppression_key(settings))
+    # host_slots: the shared table spaces requests to one site across every worker process.
+    fetcher = PublicPageFetcher(timeout_seconds=settings.web_extract_timeout_seconds, max_response_bytes=settings.web_extract_max_bytes, user_agent=crawler_user_agent(settings.intelligence_crawler_contact), host_slots=store.claim_host_slot) if settings.intelligence_fetch_pages else None
 
     def recipients(institution_id: str) -> tuple[str, ...]:
         profile = intelligence_store.get_profile(institution_id)

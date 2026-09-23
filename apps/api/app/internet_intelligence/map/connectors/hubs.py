@@ -131,7 +131,7 @@ class DirectoryConnector:
         url = str(source["target"])
         retrieval = await context.fetcher.retrieve(url)
         if not retrieval.ok:
-            return ConnectorResult(outcome=retrieval.outcome, failed=retrieval.outcome in FAILED_OUTCOMES, prune=retrieval.outcome in {"not_found", "gone"} and source.get("origin") == "lead")
+            return ConnectorResult(outcome=retrieval.outcome, failed=retrieval.outcome in FAILED_OUTCOMES, prune=retrieval.outcome == "snippet_only" or (retrieval.outcome in {"not_found", "gone"} and source.get("origin") == "lead"))
         structure = parse_structure(retrieval.text, retrieval.url)
         if assess(structure, retrieval.text).status != CLEAN:
             return ConnectorResult(outcome="unhealthy")

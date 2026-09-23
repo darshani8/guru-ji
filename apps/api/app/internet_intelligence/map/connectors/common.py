@@ -133,7 +133,7 @@ class ApiClient:
         return ApiResponse("error")
 
 
-FAILED_OUTCOMES = frozenset({"blocked", "server_error", "timeout", "too_large", "error", "robots", "login_wall", "not_public", "content_type", "redirect_loop"})
+FAILED_OUTCOMES = frozenset({"blocked", "server_error", "timeout", "too_large", "error", "robots", "login_wall", "not_public", "unresolved", "unreachable", "content_type", "redirect_loop"})
 
 
 # ----------------------------------------------------------------- entities

@@ -57,7 +57,9 @@ _ONE_STEP_DOWN = {"O": "A", "A": "B", "A-arch": "C", "B": "C", "C": "C"}
 FREE_TEXT_KINDS = frozenset({"search_snippet", "imported_claim", "reviewer_confirm", "reviewer_reject", "impersonation", "lookalike", "spam_indexed", "backlink", "api_identity", "community_record"})
 EXPIRED_DETAIL = "[expired]"
 _OBSERVATIONS = frozenset({"liveness", "integrity"})
-_NOT_FOUND = frozenset({"not_found", "gone"})
+# A page that is gone, a name that stopped resolving, or a host that refuses
+# every connection: dead once two such checks are a day apart.
+_NOT_FOUND = frozenset({"not_found", "gone", "unresolved", "unreachable"})
 
 
 @dataclass(slots=True)

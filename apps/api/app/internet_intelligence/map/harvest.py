@@ -27,10 +27,14 @@ from .integrity import CLEAN, IntegrityReport, assess
 from .connectors.common import names_entity, person_shaped
 from .pipeline import anchor_grade, lose_anchor, nominated, regrade
 from .store import GRADE_RANK, MapStore
-from .structure import BODY, HEAD_LINK, HIDDEN, IDENTITY_POSITIONS, PageStructure, parse_structure
+from .structure import BODY, HEAD_LINK, HIDDEN, IDENTITY_POSITIONS, PageStructure, parse_sitemap, parse_structure
 
 _CONTACT = re.compile(r"contact|about|connect|reach[-_ ]?us|follow|social|get[-_ ]in[-_ ]touch", re.IGNORECASE)
 _GUESSES = ("/contact", "/contact-us", "/about", "/about-us")
+# A sitemap page named for the site's accounts ("/social-media", "/follow-us-on-instagram").
+_SOCIAL_PAGE = re.compile(r"(?:^|[-_])(?:follow|social)(?:[-_.]|s?$)", re.IGNORECASE)
+MAX_SITEMAP_READS = 2
+MAX_SITEMAP_BYTES = 2_000_000
 ANCHORING_GRADES = frozenset({"O", "A", "B"})
 
 
@@ -112,36 +116,39 @@ class OfficialSiteHarvester:
             return result
         home = parse_structure(homepage.text, homepage.url)
         report = assess(home, homepage.text)
-        self._integrity(institution_id, domain_asset_id, report, homepage.url, host, run_id, result)
+        self._integrity(institution_id, domain_asset_id, report, homepage.url, host, run_id, result, homepage.body)
         if report.status in {"parked", "hijacked"}:
             lose_anchor(self.store, institution_id, domain_asset_id, reason=report.status, run_id=run_id)
-        pages: list[tuple[str, PageStructure, str]] = [(homepage.url, home, homepage.text)]
+        # (page URL, structure, sha256 of the body it was read from)
+        pages: list[tuple[str, PageStructure, str]] = [(homepage.url, home, hashlib.sha256(homepage.body).hexdigest())]
         if report.status == CLEAN:
-            # The reservation is max_pages fetches: count attempts, not successes.
-            for url in self._candidate_pages(home, host)[: max(0, self.max_pages - 1)]:
+            # The reservation is max_pages fetches: count attempts (sitemap reads too), not successes.
+            room = max(0, self.max_pages - 1)
+            listed, reads = await self._sitemap_pages(home, host, result, room=room - len(self._candidate_pages(home, host, guess=False)))
+            for url in self._candidate_pages(home, host, listed)[: max(0, room - reads)]:
                 retrieval = await self._retrieve(institution_id, url, result, conditional=False)
                 result.pages.append({"url": retrieval.url, "outcome": retrieval.outcome})
                 if retrieval.ok and _host(retrieval.url) == host:
                     structure = parse_structure(retrieval.text, retrieval.url)
                     page_report = assess(structure, retrieval.text)
                     if page_report.status != CLEAN:
-                        self._integrity(institution_id, domain_asset_id, page_report, retrieval.url, host, run_id, result)
+                        self._integrity(institution_id, domain_asset_id, page_report, retrieval.url, host, run_id, result, retrieval.body)
                         break
-                    pages.append((retrieval.url, structure, retrieval.text))
+                    pages.append((retrieval.url, structure, hashlib.sha256(retrieval.body).hexdigest()))
         regrade(self.store, institution_id, [domain_asset_id])
         anchor = anchor_grade(self.store, institution_id, domain_asset_id)
-        if anchor in ANCHORING_GRADES and not nominated(self.store, institution_id, domain_asset_id):
-            # Official only by inference (a subdomain, Wikidata, a directory): it may
-            # not vouch for accounts until the institution or a reviewer says it is theirs.
-            anchor = "C"
-        result.anchor = anchor
+        # Official only by inference (a subdomain, Wikidata, a directory): it never
+        # anchors until the institution or a reviewer says it is theirs, but what it
+        # links is recorded as a hub's links are, one grade below the site (B gives C).
+        inferred = anchor in ANCHORING_GRADES and not nominated(self.store, institution_id, domain_asset_id)
+        result.anchor = "C" if inferred else anchor
         if result.integrity != CLEAN or anchor not in ANCHORING_GRADES:
             result.feeds = list(dict.fromkeys(feed for _, structure, _ in pages for feed in structure.feeds))
             return result
         touched: set[str] = set()
         seen_on_page: dict[str, set[str]] = {}
         scope: _Scope | None = None
-        for page_url, structure, _ in pages:
+        for page_url, structure, digest in pages:
             result.feeds.extend(feed for feed in structure.feeds if feed not in result.feeds)
             # Any visible link to another website is a lead for discovery (a
             # sister institution, a portal); only identity links vouch.
@@ -167,18 +174,19 @@ class OfficialSiteHarvester:
                     touched.add(self._hold(institution_id, domain_asset_id, host, ref, position, page_url, other, scope, run_id, result))
                     continue
                 seen_on_page.setdefault(page_url, set()).add(ref.key)
-                target_id, created = self.store.upsert_asset(institution_id, ref, entity_id=asset["entity_id"], relation="official", note=f"linked from {host}")
-                self.store.add_evidence(institution_id, asset_id=target_id, kind="official_link", detail=f"{anchor}:{position}", source_url=page_url, source_asset_id=domain_asset_id, channel=f"site:{host}", observed_via="live", run_id=run_id)
+                # An inferred site may be a vendor's (a "Powered by" ERP): what it links is a candidate, never official by that link.
+                target_id, created = self.store.upsert_asset(institution_id, ref, entity_id=asset["entity_id"], relation="unknown" if inferred else "official", note=f"linked from {host}")
+                self.store.add_evidence(institution_id, asset_id=target_id, kind="hub_link" if inferred else "official_link", detail=f"{anchor}:{position}", source_url=page_url, source_asset_id=domain_asset_id, channel=f"site:{host}", observed_via="live", run_id=run_id, raw_sha256=digest)
                 result.evidence += 1
                 touched.add(target_id)
                 if ref.key not in result.accounts:
                     result.accounts.append(ref.key)
                 if created:
                     result.new_assets.append(ref.key)
-        touched |= self._record_removals(institution_id, domain_asset_id, {url for url, _, _ in pages}, seen_on_page, run_id, result)
+        touched |= self._record_removals(institution_id, domain_asset_id, {url: digest for url, _, digest in pages}, seen_on_page, run_id, result)
         self._note_raised(regrade(self.store, institution_id, sorted(touched)), result)
-        # Only a clean, anchored harvest may be reused from a 304 next time.
-        if self.conditional:
+        # Only a clean, anchored harvest may be reused from a 304 next time (an inferred site's links are re-read).
+        if self.conditional and not inferred:
             self.store.record_fetch(institution_id, asset["url"], outcome=homepage.outcome, etag=homepage.etag, last_modified=homepage.last_modified, content_sha256=hashlib.sha256(homepage.body).hexdigest())
         return result
 
@@ -244,8 +252,11 @@ class OfficialSiteHarvester:
             touched.add(asset_id)
         return touched
 
-    def _record_removals(self, institution_id: str, domain_asset_id: str, fetched: set[str], seen_on_page: dict[str, set[str]], run_id: str | None, result: HarvestResult) -> set[str]:
-        """A page fetched cleanly that no longer links an account it used to link refutes that link."""
+    def _record_removals(self, institution_id: str, domain_asset_id: str, fetched: dict[str, str], seen_on_page: dict[str, set[str]], run_id: str | None, result: HarvestResult) -> set[str]:
+        """A page fetched cleanly that no longer links an account it used to link refutes that link.
+
+        ``fetched`` maps each page read to the sha256 of its body.
+        """
 
         removed: set[str] = set()
         linked_before: dict[tuple[str, str], str] = {}
@@ -256,22 +267,24 @@ class OfficialSiteHarvester:
             asset = linked_assets.get(asset_id)
             if asset is None or polarity != "supports" or asset["asset_key"] in seen_on_page.get(page_url, set()):
                 continue
-            self.store.add_evidence(institution_id, asset_id=asset_id, kind="official_link", polarity="refutes", detail=f"removed:{page_url}"[:500], source_url=page_url, source_asset_id=domain_asset_id, channel=f"site:{result.domain}", observed_via="live", run_id=run_id)
+            self.store.add_evidence(institution_id, asset_id=asset_id, kind="official_link", polarity="refutes", detail=f"removed:{page_url}"[:500], source_url=page_url, source_asset_id=domain_asset_id, channel=f"site:{result.domain}", observed_via="live", run_id=run_id, raw_sha256=fetched.get(page_url))
             result.evidence += 1
             removed.add(asset_id)
         return removed
 
     def _liveness(self, institution_id: str, asset_id: str, retrieval: Retrieval, run_id: str | None) -> None:
+        digest = hashlib.sha256(retrieval.body).hexdigest() if retrieval.ok else None
         if retrieval.outcome in {"ok", "not_modified"}:
-            self.store.add_evidence(institution_id, asset_id=asset_id, kind="liveness", detail=f"{retrieval.outcome}:{retrieval.http_status}", source_url=retrieval.url, channel="fetch", observed_via="live", run_id=run_id)
-        elif retrieval.outcome in {"not_found", "gone", "blocked", "login_wall", "robots", "server_error", "timeout", "not_public"}:
+            self.store.add_evidence(institution_id, asset_id=asset_id, kind="liveness", detail=f"{retrieval.outcome}:{retrieval.http_status}", source_url=retrieval.url, channel="fetch", observed_via="live", run_id=run_id, raw_sha256=digest)
+        # unresolved (the name is gone) and unreachable (nothing listens) count toward dead like not_found.
+        elif retrieval.outcome in {"not_found", "gone", "blocked", "login_wall", "robots", "server_error", "timeout", "not_public", "unresolved", "unreachable"}:
             self.store.add_evidence(institution_id, asset_id=asset_id, kind="liveness", polarity="refutes", detail=f"{retrieval.outcome}:{retrieval.http_status}", source_url=retrieval.url, channel="fetch", observed_via="live", run_id=run_id)
 
-    def _integrity(self, institution_id: str, asset_id: str, report: IntegrityReport, page_url: str, host: str, run_id: str | None, result: HarvestResult) -> None:
+    def _integrity(self, institution_id: str, asset_id: str, report: IntegrityReport, page_url: str, host: str, run_id: str | None, result: HarvestResult, body: bytes = b"") -> None:
         clean = report.status == CLEAN
         self.store.add_evidence(
             institution_id, asset_id=asset_id, kind="integrity", polarity="supports" if clean else "refutes", detail=f"{report.status}:{';'.join(report.signals)}"[:500],
-            source_url=page_url, channel=f"site:{host}", observed_via="live", run_id=run_id,
+            source_url=page_url, channel=f"site:{host}", observed_via="live", run_id=run_id, raw_sha256=hashlib.sha256(body).hexdigest() if body else None,
         )
         result.evidence += 1
         if result.integrity in {"unknown", CLEAN}:
@@ -280,7 +293,9 @@ class OfficialSiteHarvester:
             result.incidents.append({"kind": f"site_{report.status}", "target": host, "page": page_url, "signals": report.signals, "examples": report.spam_links[:5]})
 
     @staticmethod
-    def _candidate_pages(home: PageStructure, host: str) -> list[str]:
+    def _candidate_pages(home: PageStructure, host: str, listed: list[str] | tuple[str, ...] = (), *, guess: bool = True) -> list[str]:
+        """Contact pages the homepage links, then those only its sitemap lists (``listed``), else two guesses."""
+
         found: list[str] = []
         for link in home.links:
             if link.position == HIDDEN or _host(link.href) != host:
@@ -289,9 +304,41 @@ class OfficialSiteHarvester:
                 clean = link.href.split("#", 1)[0]
                 if clean.rstrip("/") != home.url.rstrip("/") and clean not in found:
                     found.append(clean)
-        if not found:
-            found = [urljoin(home.url, guess) for guess in _GUESSES[:2]]
+        for url in listed:
+            if url.rstrip("/") not in {home.url.rstrip("/"), *(item.rstrip("/") for item in found)}:
+                found.append(url)
+        if not found and guess:
+            found = [urljoin(home.url, path) for path in _GUESSES[:2]]
         return found
+
+    async def _sitemap_pages(self, home: PageStructure, host: str, result: HarvestResult, *, room: int) -> tuple[list[str], int]:
+        """(contact and follow-us pages the site's sitemaps list, sitemap requests made).
+
+        A site's accounts are often on a page its homepage does not link. The
+        sitemaps robots.txt declares, and /sitemap.xml, are read (at most two
+        documents, an index's page sitemaps first) only while a page fetch
+        still fits in ``room`` after the read. Pages on other hosts are ignored.
+        """
+
+        queue = list(dict.fromkeys([url for url in self.fetcher.sitemaps(home.url) if _host(url) == host] + [urljoin(home.url, "/sitemap.xml")]))
+        found: list[str] = []
+        done: set[str] = set()
+        while queue and len(done) < MAX_SITEMAP_READS and room - len(done) > 1:
+            url = queue.pop(0)
+            done.add(url)
+            result.requests += 1
+            retrieval = await self.fetcher.retrieve(url, accept=frozenset({"xml"}), max_bytes=MAX_SITEMAP_BYTES)
+            if not retrieval.ok or _host(retrieval.url) != host:
+                continue
+            listed, nested = parse_sitemap(retrieval.body)
+            for page in listed:
+                segments = [segment for segment in urlparse(page).path.split("/") if segment]
+                clean = page.split("#", 1)[0]
+                if _host(page) == host and (is_contact_page(page) or (segments and _SOCIAL_PAGE.search(segments[-1]))) and clean not in found:
+                    found.append(clean)
+            # An index's own sitemaps are read next, the pages sitemap ("page-sitemap.xml") first.
+            queue[:0] = sorted((item for item in dict.fromkeys(nested) if _host(item) == host and item not in done), key=lambda item: "page" not in item.lower())
+        return found[: max(0, room - len(done))], len(done)
 
     @staticmethod
     def _identity_links(structure: PageStructure, page_url: str) -> list[tuple[str, str, str]]:

@@ -143,10 +143,14 @@ class SubdomainAnchorTests(Base):
         erp_asset = self.store.find_asset("bgscet", "web:erp.bgscet.ac.in")
         self.assertEqual(erp_asset["grade"], "B")
         harvest = await OfficialSiteHarvester(Site({"https://erp.bgscet.ac.in/": (200, erp)}).fetcher(), self.store).harvest("bgscet", erp_asset["asset_id"])
-        self.assertEqual((harvest.anchor, harvest.accounts), ("C", []))
+        self.assertEqual(harvest.anchor, "C", "an inferred site never anchors")
+        vendor = self.store.find_asset("bgscet", "facebook:edusofterp")
+        # What it links is one grade below it (a hub's link, not an official one), and only a candidate.
+        self.assertEqual((vendor["grade"], vendor["relation"]), ("C", "unknown"))
+        self.assertEqual({row["kind"] for row in self.store.list_evidence("bgscet", asset_id=vendor["asset_id"])}, {"hub_link"})
         engine = MapEngine(self.store, ConnectorRegistry([OfficialSiteConnector()]), clock=lambda: NOW)
         engine.ensure_recurring("bgscet", None)
-        self.assertEqual([row["target"] for row in self.store.list_sources("bgscet", connector="official_site")], [self.domain_id], "only the configured domain is watched")
+        self.assertEqual(sorted(row["target"] for row in self.store.list_sources("bgscet", connector="official_site")), sorted([self.domain_id, erp_asset["asset_id"]]), "a live official subdomain is watched too")
 
 
 class CacheTests(Base):

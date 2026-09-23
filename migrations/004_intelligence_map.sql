@@ -25,6 +25,7 @@ CREATE TABLE IF NOT EXISTS intel_owner_tokens ( institution_id TEXT PRIMARY KEY,
 CREATE TABLE IF NOT EXISTS intel_budget_ledger ( day TEXT NOT NULL, connector TEXT NOT NULL, units REAL NOT NULL DEFAULT 0, calls INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(day, connector) );
 CREATE TABLE IF NOT EXISTS intel_shared_cache ( key_sha256 TEXT PRIMARY KEY, kind TEXT NOT NULL, payload TEXT NOT NULL, fetched_at TEXT NOT NULL, expires_at TEXT NOT NULL );
 CREATE INDEX IF NOT EXISTS idx_intel_shared_cache_expiry ON intel_shared_cache(expires_at);
+CREATE TABLE IF NOT EXISTS intel_host_slots ( host TEXT PRIMARY KEY, next_allowed_at DOUBLE PRECISION NOT NULL );
 ALTER TABLE intel_assets ADD COLUMN IF NOT EXISTS last_activity_at TEXT;
 ALTER TABLE intel_assets ADD COLUMN IF NOT EXISTS registration_expires_at TEXT;
 ALTER TABLE intel_sources ADD COLUMN IF NOT EXISTS priority REAL NOT NULL DEFAULT 0;

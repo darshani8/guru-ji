@@ -70,7 +70,7 @@ class Site:
         return httpx.Response(status, headers=headers, text=body, request=request)
 
     def fetcher(self) -> PublicPageFetcher:
-        return PublicPageFetcher(transport=httpx.MockTransport(self.handler), resolver=lambda host: (PUBLIC_IP,))
+        return PublicPageFetcher(transport=httpx.MockTransport(self.handler), resolver=lambda host: (PUBLIC_IP,), min_host_interval=0)
 
 
 PROFILE = InstitutionProfile("bgscet", "BGS College of Engineering and Technology", "Bengaluru", aliases=["BGSCET"], official_domains=["bgscet.ac.in"])
@@ -237,8 +237,8 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         watch = sources[("official_site", self.store.list_assets("bgscet", kind="domain")[0]["asset_id"])]
         self.assertEqual(watch["origin"], "recurring")
         self.assertGreater(watch["due_at"], NOW.isoformat(), "the watch is rescheduled")
-        self.assertEqual(first["spend"], {"fetch": 2.0}, "charged the two requests the harvest made, not the five it reserved")
-        self.assertEqual(self.store.tenant_spend("bgscet", day=NOW.date().isoformat())["fetch"]["units"], 2.0, "the rest of the reservation was handed back")
+        self.assertEqual(first["spend"], {"fetch": 3.0}, "charged the requests the harvest made (home, contact page, sitemap), not the five it reserved")
+        self.assertEqual(self.store.tenant_spend("bgscet", day=NOW.date().isoformat())["fetch"]["units"], 3.0, "the rest of the reservation was handed back")
         self.assertEqual(self.store.list_map_runs("bgscet", kind="tick")[0]["status"], "succeeded")
 
         # The next tick follows the leads: the alumni site names the college, the shop does not.
