@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -38,6 +39,9 @@ FALLBACK_MODELS = frozenset({"claude-opus-5", "claude-fable-5-1"})
 BEDROCK_FALLBACK_MODEL = "anthropic.claude-opus-4-8"
 # Models that reject output_config.effort; they run at their single default.
 NO_EFFORT_MODELS = ("claude-haiku-4-5",)
+# Bedrock IDs for the InvokeModel API: a geography-prefixed inference profile,
+# a versioned model ID or an ARN. Plain anthropic.<name> IDs use the Messages endpoint.
+INVOKE_MODEL_ID = re.compile(r"^(?:arn:aws|(?:global|us|eu|apac|jp|au|ca)\.anthropic\.|anthropic\..+-v\d+(?::\d+)?$)")
 # Cuts the thinking Claude does before its first visible text on routes a
 # person is waiting on (voice and chat answers).
 LATENCY_SENSITIVE_SYSTEM = "Latency-sensitive; begin your visible answer immediately."
@@ -131,6 +135,10 @@ class AnthropicProvider:
         return not _base_model(self.model_id).startswith(NO_EFFORT_MODELS)
 
     @property
+    def _invoke_model(self) -> bool:
+        return bool(INVOKE_MODEL_ID.match(self.model_id))
+
+    @property
     def capabilities(self) -> ProviderCapabilities:
         return ProviderCapabilities(
             supports_streaming=True,
@@ -149,7 +157,11 @@ class AnthropicProvider:
                 raise self._unavailable("the anthropic SDK is not installed (install the 'anthropic' extra)") from exc
             http_client = anthropic.DefaultAsyncHttpxClient(transport=self.transport) if self.transport else None
             try:
-                if self.platform == "bedrock":
+                if self.platform == "bedrock" and self._invoke_model:
+                    # An inference profile or versioned ID (global.anthropic.claude-haiku-4-5-20251001-v1:0)
+                    # is served by the InvokeModel API rather than the Messages endpoint.
+                    self.client = anthropic.AsyncAnthropicBedrock(aws_region=self.aws_region, timeout=self.timeout_seconds, http_client=http_client)
+                elif self.platform == "bedrock":
                     middleware = [anthropic.BetaRefusalFallbackMiddleware([{"model": BEDROCK_FALLBACK_MODEL}])] if self._falls_back else None
                     # Signed with the AWS credential chain (such as the ECS task
                     # role), or AWS_BEARER_TOKEN_BEDROCK when that is set.

@@ -492,11 +492,24 @@ function speakWithBrowser(item, generation) {
 async function speakWithAudio(item, generation) {
   const buffer = await item.decoded;
   if (!buffer || generation !== state.playback.generation) return false;
+  const context = state.audioContext;
+  // A context the browser still holds muted would never report the end of the
+  // sentence: try to wake it, and let the device's own voice speak otherwise.
+  if (context.state !== 'running') {
+    try {
+      await Promise.race([context.resume(), new Promise((resolve) => setTimeout(resolve, 300))]);
+    } catch {
+      // Resuming is best effort.
+    }
+    if (context.state !== 'running') return false;
+  }
   return new Promise((resolve) => {
-    const source = state.audioContext.createBufferSource();
+    const source = context.createBufferSource();
     source.buffer = buffer;
-    source.connect(state.audioContext.destination);
-    source.onended = () => resolve(true);
+    source.connect(context.destination);
+    // Move on after the clip's length even if 'ended' never fires.
+    const guard = setTimeout(() => resolve(true), buffer.duration * 1000 + 1500);
+    source.onended = () => { clearTimeout(guard); resolve(true); };
     state.playback.source = source;
     source.start();
   });
