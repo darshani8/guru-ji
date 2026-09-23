@@ -34,7 +34,7 @@ from ..integrity import CLEAN, assess
 from ..pipeline import anchor_grade, lose_anchor, regrade
 from ..structure import BODY, HIDDEN, parse_structure
 from .base import ConnectorContext, ConnectorResult, Lead
-from .common import FAILED_OUTCOMES, match_entity, names_entity
+from .common import FAILED_OUTCOMES, match_entity, names_entity, person_shaped
 
 # The exact host of a regulator's listing -> the authority that publishes it.
 AUTHORITIES: dict[str, str] = {
@@ -102,6 +102,7 @@ class LinkHubConnector:
         result = ConnectorResult(outcome="ok", touched={hub["asset_id"]})
         hub_host = (urlparse(retrieval.url).hostname or "").lower()
         hops = int(source.get("hops") or 0) + 1
+        entity = context.store.get_entity(context.institution_id, str(hub["entity_id"])) if hub.get("entity_id") else None
         for link in structure.links:
             if link.position == HIDDEN or (urlparse(link.href).hostname or "").lower() == hub_host:
                 continue
@@ -114,6 +115,11 @@ class LinkHubConnector:
                     result.leads.append(Lead("lead_page", ref.url, entity_id=hub["entity_id"], hops=hops, parent_asset_id=hub["asset_id"]))
                 continue
             if ref.kind not in {ACCOUNT, GROUP} or context.store.is_suppressed(context.institution_id, ref.key):
+                continue
+            if person_shaped(ref.key) and (entity is None or not names_entity(entity, handle=ref.handle, title="")):
+                # A LinkedIn /in/ profile or a phone number on the hub is a
+                # person's (a principal's, a coordinator's) unless its own
+                # handle is the entity's name; the hub cannot make it official.
                 continue
             asset_id, created = context.store.upsert_asset(context.institution_id, ref, entity_id=hub["entity_id"], relation=hub["relation"] if hub["relation"] == "official" else "unknown", note=f"listed on {hub['handle']}")
             context.store.add_evidence(context.institution_id, asset_id=asset_id, kind="hub_link", detail=f"{hub_grade}:hub", source_url=retrieval.url, source_asset_id=hub["asset_id"], channel=f"hub:{hub['handle']}", observed_via="live", run_id=context.run_id)
@@ -188,7 +194,10 @@ class DirectoryConnector:
             if ref.kind not in {ACCOUNT, GROUP, DOMAIN} or context.store.is_suppressed(context.institution_id, ref.key):
                 continue
             entity = next((item for item in entities if names_entity(item, handle=ref.handle, title=link.text)), None)
-            if entity is None and about is not None and ref.kind in {ACCOUNT, GROUP}:
+            # A page about the institution lends it only accounts that could be
+            # its own: a LinkedIn /in/ profile or a phone number listed there
+            # (the principal's, say) counts only when it names the entity itself.
+            if entity is None and about is not None and ref.kind in {ACCOUNT, GROUP} and not person_shaped(ref.key):
                 entity = about.entity
             if entity is None:
                 continue

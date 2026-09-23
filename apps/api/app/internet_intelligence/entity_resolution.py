@@ -23,7 +23,24 @@ class EntityMatch:
         return {"level": self.level, "score": round(self.score, 3), "reasons": list(self.reasons)}
 
 
+# A name written as an acronym: capitals and digits only ("AIMS", "AIT", "BGSCET").
+_ACRONYM = re.compile(r"[A-Z0-9]*[A-Z][A-Z0-9]*")
+
+
+def _acronym(name: str) -> bool:
+    return bool(_ACRONYM.fullmatch(name))
+
+
 def _pattern(name: str) -> re.Pattern[str]:
+    """A whole-word pattern for a name: an acronym in its own case, anything else in lower case.
+
+    An acronym lower-cased is often an ordinary word ("AIMS" is "aims" in
+    "police aims to curb sand mining", "AIT" is "ait"), so it is matched
+    only as written, against the original title and text.
+    """
+
+    if _acronym(name):
+        return re.compile(r"(?<![A-Za-z0-9])" + re.escape(name) + r"(?![A-Za-z0-9])")
     tokens = [re.escape(token) for token in name.lower().split()]
     return re.compile(r"(?<![a-z0-9])" + r"[\s.,'-]*".join(tokens) + r"(?![a-z0-9])")
 
@@ -39,10 +56,16 @@ def _social_handle_hits(profile: InstitutionProfile, url: str) -> list[str]:
     return [account for account in profile.social_accounts if account.strip("@/") and account.strip("@/").lower() in segments]
 
 
+def _find(name: str, prose: str, lowered: str) -> re.Match[str] | None:
+    """``name`` in a title or text: an acronym in the original ``prose``, any other name in its ``lowered`` form."""
+
+    return _pattern(name).search(prose if _acronym(name) else lowered)
+
+
 def _near(text: str, name_match: re.Match[str], term: str, window: int) -> bool:
     start = max(0, name_match.start() - window)
     end = min(len(text), name_match.end() + window)
-    return term in text[start:end]
+    return term in text[start:end].lower()
 
 
 def resolve_entity(profile: InstitutionProfile, *, url: str, title: str, text: str) -> EntityMatch:
@@ -50,6 +73,7 @@ def resolve_entity(profile: InstitutionProfile, *, url: str, title: str, text: s
     score = 0.0
     lowered_title = title.lower()
     lowered_text = text.lower()[:20_000]
+    prose = text[:20_000]
     if profile.is_official_url(url):
         score += 1.0
         reasons.append("official_domain")
@@ -59,11 +83,12 @@ def resolve_entity(profile: InstitutionProfile, *, url: str, title: str, text: s
         reasons.append("known_social_account")
     name_match: re.Match[str] | None = None
     matched_name: str | None = None
+    # Names are looked for in the title and text only; the URL counts through
+    # its host (official_domain) and social handle above, in any case.
     for index, name in enumerate(profile.all_names()):
-        pattern = _pattern(name)
         weight = 1.0 if index == 0 else 0.85
-        in_title = pattern.search(lowered_title)
-        in_text = pattern.search(lowered_text)
+        in_title = _find(name, title, lowered_title)
+        in_text = _find(name, prose, lowered_text)
         if in_title:
             score += 0.5 * weight
             reasons.append(f"name_in_title:{name}")
@@ -96,8 +121,8 @@ def resolve_entity(profile: InstitutionProfile, *, url: str, title: str, text: s
         reasons.append("programs_mentioned")
     for exclusion in profile.exclusions:
         if exclusion and exclusion in lowered_text:
-            text_match = name_match if name_match is not None and name_match.string is lowered_text else _pattern(profile.name).search(lowered_text)
-            if text_match is not None and _near(lowered_text, text_match, exclusion, 120):
+            text_match = name_match if name_match is not None and (name_match.string is lowered_text or name_match.string is prose) else _find(profile.name, prose, lowered_text)
+            if text_match is not None and _near(text_match.string, text_match, exclusion, 120):
                 score -= 0.5
                 reasons.append(f"exclusion_near_name:{exclusion}")
             else:

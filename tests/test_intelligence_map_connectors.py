@@ -403,6 +403,19 @@ class HubAndDirectoryTests(Fixture):
         regrade(self.store, INSTITUTION)
         self.assertEqual(self.grade_of("instagram:bgscet_mba"), "B")
 
+    async def test_a_hub_passes_on_a_personal_profile_only_when_it_is_named_for_the_institution(self):
+        hub_id, _ = self.store.upsert_asset(INSTITUTION, asset_ref("https://linktr.ee/bgscet"), entity_id=self.entity_id, relation="official")
+        page = LINKTREE.replace("</main>", '<a href="https://www.linkedin.com/in/ravi-kumar-gk-12345/">Principal</a> <a href="https://wa.me/919876543210">WhatsApp</a> <a href="https://www.linkedin.com/in/bgscet/">LinkedIn</a></main>')
+        result = await LinkHubConnector(active=True).run({"target": hub_id, "hops": 0}, self.context(fetcher=Site({"https://linktr.ee/bgscet": (200, page)}).fetcher()))
+        self.assertEqual(sorted(result.new_assets), ["instagram:bgscet_mba", "linkedin:in:bgscet", "x:bgscet_engg_col"], "the principal's profile and a phone number are a person's, whatever hub lists them")
+
+    async def test_a_page_about_the_institution_lends_it_no_personal_profile(self):
+        url = "https://unstop.com/college/bgscet"
+        page = """<html><head><title>BGS College of Engineering and Technology | Unstop</title></head><body><main><p>BGS College of Engineering and Technology, Bengaluru.</p>
+<a href="https://www.instagram.com/advaya.hackathon/">Instagram</a> <a href="https://www.linkedin.com/in/ravi-kumar-gk-12345/">Principal</a> <a href="https://wa.me/919876543210">Call</a></main></body></html>"""
+        result = await DirectoryConnector(active=True).run({"target": url}, self.context(fetcher=Site({url: (200, page)}).fetcher()))
+        self.assertEqual(result.new_assets, ["instagram:advaya.hackathon"], "the page's own account is the college's; the principal's profile and phone are not")
+
     async def test_regulator_listings_anchor_and_other_listings_corroborate(self):
         connector = DirectoryConnector(active=True)
         site = Site({"https://www.nirfindia.org/2026/engineering": (200, NIRF)})
