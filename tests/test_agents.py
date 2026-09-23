@@ -117,6 +117,16 @@ class PlannerTests(unittest.TestCase):
         broken = ModelPlanner(_Model("not json"))
         self.assertEqual(__import__("asyncio").run(broken.plan("how many mba students", self.tools, self.vocab)).planner, "deterministic")
 
+    def test_model_planner_may_call_a_request_unmapped_but_never_overrides_a_match(self):
+        import asyncio
+
+        unknown = ModelPlanner(_Model('{"intent": "unknown", "steps": [], "clarification": null, "confidence": 0}'))
+        chat = asyncio.run(unknown.plan("what is photosynthesis?", self.tools, self.vocab))
+        self.assertEqual((chat.intent, chat.steps, chat.planner), ("unknown", [], "model"))
+        self.assertIn("could not map", chat.clarification)
+        matched = asyncio.run(unknown.plan("how many mba students", self.tools, self.vocab))
+        self.assertEqual((matched.planner, matched.steps[0].tool), ("deterministic", "count_students"))
+
     def test_model_planner_falls_back_on_malformed_shapes(self):
         import asyncio
 

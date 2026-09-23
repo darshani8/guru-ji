@@ -42,23 +42,32 @@
         <div class="avatar">GJ</div>
         <div class="message-body">
           <span class="message-label">Guru Ji</span>
-          <div class="bubble">Namaste. I’m ready to help. You can type a message or start the Voice Assistant.</div>
+          <div class="bubble">Namaste! I’m Guru Ji. Type, or start the Voice Assistant and just talk — you can interrupt me any time, ask about the college’s records, or say “search the internet for…”.</div>
         </div>
       </article>
     </section>
 
     <section id="composer-wrap" class="composer-wrap" aria-label="Assistant input">
-      <p id="voice-status-line" class="voice-status-line" role="status" aria-live="polite"></p>
+      <div class="voice-bar">
+        <p id="voice-status-line" class="voice-status-line" role="status" aria-live="polite"></p>
+        <button id="interrupt-button" class="interrupt-button" type="button" hidden>Stop speaking</button>
+      </div>
       <form id="text-form" class="composer">
         <label class="sr-only" for="text-input">Type a message</label>
-        <input id="text-input" class="text-input" type="text" autocomplete="off" maxlength="12000" placeholder="Type your message…">
+        <input id="text-input" class="text-input" type="text" autocomplete="off" maxlength="4000" placeholder="Type or talk — in English, हिन्दी or ಕನ್ನಡ…">
+        <label class="sr-only" for="language-select">Language you speak</label>
+        <select id="language-select" class="language-select" title="Language you speak">
+          <option value="en-IN">English (India)</option>
+          <option value="hi-IN">हिन्दी</option>
+          <option value="kn-IN">ಕನ್ನಡ</option>
+        </select>
         <button id="voice-button" class="voice-button" type="button" aria-pressed="false">
           <span class="voice-icon" aria-hidden="true">◉</span>
           <span id="voice-button-label">Voice Assistant</span>
         </button>
         <button id="send-button" class="send-button" type="submit">Send <span aria-hidden="true">↗</span></button>
       </form>
-      <p class="composer-hint"><kbd>Enter</kbd> to send · browser speech input/output · final transcripts only reach the server</p>
+      <p class="composer-hint"><kbd>Enter</kbd> to send · talk any time, even while Guru Ji is speaking · your browser turns speech into text; only the text reaches the server</p>
     </section>
   </main>
 

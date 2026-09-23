@@ -20,6 +20,8 @@ _ALLOWED_KEYS = frozenset({
     "scope_department_id", "scope_batch_id", "resource_id", "resource_type", "action",
     "tool_name", "source_id", "provider_id", "model_id", "status", "outcome", "latency_ms",
     "rows_used", "complete", "policy_version", "decision_id", "pdp_decision_ids", "redactions_applied",
+    # Conversation turns: which path answered, in which language, over which channel.
+    "route", "language", "channel",
 })
 _SENSITIVE_KEYS = frozenset({"prompt", "input", "output", "content", "text", "token", "secret", "authorization", "audio"})
 

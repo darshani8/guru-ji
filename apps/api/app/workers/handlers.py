@@ -9,16 +9,10 @@ from typing import Any
 from ..actions.notifications import NotificationService
 from ..agents.contracts import AgentCommand
 from ..agents.master import MasterAgent
-from ..domain.principals import Capability, InstitutionScope, Principal, PrincipalType
+from ..domain.principals import InstitutionScope, principal_from_snapshot
 from ..ingestion.service import IngestionService
 from ..internet_intelligence.monitoring import ContinuousMonitor
 from .queue import JobQueue
-
-
-def principal_from_snapshot(snapshot: Mapping[str, Any]) -> Principal:
-    capabilities = frozenset(Capability(item) for item in snapshot.get("capabilities", []) if item in Capability._value2member_map_)
-    scopes = tuple(InstitutionScope(str(item["college_id"]), item.get("department_id"), item.get("batch_id")) for item in snapshot.get("scopes", []) if isinstance(item, Mapping) and item.get("college_id"))
-    return Principal(str(snapshot["principal_id"]), PrincipalType(str(snapshot.get("principal_type", "student"))), capabilities, scopes, authenticated=True, consent_verified=bool(snapshot.get("consent_verified", False)))
 
 
 def register_handlers(

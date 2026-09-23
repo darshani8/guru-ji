@@ -54,7 +54,8 @@ All six roadmap phases now have code, contracts, tests, and deployment reference
 - Added an optional fail-closed OpenFGA relationship checker.
 - Added an allowlisted MCP/agent-gateway target resolver; arbitrary client-supplied tool URLs are rejected.
 - Added LiveKit/Pipecat-style event normalization that carries lifecycle/transcript metadata only and never persists raw audio.
-- Existing browser voice transport remains the safe local reference path; provider-backed WebRTC/STT/TTS is intentionally an external deployment adapter.
+- The browser voice transport is a full-duplex conversation: speech recognition stays on while replies play, barge-in stops a reply and cancels its preparation (a turn that reached the master agent always finishes), and spoken replies stream sentence by sentence, with Amazon Polly Kajal (en-IN/hi-IN) when configured and the device's voice otherwise. Voice sessions and their one-use tickets live in the control database, so several API tasks can serve them.
+- A dialogue layer in front of the master agent answers small talk at once, turns unmapped commands into conversation with the configured model, runs open-web searches by voice or text (Tavily, cited, untrusted, personal data refused, per-person daily allowance counted in the control database), and replies in Indian English, Hindi, Hinglish or Kannada. The client keeps the conversation; the server stores no transcript.
 
 ### P7 — institutional data platform
 

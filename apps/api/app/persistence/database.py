@@ -14,6 +14,36 @@ from .control_plane import AnswerEnvelopeMetadata, ModelAttemptMetadata, OutboxR
 from .schema_tools import MIGRATION_LOCK_TIMEOUT
 from .sql_backend import open_postgres_connection
 
+# Voice sessions and usage counters are short-lived control records: a closed
+# or expired session row is kept for a day (enough to answer a late DELETE or a
+# replayed ticket), a usage counter for 30 days.
+VOICE_SESSION_KEEP = timedelta(days=1)
+USAGE_COUNTER_KEEP_DAYS = 30
+_VOICE_SESSION_COLUMNS = (
+    "session_id", "principal_id", "institution_id", "principal_json", "ticket_sha256",
+    "created_at", "ticket_expires_at", "expires_at", "claimed_at", "closed_at",
+)
+
+
+def timestamp(value: datetime) -> str:
+    """One fixed ISO-8601 UTC form, so stored timestamps compare correctly as text."""
+
+    return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
+
+
+def _voice_row(row: Any) -> dict[str, Any]:
+    return {column: row[column] for column in _VOICE_SESSION_COLUMNS}
+
+
+def _is_active(row: dict[str, Any], now: str) -> bool:
+    """Open, and either waiting for its socket (ticket still valid) or connected (session not expired)."""
+
+    if row["closed_at"] is not None:
+        return False
+    if row["claimed_at"] is None:
+        return row["ticket_expires_at"] > now and row["expires_at"] > now
+    return row["expires_at"] > now
+
 
 class InMemoryControlStore:
     """Small deterministic store used by unit tests and explicit ephemeral runs."""
@@ -30,6 +60,9 @@ class InMemoryControlStore:
         self._answers: list[AnswerEnvelopeMetadata] = []
         self._attempts: list[ModelAttemptMetadata] = []
         self._outbox: list[OutboxRecord] = []
+        self._voice_sessions: dict[str, dict[str, Any]] = {}
+        self._usage: dict[tuple[str, str, str, str], int] = {}
+        self._records_lock = threading.Lock()
 
     def append_audit(self, event: AuditEvent) -> None:
         self._events.append(event)
@@ -106,6 +139,66 @@ class InMemoryControlStore:
         self._outbox = [item for item in self._outbox if item.created_at >= cutoff]
         self._briefings = [item for item in self._briefings if datetime.fromisoformat(item["created_at"]) >= cutoff]
         return before - (len(self._events) + len(self._answers) + len(self._attempts) + len(self._outbox) + len(self._briefings))
+
+    # ---------------------------------------------------- voice sessions
+    def create_voice_session(self, record: dict[str, Any]) -> None:
+        with self._records_lock:
+            if record["session_id"] in self._voice_sessions:
+                raise ValueError("voice session already exists")
+            self._voice_sessions[record["session_id"]] = {column: record.get(column) for column in _VOICE_SESSION_COLUMNS}
+
+    def get_voice_session(self, session_id: str) -> dict[str, Any] | None:
+        with self._records_lock:
+            row = self._voice_sessions.get(session_id)
+            return dict(row) if row else None
+
+    def claim_voice_session(self, session_id: str, ticket_sha256: str, now: str) -> dict[str, Any] | None:
+        with self._records_lock:
+            row = self._voice_sessions.get(session_id)
+            if (
+                row is None or row["ticket_sha256"] != ticket_sha256 or row["claimed_at"] is not None
+                or row["closed_at"] is not None or row["ticket_expires_at"] <= now or row["expires_at"] <= now
+            ):
+                return None
+            row["claimed_at"] = now
+            return dict(row)
+
+    def close_voice_session(self, session_id: str, principal_id: str | None, now: str) -> bool:
+        with self._records_lock:
+            row = self._voice_sessions.get(session_id)
+            if row is None or row["closed_at"] is not None or (principal_id is not None and row["principal_id"] != principal_id):
+                return False
+            row["closed_at"] = now
+            return True
+
+    def active_voice_sessions(self, now: str, principal_id: str | None = None) -> list[dict[str, Any]]:
+        with self._records_lock:
+            rows = [dict(row) for row in self._voice_sessions.values() if _is_active(row, now) and (principal_id is None or row["principal_id"] == principal_id)]
+        return sorted(rows, key=lambda row: row["created_at"])
+
+    def take_usage(self, *, institution_id: str, principal_id: str, counter: str, day: str, cap: int) -> bool:
+        """Count one use against today's cap; False (and nothing counted) once the cap is reached."""
+
+        key = (institution_id, principal_id, counter, day)
+        with self._records_lock:
+            used = self._usage.get(key, 0)
+            if used >= cap:
+                return False
+            self._usage[key] = used + 1
+            return True
+
+    def prune_ephemeral(self, now: datetime | None = None) -> int:
+        current = now or now_utc()
+        cutoff = timestamp(current - VOICE_SESSION_KEEP)
+        oldest_day = (current - timedelta(days=USAGE_COUNTER_KEEP_DAYS)).date().isoformat()
+        with self._records_lock:
+            stale = [key for key, row in self._voice_sessions.items() if (row["closed_at"] or row["expires_at"]) < cutoff]
+            for key in stale:
+                del self._voice_sessions[key]
+            old = [key for key in self._usage if key[3] < oldest_day]
+            for key in old:
+                del self._usage[key]
+        return len(stale) + len(old)
 
     def ping(self) -> bool:
         return True
@@ -235,6 +328,30 @@ class SqliteControlStore:
             );
             CREATE INDEX IF NOT EXISTS idx_control_outbox_pending
                 ON control_outbox(delivered_at, created_at);
+            CREATE TABLE IF NOT EXISTS voice_sessions (
+                session_id TEXT PRIMARY KEY,
+                principal_id TEXT NOT NULL,
+                institution_id TEXT NOT NULL,
+                principal_json TEXT NOT NULL,
+                ticket_sha256 TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                ticket_expires_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                claimed_at TEXT,
+                closed_at TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_voice_sessions_principal
+                ON voice_sessions(principal_id, closed_at);
+            CREATE INDEX IF NOT EXISTS idx_voice_sessions_expires_at
+                ON voice_sessions(expires_at);
+            CREATE TABLE IF NOT EXISTS usage_counters (
+                institution_id TEXT NOT NULL,
+                principal_id TEXT NOT NULL,
+                counter TEXT NOT NULL,
+                day TEXT NOT NULL,
+                used INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (institution_id, principal_id, counter, day)
+            );
             """
         )
         for column, definition in (
@@ -256,10 +373,11 @@ class SqliteControlStore:
             if "duplicate column name" not in str(exc):
                 raise
 
-        self._connection.execute(
-            "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
-            ("001_control_plane", datetime.now(timezone.utc).isoformat()),
-        )
+        for version in ("001_control_plane", "005_voice_conversation"):
+            self._connection.execute(
+                "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?, ?)",
+                (version, datetime.now(timezone.utc).isoformat()),
+            )
         self._connection.commit()
 
     @staticmethod
@@ -497,6 +615,83 @@ class SqliteControlStore:
             self._connection.commit()
         return total
 
+    # ---------------------------------------------------- voice sessions
+    def create_voice_session(self, record: dict[str, Any]) -> None:
+        with self._lock:
+            self._connection.execute(
+                f"INSERT INTO voice_sessions({', '.join(_VOICE_SESSION_COLUMNS)}) VALUES ({', '.join('?' for _ in _VOICE_SESSION_COLUMNS)})",
+                tuple(record.get(column) for column in _VOICE_SESSION_COLUMNS),
+            )
+            self._connection.commit()
+
+    def get_voice_session(self, session_id: str) -> dict[str, Any] | None:
+        with self._lock:
+            row = self._connection.execute("SELECT * FROM voice_sessions WHERE session_id = ?", (session_id,)).fetchone()
+        return _voice_row(row) if row else None
+
+    def claim_voice_session(self, session_id: str, ticket_sha256: str, now: str) -> dict[str, Any] | None:
+        # One conditional UPDATE: of two sockets presenting the same ticket, on
+        # any number of API tasks sharing this database, exactly one wins.
+        with self._lock:
+            cursor = self._connection.execute(
+                "UPDATE voice_sessions SET claimed_at = ? WHERE session_id = ? AND ticket_sha256 = ? AND claimed_at IS NULL "
+                "AND closed_at IS NULL AND ticket_expires_at > ? AND expires_at > ?",
+                (now, session_id, ticket_sha256, now, now),
+            )
+            self._connection.commit()
+            if cursor.rowcount != 1:
+                return None
+            row = self._connection.execute("SELECT * FROM voice_sessions WHERE session_id = ?", (session_id,)).fetchone()
+        return _voice_row(row) if row else None
+
+    def close_voice_session(self, session_id: str, principal_id: str | None, now: str) -> bool:
+        with self._lock:
+            if principal_id is None:
+                cursor = self._connection.execute("UPDATE voice_sessions SET closed_at = ? WHERE session_id = ? AND closed_at IS NULL", (now, session_id))
+            else:
+                cursor = self._connection.execute(
+                    "UPDATE voice_sessions SET closed_at = ? WHERE session_id = ? AND principal_id = ? AND closed_at IS NULL", (now, session_id, principal_id),
+                )
+            self._connection.commit()
+        return cursor.rowcount == 1
+
+    def active_voice_sessions(self, now: str, principal_id: str | None = None) -> list[dict[str, Any]]:
+        query = (
+            "SELECT * FROM voice_sessions WHERE closed_at IS NULL AND expires_at > ? "
+            "AND (claimed_at IS NOT NULL OR ticket_expires_at > ?)"
+        )
+        params: tuple[Any, ...] = (now, now)
+        if principal_id is not None:
+            query += " AND principal_id = ?"
+            params += (principal_id,)
+        with self._lock:
+            rows = self._connection.execute(query + " ORDER BY created_at", params).fetchall()
+        return [_voice_row(row) for row in rows]
+
+    def take_usage(self, *, institution_id: str, principal_id: str, counter: str, day: str, cap: int) -> bool:
+        """Count one use against today's cap; False (and nothing counted) once the cap is reached."""
+
+        if cap <= 0:
+            return False
+        with self._lock:
+            cursor = self._connection.execute(
+                "INSERT INTO usage_counters(institution_id, principal_id, counter, day, used) VALUES (?, ?, ?, ?, 1) "
+                "ON CONFLICT (institution_id, principal_id, counter, day) DO UPDATE SET used = usage_counters.used + 1 WHERE usage_counters.used < ?",
+                (institution_id, principal_id, counter, day, cap),
+            )
+            self._connection.commit()
+        return cursor.rowcount == 1
+
+    def prune_ephemeral(self, now: datetime | None = None) -> int:
+        current = now or now_utc()
+        cutoff = timestamp(current - VOICE_SESSION_KEEP)
+        oldest_day = (current - timedelta(days=USAGE_COUNTER_KEEP_DAYS)).date().isoformat()
+        with self._lock:
+            sessions = self._connection.execute("DELETE FROM voice_sessions WHERE COALESCE(closed_at, expires_at) < ?", (cutoff,)).rowcount
+            counters = self._connection.execute("DELETE FROM usage_counters WHERE day < ?", (oldest_day,)).rowcount
+            self._connection.commit()
+        return sessions + counters
+
     def ping(self) -> bool:
         with self._lock:
             self._connection.execute("SELECT 1").fetchone()
@@ -562,6 +757,8 @@ class PostgresControlStore:
         ("idx_answer_envelopes_created_at", "answer_envelopes(created_at DESC)"),
         ("idx_model_attempts_created_at", "model_attempts(created_at DESC)"),
         ("idx_control_outbox_pending", "control_outbox(delivered_at, created_at)"),
+        ("idx_voice_sessions_principal", "voice_sessions(principal_id, closed_at)"),
+        ("idx_voice_sessions_expires_at", "voice_sessions(expires_at)"),
     )
 
     def _migrate(self) -> None:
@@ -660,6 +857,30 @@ class PostgresControlStore:
                 delivered_at TEXT
             )
             """,
+            """
+            CREATE TABLE IF NOT EXISTS voice_sessions (
+                session_id TEXT PRIMARY KEY,
+                principal_id TEXT NOT NULL,
+                institution_id TEXT NOT NULL,
+                principal_json TEXT NOT NULL,
+                ticket_sha256 TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                ticket_expires_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                claimed_at TEXT,
+                closed_at TEXT
+            )
+            """,
+            """
+            CREATE TABLE IF NOT EXISTS usage_counters (
+                institution_id TEXT NOT NULL,
+                principal_id TEXT NOT NULL,
+                counter TEXT NOT NULL,
+                day TEXT NOT NULL,
+                used INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (institution_id, principal_id, counter, day)
+            )
+            """,
         )
         with self._lock, self._connection.transaction(), self._connection.cursor() as cursor:
             cursor.execute(f"SET LOCAL lock_timeout = '{self.MIGRATION_LOCK_TIMEOUT}'")
@@ -676,10 +897,11 @@ class PostgresControlStore:
                 cursor.execute("SELECT 1 FROM pg_indexes WHERE schemaname = current_schema() AND indexname = %s", (index,))
                 if cursor.fetchone() is None:
                     cursor.execute(f"CREATE INDEX IF NOT EXISTS {index} ON {definition}")
-            cursor.execute(
-                "INSERT INTO schema_migrations(version, applied_at) VALUES (%s, %s) ON CONFLICT (version) DO NOTHING",
-                ("001_control_plane", datetime.now(timezone.utc).isoformat()),
-            )
+            for version in ("001_control_plane", "005_voice_conversation"):
+                cursor.execute(
+                    "INSERT INTO schema_migrations(version, applied_at) VALUES (%s, %s) ON CONFLICT (version) DO NOTHING",
+                    (version, datetime.now(timezone.utc).isoformat()),
+                )
 
     @staticmethod
     def _json(value: Any) -> str:
@@ -945,6 +1167,81 @@ class PostgresControlStore:
                 total += cursor.rowcount
         return total
 
+    # ---------------------------------------------------- voice sessions
+    def create_voice_session(self, record: dict[str, Any]) -> None:
+        with self._lock, self._connection.cursor() as cursor:
+            cursor.execute(
+                f"INSERT INTO voice_sessions({', '.join(_VOICE_SESSION_COLUMNS)}) VALUES ({', '.join('%s' for _ in _VOICE_SESSION_COLUMNS)})",
+                tuple(record.get(column) for column in _VOICE_SESSION_COLUMNS),
+            )
+
+    def get_voice_session(self, session_id: str) -> dict[str, Any] | None:
+        with self._lock, self._connection.cursor() as cursor:
+            cursor.execute("SELECT * FROM voice_sessions WHERE session_id = %s", (session_id,))
+            row = cursor.fetchone()
+        return _voice_row(row) if row else None
+
+    def claim_voice_session(self, session_id: str, ticket_sha256: str, now: str) -> dict[str, Any] | None:
+        # One conditional UPDATE: of two sockets presenting the same ticket, on
+        # any number of API tasks sharing this database, exactly one wins.
+        with self._lock, self._connection.cursor() as cursor:
+            cursor.execute(
+                "UPDATE voice_sessions SET claimed_at = %s WHERE session_id = %s AND ticket_sha256 = %s AND claimed_at IS NULL "
+                "AND closed_at IS NULL AND ticket_expires_at > %s AND expires_at > %s RETURNING *",
+                (now, session_id, ticket_sha256, now, now),
+            )
+            row = cursor.fetchone()
+        return _voice_row(row) if row else None
+
+    def close_voice_session(self, session_id: str, principal_id: str | None, now: str) -> bool:
+        with self._lock, self._connection.cursor() as cursor:
+            if principal_id is None:
+                cursor.execute("UPDATE voice_sessions SET closed_at = %s WHERE session_id = %s AND closed_at IS NULL", (now, session_id))
+            else:
+                cursor.execute(
+                    "UPDATE voice_sessions SET closed_at = %s WHERE session_id = %s AND principal_id = %s AND closed_at IS NULL", (now, session_id, principal_id),
+                )
+            return cursor.rowcount == 1
+
+    def active_voice_sessions(self, now: str, principal_id: str | None = None) -> list[dict[str, Any]]:
+        query = (
+            "SELECT * FROM voice_sessions WHERE closed_at IS NULL AND expires_at > %s "
+            "AND (claimed_at IS NOT NULL OR ticket_expires_at > %s)"
+        )
+        params: tuple[Any, ...] = (now, now)
+        if principal_id is not None:
+            query += " AND principal_id = %s"
+            params += (principal_id,)
+        with self._lock, self._connection.cursor() as cursor:
+            cursor.execute(query + " ORDER BY created_at", params)
+            rows = cursor.fetchall()
+        return [_voice_row(row) for row in rows]
+
+    def take_usage(self, *, institution_id: str, principal_id: str, counter: str, day: str, cap: int) -> bool:
+        """Count one use against today's cap; False (and nothing counted) once the cap is reached."""
+
+        if cap <= 0:
+            return False
+        with self._lock, self._connection.cursor() as cursor:
+            cursor.execute(
+                "INSERT INTO usage_counters(institution_id, principal_id, counter, day, used) VALUES (%s, %s, %s, %s, 1) "
+                "ON CONFLICT (institution_id, principal_id, counter, day) DO UPDATE SET used = usage_counters.used + 1 WHERE usage_counters.used < %s",
+                (institution_id, principal_id, counter, day, cap),
+            )
+            return cursor.rowcount == 1
+
+    def prune_ephemeral(self, now: datetime | None = None) -> int:
+        current = now or now_utc()
+        cutoff = timestamp(current - VOICE_SESSION_KEEP)
+        oldest_day = (current - timedelta(days=USAGE_COUNTER_KEEP_DAYS)).date().isoformat()
+        with self._lock, self._connection.transaction(), self._connection.cursor() as cursor:
+            cursor.execute(f"SET LOCAL lock_timeout = '{self.MIGRATION_LOCK_TIMEOUT}'")
+            cursor.execute("DELETE FROM voice_sessions WHERE COALESCE(closed_at, expires_at) < %s", (cutoff,))
+            total = cursor.rowcount
+            cursor.execute("DELETE FROM usage_counters WHERE day < %s", (oldest_day,))
+            total += cursor.rowcount
+        return total
+
     def ping(self) -> bool:
         with self._lock:
             with self._connection.cursor() as cursor:
@@ -968,4 +1265,4 @@ class PostgresControlStore:
             self._closed = True
 
 
-__all__ = ["InMemoryControlStore", "PostgresControlStore", "SqliteControlStore"]
+__all__ = ["InMemoryControlStore", "PostgresControlStore", "SqliteControlStore", "timestamp"]

@@ -2,17 +2,23 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from ...agents.contracts import MAX_COMMAND_CHARS, AgentCommand
+from ...conversation.contracts import MAX_HISTORY_TURN_CHARS, MAX_HISTORY_TURNS, Turn
 from ...domain.principals import Capability, InstitutionScope
-from ..dependencies import platform_from_request
+from ..dependencies import platform_from_request, runtime_from_request
 from ._platform_common import request_id_for, require_principal, resolve_institution, translate
 
 router = APIRouter(prefix="/v1/agent", tags=["agent"])
+
+
+class HistoryTurnBody(BaseModel):
+    role: Literal["user", "assistant"]
+    text: str = Field(min_length=1, max_length=MAX_HISTORY_TURN_CHARS * 4)
 
 
 class CommandBody(BaseModel):
@@ -24,6 +30,10 @@ class CommandBody(BaseModel):
     approval_id: str | None = Field(default=None, max_length=128)
     run_in_background: bool = False
     include_data: bool = True
+    # The conversation so far, kept by the client; the server stores none.
+    history: list[HistoryTurnBody] = Field(default_factory=list, max_length=MAX_HISTORY_TURNS * 2)
+    # The language the person chose; the reply follows the language they used.
+    language: Literal["en-IN", "hi-IN", "kn-IN"] | None = None
 
 
 class ApprovalDecisionBody(BaseModel):
@@ -38,12 +48,22 @@ async def run_command(body: CommandBody, request: Request) -> dict[str, Any]:
     scope = InstitutionScope(target, body.department_id)
     if not principal.can_access(scope):
         raise HTTPException(status_code=403, detail="the requested department is outside the authenticated scope")
+    dialogue = runtime_from_request(request).dialogue
     try:
-        command = AgentCommand(request_id_for(request), principal, scope, body.command, body.channel, body.conversation_id, body.approval_id, body.run_in_background)
+        if dialogue is None:
+            command = AgentCommand(request_id_for(request), principal, scope, body.command, body.channel, body.conversation_id, body.approval_id, body.run_in_background)
+        else:
+            turn = Turn(
+                request_id_for(request), principal, scope, body.command, channel="voice" if body.channel == "voice" else "text", mode="agent",
+                language_hint=body.language, history=tuple(item.model_dump() for item in body.history),  # type: ignore[arg-type]
+                conversation_id=body.conversation_id, approval_id=body.approval_id, run_in_background=body.run_in_background,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    response = await platform.agent.handle(command)
-    return response.as_dict(include_data=body.include_data)
+    if dialogue is None:
+        return (await platform.agent.handle(command)).as_dict(include_data=body.include_data)
+    reply = await dialogue.respond(turn)
+    return reply.as_dict(include_data=body.include_data)
 
 
 @router.get("/tools", summary="Tools available to the caller through the gateway")

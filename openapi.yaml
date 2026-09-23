@@ -3411,10 +3411,47 @@ components:
           default: text
         institution_scope:
           $ref: '#/components/schemas/ScopeBody'
+        conversational:
+          type: boolean
+          title: Conversational
+          default: false
+        history:
+          items:
+            $ref: '#/components/schemas/ChatHistoryTurn'
+          type: array
+          maxItems: 24
+          title: History
+        language:
+          anyOf:
+          - type: string
+            enum:
+            - en-IN
+            - hi-IN
+            - kn-IN
+          - type: 'null'
+          title: Language
       type: object
       required:
       - prompt
       title: ChatBody
+    ChatHistoryTurn:
+      properties:
+        role:
+          type: string
+          enum:
+          - user
+          - assistant
+          title: Role
+        text:
+          type: string
+          maxLength: 4000
+          minLength: 1
+          title: Text
+      type: object
+      required:
+      - role
+      - text
+      title: ChatHistoryTurn
     CommandBody:
       properties:
         command:
@@ -3459,6 +3496,21 @@ components:
           type: boolean
           title: Include Data
           default: true
+        history:
+          items:
+            $ref: '#/components/schemas/HistoryTurnBody'
+          type: array
+          maxItems: 24
+          title: History
+        language:
+          anyOf:
+          - type: string
+            enum:
+            - en-IN
+            - hi-IN
+            - kn-IN
+          - type: 'null'
+          title: Language
       type: object
       required:
       - command
@@ -3551,6 +3603,24 @@ components:
           title: Institution Id
       type: object
       title: HarvestBody
+    HistoryTurnBody:
+      properties:
+        role:
+          type: string
+          enum:
+          - user
+          - assistant
+          title: Role
+        text:
+          type: string
+          maxLength: 4000
+          minLength: 1
+          title: Text
+      type: object
+      required:
+      - role
+      - text
+      title: HistoryTurnBody
     IncidentBody:
       properties:
         note:

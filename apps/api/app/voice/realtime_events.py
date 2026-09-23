@@ -17,6 +17,12 @@ class RealtimeEvent(StrEnum):
     SESSION_CLOSED = "session.closed"
     ERROR = "error"
     EXPIRED = "expired"
+    # Full-duplex conversation (opt-in through the auth message's features).
+    INTERRUPT = "interrupt"
+    THINKING = "thinking"
+    SPEECH = "speech"
+    SPEECH_END = "speech_end"
+    CANCELLED = "cancelled"
 
 
 __all__ = ["RealtimeEvent"]

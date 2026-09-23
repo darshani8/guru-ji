@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from enum import StrEnum
+from typing import Any
 
 
 class PrincipalType(StrEnum):
@@ -49,6 +51,9 @@ class Capability(StrEnum):
     RECORDS_WRITE = "records:write"
     INTELLIGENCE_READ = "intelligence:read"
     INTELLIGENCE_MANAGE = "intelligence:manage"
+    # Open-web search from the assistant ("search the internet for ..."). Kept
+    # apart from ask:read_only because the query leaves the institution.
+    WEB_SEARCH = "web:search"
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,9 +139,31 @@ class Principal:
         return self.active and any(scope.covers(requested_scope) for scope in self.scopes)
 
 
+def principal_snapshot(principal: Principal) -> dict[str, Any]:
+    """The verified principal as plain data, for work that outlives the request (jobs, voice sessions)."""
+
+    return {
+        "principal_id": principal.principal_id,
+        "principal_type": principal.principal_type.value,
+        "capabilities": sorted(item.value for item in principal.capabilities),
+        "scopes": [scope.as_dict() for scope in principal.scopes],
+        "consent_verified": principal.consent_verified,
+    }
+
+
+def principal_from_snapshot(snapshot: Mapping[str, Any]) -> Principal:
+    """Rebuild a principal the server itself recorded; unknown capabilities are dropped, never granted."""
+
+    capabilities = frozenset(Capability(item) for item in snapshot.get("capabilities", []) if item in Capability._value2member_map_)
+    scopes = tuple(InstitutionScope(str(item["college_id"]), item.get("department_id"), item.get("batch_id")) for item in snapshot.get("scopes", []) if isinstance(item, Mapping) and item.get("college_id"))
+    return Principal(str(snapshot["principal_id"]), PrincipalType(str(snapshot.get("principal_type", "student"))), capabilities, scopes, authenticated=True, consent_verified=bool(snapshot.get("consent_verified", False)))
+
+
 __all__ = [
     "Capability",
     "InstitutionScope",
     "Principal",
     "PrincipalType",
+    "principal_from_snapshot",
+    "principal_snapshot",
 ]

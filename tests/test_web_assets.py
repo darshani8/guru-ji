@@ -81,6 +81,34 @@ class WebAssetTests(unittest.TestCase):
         self.assertIn("collegeId: firstCollegeId(claims)", auth)
         self.assertIn("rememberToken(parsed.idToken)", auth)
 
+    def test_voice_is_a_two_way_conversation(self):
+        # The microphone stays on while Guru Ji speaks; talking over a reply
+        # stops it and tells the server, which cancels what it was preparing.
+        js = (ASSISTANT / "app.js").read_text(encoding="utf-8")
+        self.assertIn("features: ['thinking', 'speech', 'interrupt']", js)
+        self.assertIn("type: 'interrupt'", js)
+        self.assertIn("function isEcho(transcript)", js)
+        self.assertIn("decodeAudioData(", js, "Polly audio plays through Web Audio, with no media URL for the CSP to allow")
+        self.assertNotRegex(js, r"startRecognition\(\) \{\s*if \([^)]*state\.speaking\) return;", "recognition must not stop for every reply")
+        self.assertIn("history: recentHistory()", js)
+        self.assertIn("conversational: true", js)
+        page = (ASSISTANT / "index.html").read_text(encoding="utf-8")
+        for language in ("en-IN", "hi-IN", "kn-IN"):
+            self.assertIn(f'<option value="{language}">', page)
+        self.assertIn('id="interrupt-button"', page)
+
+    def test_streamed_replies_show_as_they_are_spoken_and_can_be_retracted(self):
+        js = (ASSISTANT / "app.js").read_text(encoding="utf-8")
+        self.assertIn("if (!message.filler) showLiveText(message.client_message_id, message.text);", js)
+        self.assertIn("message.reason === 'retracted'", js)
+        self.assertIn("if (message.type === 'speech_end') return;", js)
+
+    def test_web_sources_open_safely(self):
+        js = (ASSISTANT / "app.js").read_text(encoding="utf-8")
+        self.assertIn("anchor.rel = 'noopener noreferrer';", js)
+        self.assertIn("parsed.protocol === 'https:' || parsed.protocol === 'http:'", js)
+        self.assertNotIn("innerHTML", js)
+
     def test_voice_session_never_sends_an_empty_college(self):
         js = (ASSISTANT / "app.js").read_text(encoding="utf-8")
         self.assertIn("JSON.stringify(collegeId ? { college_id: collegeId } : {})", js)
