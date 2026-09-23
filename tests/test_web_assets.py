@@ -115,6 +115,18 @@ class WebAssetTests(unittest.TestCase):
         self.assertIn("socket.send(JSON.stringify({ type: 'client_log', ...stats, browser: browserLabel() }));", js)
         self.assertNotIn("client_log', text", js)
 
+    def test_the_microphone_can_be_picked_and_its_level_seen(self):
+        page = (ASSISTANT / "index.html").read_text(encoding="utf-8")
+        js = (ASSISTANT / "app.js").read_text(encoding="utf-8")
+        self.assertIn('id="mic-select"', page)
+        self.assertIn('id="mic-meter"', page)
+        # A picked microphone is handed to recognition, with the default as fallback.
+        self.assertIn("if (track && track.readyState === 'live') state.recognition.start(track);", js)
+        self.assertIn("state.micTrackFailed = true;", js)
+        # The meter reads levels only: nothing from the microphone is sent or kept.
+        self.assertIn("state.recognitionStats.level_peak = Math.max(", js)
+        self.assertNotIn("MediaRecorder", js)
+
     def test_web_sources_open_safely(self):
         js = (ASSISTANT / "app.js").read_text(encoding="utf-8")
         self.assertIn("anchor.rel = 'noopener noreferrer';", js)

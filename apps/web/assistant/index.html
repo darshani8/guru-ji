@@ -50,6 +50,9 @@
     <section id="composer-wrap" class="composer-wrap" aria-label="Assistant input">
       <div class="voice-bar">
         <p id="voice-status-line" class="voice-status-line" role="status" aria-live="polite"></p>
+        <span id="mic-meter" class="mic-meter" title="Microphone sound level" hidden><span id="mic-meter-fill" class="mic-meter-fill"></span></span>
+        <label class="sr-only" for="mic-select">Microphone</label>
+        <select id="mic-select" class="mic-select" title="Microphone" hidden></select>
         <button id="interrupt-button" class="interrupt-button" type="button" hidden>Stop speaking</button>
       </div>
       <form id="text-form" class="composer">

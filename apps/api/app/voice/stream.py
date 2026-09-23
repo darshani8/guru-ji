@@ -182,9 +182,9 @@ class VoiceConnection:
             return
         self._client_logged_at = now
         logger.info(
-            "voice client session=%s browser=%s starts=%d ends=%d restarts=%d interim=%d finals=%d dropped_echo=%d sent=%d errors=%s",
+            "voice client session=%s browser=%s starts=%d ends=%d restarts=%d interim=%d finals=%d dropped_echo=%d sent=%d errors=%s mic_peak=%d",
             self.session.session_id[:8], event.browser or "-", event.starts, event.ends, event.restarts, event.interim, event.finals,
-            event.dropped_echo, event.sent, ",".join(event.errors) or "-",
+            event.dropped_echo, event.sent, ",".join(event.errors) or "-", event.level_peak,
         )
 
     # ------------------------------------------------------------ turns

@@ -76,6 +76,8 @@ class ClientLogMessage(VoiceMessageBase):
     sent: int = Field(default=0, ge=0, le=10_000)
     restarts: int = Field(default=0, ge=0, le=10_000)
     errors: list[RecognitionError] = Field(default_factory=list, max_length=20)
+    # The loudest the microphone got since the last report, 0-100 (a level, not audio).
+    level_peak: int = Field(default=0, ge=0, le=100)
     browser: str | None = Field(default=None, max_length=40, pattern=r"^[A-Za-z0-9 ._/-]*$")
 
 
