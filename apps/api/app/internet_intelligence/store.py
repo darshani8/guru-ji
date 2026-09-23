@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
 
-from ..persistence.schema_tools import add_missing_columns, apply_schema, begin_migration, existing_policies, idempotent_tenant_isolation_sql, row_level_security_state, tenant_isolation_statements
+from ..persistence.schema_tools import add_missing_columns, apply_schema, begin_migration, bound_lock_waits, existing_policies, idempotent_tenant_isolation_sql, known_tenants, row_level_security_state, tenant_isolation_statements
 from ..persistence.sql_backend import SqlBackend, open_backend
 from .profile import InstitutionProfile
 
@@ -134,6 +134,12 @@ RUN_LOCK_SECONDS = 1800
 # scheduler enumerates every profile with monitoring enabled without a tenant
 # context, and the store's own methods always filter profiles by institution_id.
 _TENANT_TABLES = ("internet_documents", "monitoring_runs", "monitoring_events", "intelligence_reports", "investigation_quota")
+# What retention deletes, by the time that dates each row. A document goes once
+# it has not been seen for the period, and its events with it (an event is
+# never newer than the last sighting of its document). A quota row only counts
+# on its own day, so it goes after a month at most.
+_RETENTION: tuple[tuple[str, str], ...] = (("internet_documents", "last_seen_at"), ("monitoring_events", "created_at"), ("monitoring_runs", "started_at"), ("intelligence_reports", "created_at"))
+QUOTA_RETENTION_DAYS = 30
 
 
 def _rls(state: Mapping[str, tuple[bool, bool]], policies: Iterable[tuple[str, str]]) -> tuple[str, ...]:
@@ -463,5 +469,34 @@ class IntelligenceStore:
             row = self.backend.fetchone("SELECT used FROM investigation_quota WHERE institution_id = ? AND principal_id = ? AND day = ?", (institution_id, principal_id, day))
         return int(row["used"]) if row else 0
 
+    # -------------------------------------------------------------- retention
+    def prune_retention(self, days: int, *, now: datetime | None = None, institution_id: str | None = None) -> dict[str, int]:
+        """Delete documents, events, runs and reports older than ``days``, and quota rows; returns counts per table.
 
-__all__ = ["ADDED_COLUMNS", "RUN_LOCK_SECONDS", "SENSITIVE_TOPICS", "IntelligenceStore", "SCHEMA_VERSION", "render_sql_migration"]
+        The retention period (India's DPDP Act) for what monitoring and
+        investigations collected. Profiles stay. Each institution is pruned in
+        its own tenant transaction, so row-level security applies; with no
+        ``institution_id`` every institution that known_tenants finds (on
+        PostgreSQL, every one with a profile or in the institution registry)
+        is pruned in turn.
+        """
+
+        if days < 1:
+            raise ValueError("days must be positive")
+        current = now or datetime.now(timezone.utc)
+        current = current if current.tzinfo else current.replace(tzinfo=timezone.utc)
+        cutoff = (current - timedelta(days=days)).isoformat()
+        quota_day = (current - timedelta(days=min(days, QUOTA_RETENTION_DAYS))).date().isoformat()
+        totals = dict.fromkeys((*(table for table, _ in _RETENTION), "investigation_quota", "institutions"), 0)
+        for tenant in [institution_id] if institution_id is not None else known_tenants(self.backend, _TENANT_TABLES):
+            with self._tenant(tenant):
+                # Start-up prunes too: a row a stuck writer holds fails the pass instead of hanging it.
+                bound_lock_waits(self.backend)
+                for table, column in _RETENTION:
+                    totals[table] += self.backend.execute(f"DELETE FROM {table} WHERE institution_id = ? AND {column} < ?", (tenant, cutoff))
+                totals["investigation_quota"] += self.backend.execute("DELETE FROM investigation_quota WHERE institution_id = ? AND day < ?", (tenant, quota_day))
+            totals["institutions"] += 1
+        return totals
+
+
+__all__ = ["ADDED_COLUMNS", "QUOTA_RETENTION_DAYS", "RUN_LOCK_SECONDS", "SENSITIVE_TOPICS", "IntelligenceStore", "SCHEMA_VERSION", "render_sql_migration"]

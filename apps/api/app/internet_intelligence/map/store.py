@@ -2,10 +2,12 @@
 
 Everything is tenant data under forced row-level security on PostgreSQL. The
 evidence table is append-only (there is no update method): a grade is always
-recomputed from it, so any grade can be explained and replayed. The one
-deletion is ``forget_asset``, for an account a reviewer found to be a
-person's: it leaves the map entirely and only a keyed fingerprint remains.
-Tables carry an ``intel_`` prefix because this store shares its database with
+recomputed from it, so any grade can be explained and replayed. Two things
+touch it afterwards. ``forget_asset``, for an account a reviewer found to be a
+person's, removes it entirely, and only a keyed fingerprint remains.
+``prune_retention`` (the retention period, for India's DPDP Act) blanks free
+text the grader never parses and deletes observations that newer ones
+superseded, so every grade still replays the same. Tables carry an ``intel_`` prefix because this store shares its database with
 the institution-data store, which already owns generic names such as
 ``review_items``.
 """
@@ -21,7 +23,7 @@ from typing import Any
 from urllib.parse import urlparse
 from uuid import uuid4
 
-from ...persistence.schema_tools import add_missing_columns, apply_schema, begin_migration, existing_policies, idempotent_tenant_isolation_sql, row_level_security_state, tenant_isolation_statements
+from ...persistence.schema_tools import add_missing_columns, apply_schema, begin_migration, bound_lock_waits, existing_policies, idempotent_tenant_isolation_sql, known_tenants, row_level_security_state, tenant_isolation_statements
 from ...persistence.sql_backend import SqlBackend, open_backend
 from .assets import AssetRef
 
@@ -295,6 +297,10 @@ REVIEW_STATUSES = frozenset({"open", "decided", "expired"})
 MAX_OPEN_REVIEW = 500
 REVIEW_TTL_DAYS = 90
 SOURCE_ORIGINS = frozenset({"seed", "recurring", "lead", "gap", "profile"})
+# A quota or spend row only counts on its own day, so it goes after a month at
+# most, whatever the retention period (see MapStore.prune_retention).
+LEDGER_RETENTION_DAYS = 30
+RETENTION_COUNTS = ("review_items", "incidents", "map_runs", "quota", "fetch_validators", "sources", "evidence_blanked", "observations")
 
 
 def _json(value: Any) -> str:
@@ -1135,6 +1141,112 @@ class MapStore(MapStoreScheduling, MapStoreReview, MapStoreIncidents):
             rows = self.backend.fetchall("SELECT run_id FROM intel_map_runs WHERE institution_id = ? AND status = 'running' AND started_at < ?", (institution_id, cutoff))
         return [str(row["run_id"]) for row in rows]
 
+    # --------------------------------------------------------------- retention
+    def prune_retention(self, *, now: datetime | None = None, days: int, institution_id: str | None = None) -> dict[str, int]:
+        """Delete or blank what the map no longer needs ``days`` after it was last current; returns counts.
+
+        Only closed or superseded work goes: decided or expired review items,
+        resolved incidents, runs (except the newest baseline, which later runs
+        are compared with), fetch validators not refreshed, sources the map
+        stopped following, and quota and spend rows (after a month at most).
+        The map itself (entities, assets, ground truth, suppression) stays, and
+        so does the evidence every grade is recomputed from: past the period a
+        free-text detail is blanked and liveness and integrity observations that
+        newer ones superseded are deleted, keeping every row the grader reads
+        (see grading.FREE_TEXT_KINDS and grading.superseded_observations). Each
+        institution is pruned in its own tenant transaction, so row-level
+        security applies; with no ``institution_id`` every institution that
+        known_tenants finds is pruned in turn.
+        """
+
+        if days < 1:
+            raise ValueError("days must be positive")
+        current = now or datetime.now(timezone.utc)
+        current = current if current.tzinfo else current.replace(tzinfo=timezone.utc)
+        before = current - timedelta(days=days)
+        ledger_day = (current - timedelta(days=min(days, LEDGER_RETENTION_DAYS))).date().isoformat()
+        totals = dict.fromkeys((*RETENTION_COUNTS, "budget_ledger", "institutions"), 0)
+        for tenant in [institution_id] if institution_id is not None else known_tenants(self.backend, TENANT_TABLES):
+            for key, count in self._prune_tenant(tenant, before=before, ledger_day=ledger_day).items():
+                totals[key] += count
+            totals["institutions"] += 1
+        # Platform-wide spend is not tenant data; pruning it again for each institution's pass costs one indexed delete.
+        with self.backend.transaction():
+            bound_lock_waits(self.backend)
+            totals["budget_ledger"] = self.backend.execute("DELETE FROM intel_budget_ledger WHERE day < ?", (ledger_day,))
+        return totals
+
+    def _prune_tenant(self, institution_id: str, *, before: datetime, ledger_day: str) -> dict[str, int]:
+        cutoff = before.isoformat()
+        with self._tenant(institution_id):
+            # Start-up prunes too: a row a stuck writer holds fails the pass instead of hanging it.
+            bound_lock_waits(self.backend)
+            # A decision older than the period is forgotten (the same item found again is asked
+            # again); the evidence it added stays, so the grade it caused stays too.
+            return {
+                "review_items": self.backend.execute("DELETE FROM intel_review_items WHERE institution_id = ? AND status IN ('decided', 'expired') AND COALESCE(decided_at, updated_at) < ?", (institution_id, cutoff)),
+                "incidents": self.backend.execute("DELETE FROM intel_incidents WHERE institution_id = ? AND status = 'resolved' AND COALESCE(resolved_at, last_seen_at) < ?", (institution_id, cutoff)),
+                "map_runs": self.backend.execute(
+                    "DELETE FROM intel_map_runs WHERE institution_id = ? AND started_at < ? AND run_id NOT IN (SELECT run_id FROM intel_map_runs WHERE institution_id = ? AND kind = 'baseline' ORDER BY started_at DESC, run_id DESC LIMIT 1)",
+                    (institution_id, cutoff, institution_id),
+                ),
+                "quota": self.backend.execute("DELETE FROM intel_quota WHERE institution_id = ? AND day < ?", (institution_id, ledger_day)),
+                "fetch_validators": self.backend.execute("DELETE FROM intel_fetch_validators WHERE institution_id = ? AND fetched_at < ?", (institution_id, cutoff)),
+                # A lead found again after this is followed afresh; an expired one never produced anything anyway.
+                "sources": self.backend.execute("DELETE FROM intel_sources WHERE institution_id = ? AND status IN ('expired', 'pruned') AND updated_at < ?", (institution_id, cutoff)),
+                "evidence_blanked": self._expire_free_text(institution_id, cutoff),
+                "observations": self._drop_superseded_observations(institution_id, before),
+            }
+
+    def _expire_free_text(self, institution_id: str, cutoff: str) -> int:
+        """Blank the free text of evidence observed before ``cutoff``, and the quotes of it in stored grade reasons.
+
+        Kind, polarity, channel, source, time and observation channel stay,
+        and they are all the grader reads of these kinds, so every grade stays
+        and the stored reasons read as the next regrade would word them.
+        Batched, so a first pass over a long backlog holds little in memory.
+        """
+
+        from .grading import EXPIRED_DETAIL, FREE_TEXT_KINDS, expire_quotes  # grading imports this module
+
+        kinds, page, blanked = sorted(FREE_TEXT_KINDS), 1000, 0
+        while True:
+            rows = self.backend.fetchall(
+                f"SELECT evidence_id, asset_id, detail FROM intel_evidence WHERE institution_id = ? AND observed_at < ? AND kind IN ({', '.join('?' for _ in kinds)}) AND detail <> '' AND detail <> ? LIMIT ?",
+                (institution_id, cutoff, *kinds, EXPIRED_DETAIL, page),
+            )
+            for chunk in iter_chunks([row["evidence_id"] for row in rows], 200):
+                self.backend.execute(f"UPDATE intel_evidence SET detail = ? WHERE institution_id = ? AND evidence_id IN ({', '.join('?' for _ in chunk)})", (EXPIRED_DETAIL, institution_id, *chunk))
+            quoted: dict[str, list[str]] = {}
+            for row in rows:
+                quoted.setdefault(str(row["asset_id"]), []).append(str(row["detail"]))
+            for chunk in iter_chunks(list(quoted), 200):
+                for asset in self.backend.fetchall(f"SELECT asset_id, grade_reasons_json FROM intel_assets WHERE institution_id = ? AND asset_id IN ({', '.join('?' for _ in chunk)})", (institution_id, *chunk)):
+                    reasons = _loads(asset["grade_reasons_json"], [])
+                    expired = expire_quotes(reasons, quoted[str(asset["asset_id"])])
+                    if expired != reasons:
+                        self.backend.execute("UPDATE intel_assets SET grade_reasons_json = ? WHERE institution_id = ? AND asset_id = ?", (_json(expired), institution_id, asset["asset_id"]))
+            blanked += len(rows)
+            if len(rows) < page:
+                return blanked
+
+    def _drop_superseded_observations(self, institution_id: str, before: datetime) -> int:
+        """Delete the liveness and integrity rows observed before ``before`` that the grader no longer reads."""
+
+        from .grading import superseded_observations  # grading imports this module
+
+        assets = [str(row["asset_id"]) for row in self.backend.fetchall("SELECT DISTINCT asset_id FROM intel_evidence WHERE institution_id = ? AND kind IN ('liveness', 'integrity') AND observed_at < ?", (institution_id, before.isoformat()))]
+        deleted = 0
+        # A few assets at a time: a site checked daily for a year has hundreds of rows.
+        for chunk in iter_chunks(assets, 50):
+            rows = self.backend.fetchall(
+                f"SELECT evidence_id, asset_id, kind, polarity, channel, detail, observed_via, observed_at FROM intel_evidence WHERE institution_id = ? AND kind IN ('liveness', 'integrity') AND asset_id IN ({', '.join('?' for _ in chunk)})",
+                (institution_id, *chunk),
+            )
+            for doomed in iter_chunks(superseded_observations(rows, before=before), 200):
+                deleted += self.backend.execute(f"DELETE FROM intel_evidence WHERE institution_id = ? AND evidence_id IN ({', '.join('?' for _ in doomed)})", (institution_id, *doomed))
+        return deleted
+
 
 def grade_at_least(grade: str | None, minimum: str) -> bool:
     return GRADE_RANK.get(grade or "unrated", 1) >= GRADE_RANK[minimum]
@@ -1146,6 +1258,6 @@ def iter_chunks(items: Sequence[Any], size: int) -> Iterable[Sequence[Any]]:
 
 
 __all__ = [
-    "ADDED_COLUMNS", "ASSET_STATUSES", "ENTITY_KINDS", "GLOBAL_TABLES", "GRADES", "GRADE_RANK", "RELATIONS", "SCHEMA_VERSION", "SOURCE_CLASSES", "SOURCE_ORIGINS", "SPLITS", "TENANT_TABLES", "MapStore", "grade_at_least", "iter_chunks",
-    "render_sql_migration", "suppression_fingerprint",
+    "ADDED_COLUMNS", "ASSET_STATUSES", "ENTITY_KINDS", "GLOBAL_TABLES", "GRADES", "GRADE_RANK", "LEDGER_RETENTION_DAYS", "RELATIONS", "RETENTION_COUNTS", "SCHEMA_VERSION", "SOURCE_CLASSES", "SOURCE_ORIGINS", "SPLITS", "TENANT_TABLES",
+    "MapStore", "grade_at_least", "iter_chunks", "render_sql_migration", "suppression_fingerprint",
 ]

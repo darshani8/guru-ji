@@ -172,6 +172,8 @@ class AppSettings:
     intelligence_connectors: tuple[str, ...] = ()
     intelligence_seed_groups: str = ""
     intelligence_investigations_per_day: int = 20
+    # How long monitoring evidence and the internet map's closed work are kept (India's DPDP Act).
+    intelligence_retention_days: int = 365
     intelligence_youtube_api_key: str | None = field(default=None, repr=False)
     intelligence_indiankanoon_token: str | None = field(default=None, repr=False)
     agent_planner: str = "deterministic"
@@ -304,6 +306,7 @@ class AppSettings:
             intelligence_sources_per_tick=int(os.getenv("GURU_INTELLIGENCE_SOURCES_PER_TICK", "25")),
             intelligence_seed_groups=os.getenv("GURU_INTELLIGENCE_SEED_GROUPS", "").strip(),
             intelligence_investigations_per_day=int(os.getenv("GURU_INTELLIGENCE_INVESTIGATIONS_PER_DAY", "20")),
+            intelligence_retention_days=int(os.getenv("GURU_INTELLIGENCE_RETENTION_DAYS", "365")),
             intelligence_connectors=tuple(item.strip().lower() for item in os.getenv("GURU_INTELLIGENCE_CONNECTORS", "").split(",") if item.strip()),
             intelligence_youtube_api_key=os.getenv("GURU_INTELLIGENCE_YOUTUBE_API_KEY") or None,
             intelligence_indiankanoon_token=os.getenv("GURU_INTELLIGENCE_INDIANKANOON_TOKEN") or None,
@@ -431,6 +434,8 @@ class AppSettings:
             raise ValueError("connector limits must be positive")
         if not 1 <= self.audit_retention_days <= 3650:
             raise ValueError("GURU_AUDIT_RETENTION_DAYS must be between 1 and 3650")
+        if not 30 <= self.intelligence_retention_days <= 3650:
+            raise ValueError("GURU_INTELLIGENCE_RETENTION_DAYS must be between 30 and 3650")
         if self.otel_exporter_timeout_seconds <= 0:
             raise ValueError("GURU_OTEL_EXPORTER_TIMEOUT_SECONDS must be positive")
         if self.otel_exporter_endpoint:

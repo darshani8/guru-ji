@@ -13,6 +13,8 @@ one starts, so start-up may only issue DDL for what is actually missing:
 
 Every helper runs inside the caller's transaction, which sets ``lock_timeout``
 so a wait that does happen fails loudly instead of hanging the health check.
+Start-up housekeeping (retention) lists tenants and bounds its lock waits
+with the helpers at the end.
 """
 
 from __future__ import annotations
@@ -119,6 +121,42 @@ def tenant_isolation_statements(tables: Iterable[str], *, state: Mapping[str, tu
     return tuple(statements)
 
 
+# Tables that name institutions and stay outside row-level security, so a
+# platform-level job can list tenants without a tenant context: the
+# intelligence profiles the monitoring scheduler reads, and the institution
+# registry. Either may be absent from a database (a store used on its own).
+TENANT_REGISTRIES = ("institution_profiles", "institutions")
+
+
+def known_tenants(backend: SqlBackend, tables: Iterable[str]) -> list[str]:
+    """Every institution that may have rows in ``tables``, for platform maintenance such as retention.
+
+    With no tenant set, SQLite (which has no row-level security) shows every
+    row, so the tables list their own institutions. Forced row-level security
+    shows a PostgreSQL session none of them, so there the list also takes every
+    institution the registries outside it name; an institution in neither is
+    reached only by naming it. Callers still act on each institution inside its
+    own tenant transaction.
+    """
+
+    found: set[str] = set()
+    with backend.transaction():
+        for table in tables:
+            found.update(str(row["institution_id"]) for row in backend.fetchall(f"SELECT DISTINCT institution_id FROM {table}"))
+        if backend.dialect == "postgresql":
+            present = row_level_security_state(backend)
+            for table in TENANT_REGISTRIES:
+                if table in present:
+                    found.update(str(row["institution_id"]) for row in backend.fetchall(f"SELECT institution_id FROM {table}"))
+    return sorted(item for item in found if item.strip())
+
+
+def bound_lock_waits(backend: SqlBackend) -> None:
+    """Bound lock waits for the current transaction (PostgreSQL only): housekeeping that meets a stuck lock fails, never hangs."""
+
+    begin_migration(backend)
+
+
 def idempotent_tenant_isolation_sql(tables: Iterable[str]) -> tuple[str, ...]:
     """Tenant isolation for a migration file applied by hand: safe to run again.
 
@@ -145,12 +183,15 @@ def idempotent_tenant_isolation_sql(tables: Iterable[str]) -> tuple[str, ...]:
 
 __all__ = [
     "MIGRATION_LOCK_TIMEOUT",
+    "TENANT_REGISTRIES",
     "add_missing_columns",
     "apply_schema",
     "begin_migration",
+    "bound_lock_waits",
     "existing_indexes",
     "idempotent_tenant_isolation_sql",
     "existing_policies",
+    "known_tenants",
     "row_level_security_state",
     "tenant_isolation_statements",
 ]
