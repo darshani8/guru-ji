@@ -85,10 +85,11 @@ class MapEngine:
         now = self.clock().isoformat()
         if self.registry.get("official_site"):
             for domain in self.store.iter_assets(institution_id, kind="domain", relation="official"):
-                # Only a domain the institution (or a reviewer or regulator) named is
-                # watched as the institution's own site; an inferred one (a subdomain,
-                # a Wikidata claim) is not trusted to vouch for accounts.
-                if nominated(self.store, institution_id, domain["asset_id"]):
+                # A domain the institution (or a reviewer or regulator) named is watched
+                # as the institution's own site. An inferred one graded O/A/B (a live
+                # subdomain) is watched too: it never vouches as the site, but the
+                # harvester records what it links one grade down.
+                if domain["grade"] in {"O", "A", "B"} or nominated(self.store, institution_id, domain["asset_id"]):
                     _, created = self.store.upsert_source(institution_id, connector="official_site", target=domain["asset_id"], entity_id=domain["entity_id"], asset_id=domain["asset_id"], origin="recurring", work_class="rotation", interval_seconds=7 * 86400, due_at=now)
                     added += int(created)
         if self.registry.get("recheck"):

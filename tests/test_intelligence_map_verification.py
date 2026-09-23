@@ -57,7 +57,7 @@ def fetcher_for(pages: dict[str, tuple[int, str]], seen: list[str] | None = None
         status, body = pages.get(url, (404, ""))
         return httpx.Response(status, headers={"content-type": "text/html; charset=utf-8"}, text=body, request=request)
 
-    return PublicPageFetcher(transport=httpx.MockTransport(handler), resolver=lambda host: (PUBLIC_IP,))
+    return PublicPageFetcher(transport=httpx.MockTransport(handler), resolver=lambda host: (PUBLIC_IP,), min_host_interval=0)
 
 
 class StructureTests(unittest.TestCase):
@@ -127,7 +127,7 @@ class RetrieveTests(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(200, headers={"content-type": "text/html", "etag": '"v1"'}, text="<html>v1</html>", request=request)
             return httpx.Response(404, request=request)
 
-        fetcher = PublicPageFetcher(transport=httpx.MockTransport(handler), resolver=lambda host: (PUBLIC_IP,))
+        fetcher = PublicPageFetcher(transport=httpx.MockTransport(handler), resolver=lambda host: (PUBLIC_IP,), min_host_interval=0)
         outcomes = {path: (await fetcher.retrieve(f"https://site.example{path}")).outcome for path in ("/gone", "/blocked", "/forbidden", "/down", "/login", "/missing", "/private/x")}
         self.assertEqual(outcomes, {"/gone": "gone", "/blocked": "blocked", "/forbidden": "blocked", "/down": "server_error", "/login": "login_wall", "/missing": "not_found", "/private/x": "robots"})
         self.assertEqual((await fetcher.retrieve("https://site.example/data.json")).outcome, "content_type", "html is the default")
@@ -141,7 +141,7 @@ class RetrieveTests(unittest.IsolatedAsyncioTestCase):
         for never in ("https://www.justdial.com/Bangalore/BGS-College", "https://www.glassdoor.co.in/Reviews/BGS.htm", "https://www.reddit.com/r/bangalore/", "https://in.quora.com/q"):
             self.assertEqual((await fetcher.retrieve(never)).outcome, "snippet_only", f"{never} is never fetched, under any country domain")
         self.assertTrue(fetcher.allowed_domain("https://glassdoor-alumni.example.org/"), "only the sites themselves are refused")
-        self.assertEqual((await PublicPageFetcher(transport=httpx.MockTransport(handler), resolver=lambda host: ("10.0.0.1",)).retrieve("https://intranet.example/")).outcome, "not_public")
+        self.assertEqual((await PublicPageFetcher(transport=httpx.MockTransport(handler), resolver=lambda host: ("10.0.0.1",), min_host_interval=0).retrieve("https://intranet.example/")).outcome, "not_public")
 
 
 def ev(kind, polarity="supports", via="live", detail="", channel="", source_url="https://bgscet.ac.in/", at=NOW, source_asset_id=None):
@@ -271,7 +271,7 @@ class HarvestTests(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(301, headers={"location": "https://parking.example/"}, request=request)
             return httpx.Response(200, headers={"content-type": "text/html"}, text=OFFICIAL_HOME, request=request)
 
-        result = await OfficialSiteHarvester(PublicPageFetcher(transport=httpx.MockTransport(handler), resolver=lambda host: (PUBLIC_IP,)), self.store).harvest("aitckm", domain_id)
+        result = await OfficialSiteHarvester(PublicPageFetcher(transport=httpx.MockTransport(handler), resolver=lambda host: (PUBLIC_IP,), min_host_interval=0), self.store).harvest("aitckm", domain_id)
         self.assertEqual((result.integrity, result.accounts), ("redirects_offsite", []))
         domain = self.store.get_asset("aitckm", domain_id)
         self.assertEqual((domain["grade"], domain["status"]), ("B", "redirected"), "a configured domain that now sends visitors elsewhere is not a live A site")

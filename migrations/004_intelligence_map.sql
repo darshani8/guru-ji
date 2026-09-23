@@ -22,6 +22,7 @@ CREATE TABLE IF NOT EXISTS intel_incidents ( incident_id TEXT PRIMARY KEY, insti
 CREATE INDEX IF NOT EXISTS idx_intel_incidents_open ON intel_incidents(institution_id, status, severity);
 CREATE TABLE IF NOT EXISTS intel_fetch_validators ( institution_id TEXT NOT NULL, url_sha256 TEXT NOT NULL, etag TEXT, last_modified TEXT, outcome TEXT NOT NULL, content_sha256 TEXT, fetched_at TEXT NOT NULL, PRIMARY KEY(institution_id, url_sha256) );
 CREATE TABLE IF NOT EXISTS intel_budget_ledger ( day TEXT NOT NULL, connector TEXT NOT NULL, units REAL NOT NULL DEFAULT 0, calls INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(day, connector) );
+CREATE TABLE IF NOT EXISTS intel_host_slots ( host TEXT PRIMARY KEY, next_allowed_at DOUBLE PRECISION NOT NULL );
 ALTER TABLE intel_assets ADD COLUMN IF NOT EXISTS last_activity_at TEXT;
 ALTER TABLE intel_assets ADD COLUMN IF NOT EXISTS registration_expires_at TEXT;
 ALTER TABLE intel_sources ADD COLUMN IF NOT EXISTS priority REAL NOT NULL DEFAULT 0;

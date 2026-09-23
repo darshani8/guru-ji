@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import time
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -274,6 +275,14 @@ _STATEMENTS: tuple[str, ...] = (
         PRIMARY KEY(day, connector)
     )
     """,
+    # When each host may next be fetched (epoch seconds), shared by every worker
+    # process so one site never gets two of them at once.
+    """
+    CREATE TABLE IF NOT EXISTS intel_host_slots (
+        host TEXT PRIMARY KEY,
+        next_allowed_at DOUBLE PRECISION NOT NULL
+    )
+    """,
 
 )
 # Columns added after the table first existed; created where missing at start-up.
@@ -286,7 +295,7 @@ ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("intel_sources", "base_interval_seconds", "INTEGER"),
 )
 TENANT_TABLES: tuple[str, ...] = ("intel_entities", "intel_assets", "intel_evidence", "intel_gold_items", "intel_suppression", "intel_map_runs", "intel_sources", "intel_quota", "intel_review_items", "intel_incidents", "intel_fetch_validators")
-GLOBAL_TABLES: tuple[str, ...] = ("intel_budget_ledger",)
+GLOBAL_TABLES: tuple[str, ...] = ("intel_budget_ledger", "intel_host_slots")
 SOURCE_CLASSES = frozenset({"rotation", "recheck", "explore"})
 REVIEW_KINDS = frozenset({"impersonation_candidate", "court_record", "dispute", "canary_leak", "run_gate", "candidate_account"})
 REVIEW_STATUSES = frozenset({"open", "decided", "expired"})
@@ -507,6 +516,26 @@ class MapStoreScheduling:
                 self.backend.execute("UPDATE intel_quota SET units = units - ?, calls = calls - 1 WHERE institution_id = ? AND day = ? AND connector = ?", (float(units), institution_id, day, connector))
             return False
         return True
+
+    def claim_host_slot(self, host: str, interval: float, *, now: float | None = None) -> float:
+        """Claim the next request to ``host`` for this process: 0, or the seconds until it may try again.
+
+        The fetcher's ``host_slots``. Like ``reserve_budget`` the claim is one
+        conditional upsert, applied only once the host's next allowed time has
+        passed, so of several workers exactly one gets each slot.
+        """
+
+        moment = time.time() if now is None else now
+        key = host.strip().lower().rstrip(".")[:255]
+        with self.backend.transaction():
+            took = self.backend.execute(
+                "INSERT INTO intel_host_slots(host, next_allowed_at) VALUES (?, ?) ON CONFLICT (host) DO UPDATE SET next_allowed_at = excluded.next_allowed_at WHERE intel_host_slots.next_allowed_at <= ?",
+                (key, moment + float(interval), moment),
+            )
+            row = None if took else self.backend.fetchone("SELECT next_allowed_at FROM intel_host_slots WHERE host = ?", (key,))
+        if took:
+            return 0.0
+        return max(0.0, float(row["next_allowed_at"]) - moment) if row else float(interval)
 
     def spend(self, *, day: str) -> dict[str, dict[str, float]]:
         with self.backend.transaction():

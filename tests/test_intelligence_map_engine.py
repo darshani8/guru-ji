@@ -70,7 +70,7 @@ class Site:
         return httpx.Response(status, headers=headers, text=body, request=request)
 
     def fetcher(self) -> PublicPageFetcher:
-        return PublicPageFetcher(transport=httpx.MockTransport(self.handler), resolver=lambda host: (PUBLIC_IP,))
+        return PublicPageFetcher(transport=httpx.MockTransport(self.handler), resolver=lambda host: (PUBLIC_IP,), min_host_interval=0)
 
 
 PROFILE = InstitutionProfile("bgscet", "BGS College of Engineering and Technology", "Bengaluru", aliases=["BGSCET"], official_domains=["bgscet.ac.in"])

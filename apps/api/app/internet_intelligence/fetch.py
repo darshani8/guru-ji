@@ -11,11 +11,13 @@ reserved or multicast address space.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import ipaddress
 import re
 import socket
 import time
-from collections.abc import Callable, Sequence
+import weakref
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from urllib import robotparser
@@ -42,7 +44,7 @@ _CONTENT_FAMILIES = {
 _LOGIN_PATH = re.compile(r"/(?:accounts/)?log[-_]?in\b|/authwall|/signin\b|/checkpoint\b", re.IGNORECASE)
 
 
-DEFAULT_SNIPPET_ONLY_DOMAINS = ("facebook.com", "instagram.com", "twitter.com", "x.com", "linkedin.com", "youtube.com", "threads.net", "reddit.com", "quora.com", "justdial.com", "glassdoor.com")
+DEFAULT_SNIPPET_ONLY_DOMAINS = ("facebook.com", "instagram.com", "twitter.com", "x.com", "linkedin.com", "youtube.com", "threads.net", "reddit.com", "redd.it", "quora.com", "justdial.com", "glassdoor.com")
 # Sites whose pages are never fetched under any country domain (glassdoor.co.in,
 # justdial.co.in ...): search snippets about them are all the platform uses.
 NEVER_FETCHED_SITES = ("glassdoor", "justdial", "quora", "reddit")
@@ -56,8 +58,38 @@ _TIME_TAG = re.compile(r"<time[^>]+datetime=[\"']([^\"']+)[\"']", re.IGNORECASE)
 # overlays) and deprecated site-local IPv6.
 _NON_PUBLIC_NETWORKS = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fec0::/10"))
 _NAT64 = ipaddress.ip_network("64:ff9b::/96")
+# One request at a time per host, at least this far apart; a site's robots.txt
+# Crawl-delay stretches the gap, but never past a minute.
+MIN_HOST_INTERVAL_SECONDS = 1.0
+MAX_CRAWL_DELAY_SECONDS = 60.0
+# getaddrinfo's answers for a name that does not exist or has no address; any
+# other resolver failure (a timeout, SERVFAIL) is an outage, not a lapsed name.
+_NO_SUCH_NAME = frozenset(code for code in (getattr(socket, "EAI_NONAME", None), getattr(socket, "EAI_NODATA", None), getattr(socket, "EAI_ADDRFAMILY", None)) if code is not None)
 
 HostResolver = Callable[[str], Sequence[str]]
+# (host, seconds between requests) -> seconds to wait before trying to claim the host again; 0 means claimed.
+HostSlots = Callable[[str, float], float]
+
+
+class _Unfetchable(ValueError):
+    """A host that cannot be fetched for a reason worth reporting (it does not resolve)."""
+
+    def __init__(self, outcome: str) -> None:
+        super().__init__(outcome)
+        self.outcome = outcome
+
+
+def _refused(error: BaseException) -> bool:
+    """Whether a connection failure was the host refusing it (nothing listens there any more)."""
+
+    seen: BaseException | None = error
+    for _ in range(6):
+        if seen is None:
+            return False
+        if isinstance(seen, ConnectionRefusedError):
+            return True
+        seen = seen.__cause__ or seen.__context__
+    return False
 
 
 def _never_fetched(domain: str) -> bool:
@@ -89,12 +121,20 @@ def crawler_user_agent(contact: str | None) -> str:
 
 
 def resolve_host(hostname: str) -> tuple[str, ...]:
-    """Resolve a hostname to its addresses with the system resolver (blocking)."""
+    """Resolve a hostname to its addresses with the system resolver (blocking).
+
+    A name that does not exist or has no address gives no addresses; any
+    other resolver failure raises, so a DNS outage never reads as a lapsed name.
+    """
 
     try:
         infos = socket.getaddrinfo(hostname, None, proto=socket.IPPROTO_TCP)
-    except (OSError, UnicodeError):
+    except UnicodeError:
         return ()
+    except socket.gaierror as exc:
+        if exc.errno in _NO_SUCH_NAME:
+            return ()
+        raise
     return tuple(dict.fromkeys(str(info[4][0]) for info in infos))
 
 
@@ -162,7 +202,12 @@ class PublicPageFetcher:
     robots_ttl_seconds: float = ROBOTS_TTL_SECONDS
     robots_failure_ttl_seconds: float = ROBOTS_FAILURE_TTL_SECONDS
     clock: Callable[[], float] = field(default=time.monotonic, repr=False)
+    min_host_interval: float = MIN_HOST_INTERVAL_SECONDS
+    sleep: Callable[[float], Awaitable[None]] = field(default=asyncio.sleep, repr=False)
+    host_slots: HostSlots | None = field(default=None, repr=False)  # spaces requests across processes too (the map store's shared table)
     _robots_cache: dict[str, tuple[float, robotparser.RobotFileParser | None]] = field(default_factory=dict, repr=False)
+    _host_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = field(default_factory=weakref.WeakKeyDictionary, repr=False)
+    _host_last: dict[str, float] = field(default_factory=dict, repr=False)
 
     def allowed_domain(self, url: str) -> bool:
         domain = domain_of(url)
@@ -170,8 +215,53 @@ class PublicPageFetcher:
             return False
         return not _never_fetched(domain)
 
+    def sitemaps(self, url: str) -> tuple[str, ...]:
+        """The sitemaps the robots.txt already read for ``url``'s origin declares (none before it is read)."""
+
+        parsed = urlparse(url)
+        cached = self._robots_cache.get(f"{parsed.scheme}://{parsed.netloc}")
+        return tuple((cached[1].site_maps() or [])[:5]) if cached is not None and cached[1] is not None else ()
+
+    @contextlib.asynccontextmanager
+    async def _turn(self, url: str) -> AsyncIterator[None]:
+        """Hold ``url``'s host for one request, after waiting out the gap since the last one.
+
+        The gap is the larger of ``min_host_interval`` and the site's own
+        Crawl-delay (at most a minute), counted from when the last request
+        finished. The host's lock is held through the request, so this process
+        never has two requests in flight to one host; ``host_slots`` extends
+        the spacing to every process that shares it.
+        """
+
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        # A lock is bound to the loop it first waited in, and a fetcher outlives each job's asyncio.run().
+        lock = self._host_locks.setdefault(asyncio.get_running_loop(), {}).setdefault(host, asyncio.Lock())
+        async with lock:
+            cached = self._robots_cache.get(f"{parsed.scheme}://{parsed.netloc}")
+            delay = (cached[1].crawl_delay(self.user_agent) if cached is not None and cached[1] is not None else None) or 0
+            interval = max(self.min_host_interval, min(float(delay), MAX_CRAWL_DELAY_SECONDS))
+            wait = self._host_last.get(host, float("-inf")) + interval - self.clock()
+            if wait > 0:
+                await self.sleep(wait)
+            waited = 0.0
+            # Another process holds the host: try again when its slot ends, for a bounded time
+            # (past that the request goes ahead rather than starve behind a busy worker).
+            while self.host_slots is not None and interval > 0 and waited < MAX_CRAWL_DELAY_SECONDS + interval and (wait := float(self.host_slots(host, interval))) > 0:
+                wait = min(max(wait, 0.05), MAX_CRAWL_DELAY_SECONDS)
+                await self.sleep(wait)
+                waited += wait
+            try:
+                yield
+            finally:
+                self._host_last[host] = self.clock()
+
     async def _public_address(self, hostname: str | None) -> str | None:
-        """The address to connect to, or None unless every address the host resolves to is public."""
+        """The address to connect to, or None unless every address the host resolves to is public.
+
+        A name that no longer resolves raises ``_Unfetchable("unresolved")``:
+        that is how a lapsed domain dies, and it must not read as a private one.
+        """
 
         host = (hostname or "").strip().lower().rstrip(".")
         if not host or host == "localhost" or host.endswith(".localhost"):
@@ -180,9 +270,13 @@ class PublicPageFetcher:
             # Resolution is bounded like the connection used to be, so a black-holed
             # nameserver cannot stall an investigation for its full retry schedule.
             addresses = tuple(await asyncio.wait_for(asyncio.get_running_loop().run_in_executor(None, self.resolver, host), timeout=self.timeout_seconds))
-        except Exception:  # noqa: BLE001 - unresolvable, refused or slow hosts are not fetched
-            return None
-        if not addresses or not all(is_public_address(str(address)) for address in addresses):
+        except TimeoutError:
+            raise _Unfetchable("timeout") from None
+        except Exception:  # noqa: BLE001 - a failing resolver (SERVFAIL, refused) is an outage, not a verdict on the name
+            raise _Unfetchable("error") from None
+        if not addresses:
+            raise _Unfetchable("unresolved")
+        if not all(is_public_address(str(address)) for address in addresses):
             return None
         return str(addresses[0])
 
@@ -230,7 +324,7 @@ class PublicPageFetcher:
                 target = self._pin(current, address) if hop == 0 else await self._vet(current, check_domain=False)
                 if target is None:
                     return None
-                async with client.stream("GET", target.pinned_url, headers=target.headers, extensions=target.extensions) as response:
+                async with self._turn(target.url), client.stream("GET", target.pinned_url, headers=target.headers, extensions=target.extensions) as response:
                     if response.status_code in _REDIRECT_STATUSES:
                         location = response.headers.get("location")
                         if not location:
@@ -245,6 +339,10 @@ class PublicPageFetcher:
                         parser.parse([])  # no robots file: nothing is restricted
                         return parser
                     return None  # server errors: disallow until the site answers plainly
+        except httpx.ConnectError as exc:
+            if hop == 0 and _refused(exc):
+                raise  # the site's own host refused: the page would be too, and ``retrieve`` says so
+            return None
         except (httpx.HTTPError, WebPayloadTooLarge, ValueError):
             return None
         return None  # still redirecting after max_redirects hops
@@ -298,7 +396,7 @@ class PublicPageFetcher:
                         headers["If-None-Match"] = etag
                     if last_modified:
                         headers["If-Modified-Since"] = last_modified
-                    async with client.stream("GET", target.pinned_url, headers=headers, extensions=target.extensions) as response:
+                    async with self._turn(target.url), client.stream("GET", target.pinned_url, headers=headers, extensions=target.extensions) as response:
                         if response.status_code in _REDIRECT_STATUSES:
                             location = response.headers.get("location")
                             if not location:
@@ -325,6 +423,10 @@ class PublicPageFetcher:
             return Retrieval(url=current, outcome="too_large")
         except httpx.TimeoutException:
             return Retrieval(url=current, outcome="timeout")
+        except _Unfetchable as exc:
+            return Retrieval(url=current, outcome=exc.outcome)
+        except httpx.ConnectError as exc:
+            return Retrieval(url=current, outcome="unreachable" if _refused(exc) else "error")
         except (httpx.HTTPError, ValueError):
             return Retrieval(url=current, outcome="error")
         if current != url:
@@ -387,7 +489,7 @@ class Retrieval:
     """What happened when a URL was fetched; ``body`` is set only when ``outcome`` is ok."""
 
     url: str
-    outcome: str  # ok | not_modified | robots | blocked | login_wall | not_found | gone | server_error | timeout | content_type | too_large | not_public | snippet_only | redirect_loop | error
+    outcome: str  # ok | not_modified | robots | blocked | login_wall | not_found | gone | server_error | timeout | content_type | too_large | not_public | unresolved | unreachable | snippet_only | redirect_loop | error
     http_status: int | None = None
     content_type: str = ""
     body: bytes = b""
@@ -404,4 +506,4 @@ class Retrieval:
         return self.body.decode("utf-8", errors="replace")
 
 
-__all__ = ["HTML_TYPES", "NEVER_FETCHED_SITES", "Retrieval", "published_from_html", "DEFAULT_SNIPPET_ONLY_DOMAINS", "MAX_REDIRECTS", "ROBOTS_FAILURE_TTL_SECONDS", "ROBOTS_MAX_BYTES", "ROBOTS_TTL_SECONDS", "FetchedPage", "PublicPageFetcher", "USER_AGENT", "crawler_user_agent", "is_public_address", "resolve_host"]
+__all__ = ["HTML_TYPES", "MAX_CRAWL_DELAY_SECONDS", "MIN_HOST_INTERVAL_SECONDS", "NEVER_FETCHED_SITES", "Retrieval", "published_from_html", "DEFAULT_SNIPPET_ONLY_DOMAINS", "MAX_REDIRECTS", "ROBOTS_FAILURE_TTL_SECONDS", "ROBOTS_MAX_BYTES", "ROBOTS_TTL_SECONDS", "FetchedPage", "PublicPageFetcher", "USER_AGENT", "crawler_user_agent", "is_public_address", "resolve_host"]

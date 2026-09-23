@@ -233,14 +233,16 @@ def _status(ordered: Sequence[Mapping[str, Any]], now: datetime) -> str | None:
     reason = _detail(last).split(":", 1)[0]
     if reason in {"blocked", "login_wall", "robots", "snippet_only"}:
         return "blocked"
-    if reason in {"not_found", "gone"}:
+    # A name that stopped resolving, or a host that refuses every connection,
+    # is as dead as a page that is gone.
+    if reason in {"not_found", "gone", "unresolved", "unreachable"}:
         # Dead only when a second failure came at least a day after the first
         # in the same unbroken run of failures.
         failures: list[Mapping[str, Any]] = []
         for item in reversed(liveness):
             if item.get("polarity") == "supports":
                 break
-            if _detail(item).split(":", 1)[0] in {"not_found", "gone"}:
+            if _detail(item).split(":", 1)[0] in {"not_found", "gone", "unresolved", "unreachable"}:
                 failures.append(item)
         if len(failures) >= 2 and _when(failures[0].get("observed_at")) - _when(failures[-1].get("observed_at")) >= DEAD_CONFIRMATION:
             return "dead"

@@ -174,7 +174,7 @@ class FetcherTests(unittest.IsolatedAsyncioTestCase):
             self.raw_requests.append(request)
             return handler(request)
 
-        return PublicPageFetcher(transport=httpx.MockTransport(spy), resolver=fake_resolver, **kwargs)
+        return PublicPageFetcher(transport=httpx.MockTransport(spy), resolver=fake_resolver, **{"min_host_interval": 0, **kwargs})
 
     async def test_connections_are_pinned_to_the_vetted_address(self):
         fetcher = self.fetcher(lambda request: httpx.Response(200, headers={"content-type": "text/html"}, text=PAGE, request=request))
@@ -206,7 +206,7 @@ class FetcherTests(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(404, request=request)
             return httpx.Response(200, headers={"content-type": "text/html"}, text=PAGE, request=request)
 
-        fetcher = PublicPageFetcher(transport=httpx.MockTransport(handler), resolver=rebinding_resolver)
+        fetcher = PublicPageFetcher(transport=httpx.MockTransport(handler), resolver=rebinding_resolver, min_host_interval=0)
         self.assertIsNotNone(await fetcher.fetch("http://rebind.example.com/page"))
         self.assertEqual(seen, [PUBLIC_IP, PUBLIC_IP], "robots and page both used the single vetted address")
         self.assertEqual(lookups, ["rebind.example.com"], "one lookup per hop covers robots.txt and the page")
@@ -357,7 +357,7 @@ class FetcherTests(unittest.IsolatedAsyncioTestCase):
                     return httpx.Response(200, stream=Body(), request=request)
                 raise AssertionError("the page must not be fetched when robots.txt is oversize")
 
-        streamed = PublicPageFetcher(transport=Streaming(), resolver=fake_resolver)
+        streamed = PublicPageFetcher(transport=Streaming(), resolver=fake_resolver, min_host_interval=0)
         self.assertIsNone(await streamed.fetch("https://news.example.com/x"))
 
 
@@ -412,7 +412,7 @@ class IntelligenceServiceTests(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(302, headers={"location": "https://evil.example.org/page"}, request=request)
             return httpx.Response(200, headers={"content-type": "text/html"}, text="<html><head><title>ABC College Bengaluru scandal</title></head><body><p>ABC College Bengaluru: principal arrested, the college is closed.</p></body></html>", request=request)
 
-        fetcher = PublicPageFetcher(transport=httpx.MockTransport(handler), resolver=lambda host: (PUBLIC_IP,))
+        fetcher = PublicPageFetcher(transport=httpx.MockTransport(handler), resolver=lambda host: (PUBLIC_IP,), min_host_interval=0)
         hits = hits_from_fixture([{"url": f"https://{official}/go?to=x", "title": "ABC College Bengaluru", "snippet": "ABC College Bengaluru notice.", "published_at": (NOW - timedelta(days=1)).isoformat()}])
         service = InternetIntelligenceService(self.store, StaticSearchProvider(hits), fetcher=fetcher)
         report = await service.investigate(self.pri, "college_a", window_days=7)
@@ -703,7 +703,7 @@ class RobotsCacheAndIdentityTests(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(robots_status[0], text="User-agent: *\nAllow: /\n", request=request)
             return httpx.Response(200, headers={"content-type": "text/html"}, text=PAGE, request=request)
 
-        fetcher = PublicPageFetcher(transport=httpx.MockTransport(handler), resolver=fake_resolver, clock=lambda: clock[0])
+        fetcher = PublicPageFetcher(transport=httpx.MockTransport(handler), resolver=fake_resolver, clock=lambda: clock[0], min_host_interval=0)
         self.assertIsNone(await fetcher.fetch("https://news.example.com/x"), "a failing robots.txt disallows the site")
         robots_status[0] = 200
         self.assertIsNone(await fetcher.fetch("https://news.example.com/x"), "the failure is remembered briefly")
@@ -733,7 +733,7 @@ class RobotsCacheAndIdentityTests(unittest.IsolatedAsyncioTestCase):
                 return httpx.Response(404, request=request)
             return httpx.Response(200, headers={"content-type": "text/html"}, text=PAGE, request=request)
 
-        fetcher = PublicPageFetcher(transport=httpx.MockTransport(handler), resolver=fake_resolver, user_agent=crawler_user_agent("webmaster@bgscet.ac.in"))
+        fetcher = PublicPageFetcher(transport=httpx.MockTransport(handler), resolver=fake_resolver, user_agent=crawler_user_agent("webmaster@bgscet.ac.in"), min_host_interval=0)
         await fetcher.fetch("https://news.example.com/x")
         self.assertTrue(agents and all("mailto:webmaster@bgscet.ac.in" in agent for agent in agents))
 

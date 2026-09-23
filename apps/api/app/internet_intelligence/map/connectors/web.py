@@ -2,21 +2,39 @@
 
 from __future__ import annotations
 
+import hashlib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
 from ...entity_resolution import HIGH, MEDIUM, resolve_entity
+from ...fetch import Retrieval
 from ...profile import InstitutionProfile
 from ..assets import DOMAIN, asset_ref
 from ..harvest import OfficialSiteHarvester
-from ..integrity import CLEAN, assess
+from ..integrity import CLEAN, HIJACKED, PARKED, IntegrityReport, assess
 from ..pipeline import regrade
 from ..structure import IDENTITY_POSITIONS, parse_structure
 from .base import ConnectorContext, ConnectorResult, Lead
 
-_FAILURES = frozenset({"robots", "blocked", "login_wall", "not_found", "gone", "server_error", "timeout", "content_type", "too_large", "not_public", "redirect_loop", "error"})
+_FAILURES = frozenset({"robots", "blocked", "login_wall", "not_found", "gone", "server_error", "timeout", "content_type", "too_large", "not_public", "unresolved", "unreachable", "redirect_loop", "error"})
+
+
+def record_health(context: ConnectorContext, asset_id: str, report: IntegrityReport, page_url: str, host: str, raw_sha256: str | None, incidents: list[dict[str, Any]]) -> None:
+    """Integrity evidence for a page that answered, as the harvester writes it; an unhealthy page is also an incident.
+
+    A page that answers 200 is not necessarily still the page: a lapsed
+    domain serves a parked lander, a hijacked one a casino.
+    """
+
+    clean = report.status == CLEAN
+    context.store.add_evidence(
+        context.institution_id, asset_id=asset_id, kind="integrity", polarity="supports" if clean else "refutes", detail=f"{report.status}:{';'.join(report.signals)}"[:500],
+        source_url=page_url, channel=f"site:{host}", observed_via="live", run_id=context.run_id, raw_sha256=raw_sha256,
+    )
+    if not clean:
+        incidents.append({"kind": f"site_{report.status}", "target": host, "page": page_url, "signals": report.signals, "examples": report.spam_links[:5]})
 
 
 @dataclass(slots=True)
@@ -109,13 +127,16 @@ class LeadPageConnector:
             return ConnectorResult(outcome="invalid", prune=True)
         retrieval = await context.fetcher.retrieve(host_ref.url)
         if not retrieval.ok:
-            return ConnectorResult(outcome=retrieval.outcome, failed=retrieval.outcome in _FAILURES, prune=retrieval.outcome in {"not_found", "gone", "robots", "not_public"})
+            return ConnectorResult(outcome=retrieval.outcome, failed=retrieval.outcome in _FAILURES, prune=retrieval.outcome in {"not_found", "gone", "robots", "not_public", "unresolved", "snippet_only"})
         structure = parse_structure(retrieval.text, retrieval.url)
-        if assess(structure, retrieval.text).status != CLEAN:
-            return ConnectorResult(outcome="unhealthy", prune=True)
+        report = assess(structure, retrieval.text)
+        # The official parent first: an unhealthy subdomain of the institution's
+        # own domain is a finding (its DNS was pointed at a casino), not a dud lead.
         parent = self._official_parent(context, host_ref.key.removeprefix("web:"))
         if parent is not None and (urlparse(retrieval.url).hostname or "").lower().removeprefix("www.") == host_ref.key.removeprefix("web:"):
-            return self._subdomain(context, host_ref, parent, retrieval.url, target)
+            return self._subdomain(context, host_ref, parent, retrieval, report)
+        if report.status != CLEAN:
+            return ConnectorResult(outcome="unhealthy", prune=True)
         ours, lookalikes = entity_profiles(context)
         best_entity, best_score = None, 0.0
         for entity, profile in ours:
@@ -163,14 +184,24 @@ class LeadPageConnector:
                     best = domain
         return best
 
-    def _subdomain(self, context: ConnectorContext, host_ref: Any, parent: dict[str, Any], final_url: str, target: str) -> ConnectorResult:
+    def _subdomain(self, context: ConnectorContext, host_ref: Any, parent: dict[str, Any], retrieval: Retrieval, report: IntegrityReport) -> ConnectorResult:
+        """Record a live subdomain of an official domain, healthy or not.
+
+        An unhealthy one is kept (not pruned) with refuting integrity evidence
+        and an incident: the grader sets a parked or hijacked one to D, and
+        the source, promoted to a watch, sees it again once it is cleaned up.
+        """
+
         if context.store.is_suppressed(context.institution_id, host_ref.key):
             return ConnectorResult(outcome="suppressed", prune=True)
+        final_url, digest = retrieval.url, hashlib.sha256(retrieval.body).hexdigest()
         asset_id, created = context.store.upsert_asset(context.institution_id, host_ref, entity_id=parent["entity_id"], relation="official", note=f"subdomain of {parent['handle']}")
         context.store.add_evidence(context.institution_id, asset_id=asset_id, kind="subdomain", detail=f"{parent['grade']}:{parent['handle']}", source_url=final_url, source_asset_id=parent["asset_id"], channel="dns", observed_via="live", run_id=context.run_id)
-        context.store.add_evidence(context.institution_id, asset_id=asset_id, kind="liveness", detail="ok:200", source_url=final_url, channel="fetch", observed_via="live", run_id=context.run_id)
+        context.store.add_evidence(context.institution_id, asset_id=asset_id, kind="liveness", detail="ok:200", source_url=final_url, channel="fetch", observed_via="live", run_id=context.run_id, raw_sha256=digest)
+        incidents: list[dict[str, Any]] = []
+        record_health(context, asset_id, report, final_url, host_ref.key.removeprefix("web:"), digest, incidents)
         regrade(context.store, context.institution_id, [asset_id])
-        return ConnectorResult(outcome="ok", touched={asset_id}, new_assets=[host_ref.key] if created else [], yield_count=int(created))
+        return ConnectorResult(outcome="ok" if report.status == CLEAN else "unhealthy", touched={asset_id}, new_assets=[host_ref.key] if created else [], yield_count=int(created), incidents=incidents)
 
 
 @dataclass(slots=True)
@@ -200,13 +231,24 @@ class RecheckConnector:
         state = context.store.fetch_state(context.institution_id, asset["url"])
         retrieval = await context.fetcher.retrieve(asset["url"], etag=(state or {}).get("etag"), last_modified=(state or {}).get("last_modified"))
         keep = retrieval.outcome in {"ok", "not_modified"}
-        context.store.record_fetch(context.institution_id, asset["url"], outcome=retrieval.outcome, etag=retrieval.etag if keep else None, last_modified=retrieval.last_modified if keep else None, content_sha256=None)
-        if retrieval.outcome in {"ok", "not_modified"}:
-            context.store.add_evidence(context.institution_id, asset_id=asset["asset_id"], kind="liveness", detail=f"{retrieval.outcome}:{retrieval.http_status}", source_url=retrieval.url, channel="fetch", observed_via="live", run_id=context.run_id)
-        elif retrieval.outcome in _FAILURES:
-            context.store.add_evidence(context.institution_id, asset_id=asset["asset_id"], kind="liveness", polarity="refutes", detail=f"{retrieval.outcome}:{retrieval.http_status}", source_url=retrieval.url, channel="fetch", observed_via="live", run_id=context.run_id)
+        digest = hashlib.sha256(retrieval.body).hexdigest() if retrieval.ok else None
+        context.store.record_fetch(context.institution_id, asset["url"], outcome=retrieval.outcome, etag=retrieval.etag if keep else None, last_modified=retrieval.last_modified if keep else None, content_sha256=digest)
+        outcome = retrieval.outcome
+        incidents: list[dict[str, Any]] = []
+        if retrieval.ok:
+            # A 200 is not the page: a lapsed domain answers with a parked lander, a hijacked one with a casino.
+            report = assess(parse_structure(retrieval.text, retrieval.url), retrieval.text)
+            host = (urlparse(retrieval.url).hostname or "").lower().removeprefix("www.")
+            # Someone else's page going bad changes its grade; only the institution's own is an incident.
+            record_health(context, asset["asset_id"], report, retrieval.url, host, digest, incidents if asset["relation"] == "official" else [])
+            if report.status in {PARKED, HIJACKED}:
+                outcome = report.status
+        if outcome in {"ok", "not_modified"}:
+            context.store.add_evidence(context.institution_id, asset_id=asset["asset_id"], kind="liveness", detail=f"{retrieval.outcome}:{retrieval.http_status}", source_url=retrieval.url, channel="fetch", observed_via="live", run_id=context.run_id, raw_sha256=digest)
+        elif outcome in _FAILURES or outcome in {PARKED, HIJACKED}:
+            context.store.add_evidence(context.institution_id, asset_id=asset["asset_id"], kind="liveness", polarity="refutes", detail=f"{outcome}:{retrieval.http_status}", source_url=retrieval.url, channel="fetch", observed_via="live", run_id=context.run_id, raw_sha256=digest)
         changes = regrade(context.store, context.institution_id, [asset["asset_id"]])
-        return ConnectorResult(outcome=retrieval.outcome, failed=retrieval.outcome in _FAILURES, touched={asset["asset_id"]}, yield_count=0, notes=[f"{change['from']}->{change['to']}" for change in changes])
+        return ConnectorResult(outcome=outcome, failed=outcome in _FAILURES or outcome in {PARKED, HIJACKED}, touched={asset["asset_id"]}, yield_count=0, incidents=incidents, notes=[f"{change['from']}->{change['to']}" for change in changes])
 
 
 __all__ = ["LeadPageConnector", "OfficialSiteConnector", "RecheckConnector", "entity_profiles"]
