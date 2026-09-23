@@ -111,5 +111,41 @@ class PlanTests(Base):
         self.assertEqual([lead.target for lead in leads if lead.work_class == "explore"], [f"{self.entity_id}|{OPEN_WEB}"])
 
 
+
+class CloseCallTests(Base):
+    PAGE = """<html><head><title>BGS College of Engineering and Technology and BGS Institute of Technology</title></head>
+<body><p>BGS College of Engineering and Technology, Bengaluru, and BGS Institute of Technology, Bengaluru.</p>
+<footer><a href="https://www.instagram.com/bgs_joint_fest/">Instagram</a></footer></body></html>"""
+
+    def setUp(self):
+        super().setUp()
+        self.store.upsert_entity(INSTITUTION, name="BGS Institute of Technology", kind="lookalike", locations=["Bengaluru"])
+
+    async def test_a_page_naming_ours_and_a_look_alike_goes_to_a_person_not_the_bin(self):
+        from app.internet_intelligence.map.connectors.web import LeadPageConnector
+        from test_intelligence_map_engine import Site
+
+        fetcher = Site({"https://joint-fest.example/": (200, self.PAGE)}).fetcher()
+        context = ConnectorContext(self.store, INSTITUTION, "run-1", NOW, fetcher=fetcher)
+        result = await LeadPageConnector().run({"target": "https://joint-fest.example/", "hops": 1}, context)
+        self.assertEqual((result.outcome, result.prune), ("close_call", False), "the source waits for the decision")
+        [item] = result.review
+        self.assertEqual(item["kind"], "candidate_account")
+        self.assertIn("BGS Institute of Technology", item["title"])
+        self.assertIsNone(self.store.find_asset(INSTITUTION, "instagram:bgs_joint_fest"), "nothing it links is taken before a person decides")
+        # A reviewer says the site is ours: from then on it is read as ours.
+        site = self.store.find_asset(INSTITUTION, "web:joint-fest.example")
+        self.store.add_evidence(INSTITUTION, asset_id=site["asset_id"], kind="reviewer_confirm", channel="reviewer:p", observed_via="reviewer")
+        confirmed = await LeadPageConnector().run({"target": "https://joint-fest.example/", "hops": 1}, context)
+        self.assertEqual(confirmed.outcome, "ok")
+        self.assertIsNotNone(self.store.find_asset(INSTITUTION, "instagram:bgs_joint_fest"))
+
+    async def test_an_account_that_names_both_is_asked_about(self):
+        hit = SearchHit(url="https://www.instagram.com/bgscet/", title="BGSCET (@bgscet) • Instagram", snippet="BGS College of Engineering and Technology and BGS Institute of Technology, Bengaluru")
+        result = await SearchConnector(active=True).run({"target": f"{self.entity_id}|instagram.com", "runs": 0}, self.context(Recording((hit,))))
+        self.assertEqual([item["kind"] for item in result.review], ["candidate_account"])
+        self.assertEqual(self.store.find_asset(INSTITUTION, "instagram:bgscet")["grade"], "unrated", "no evidence until a person decides")
+
+
 if __name__ == "__main__":
     unittest.main()

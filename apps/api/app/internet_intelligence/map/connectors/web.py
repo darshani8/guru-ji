@@ -147,11 +147,21 @@ class LeadPageConnector:
             match = resolve_entity(profile, url=retrieval.url, title=structure.title, text=structure.text)
             if match.level in {HIGH, MEDIUM} and match.score > best_score:
                 best_entity, best_score = entity, match.score
-        rival = max((resolve_entity(profile, url=retrieval.url, title=structure.title, text=structure.text).score for _, profile in lookalikes), default=0.0)
-        if best_entity is None or best_score < rival + self.margin:
+        rivals = [(entity, resolve_entity(profile, url=retrieval.url, title=structure.title, text=structure.text).score) for entity, profile in lookalikes]
+        rival_entity, rival = max(rivals, key=lambda pair: pair[1], default=(None, 0.0))
+        if best_entity is None:
             return ConnectorResult(outcome="no_entity_match", prune=True)
         if context.store.is_suppressed(context.institution_id, host_ref.key):
             return ConnectorResult(outcome="suppressed", prune=True)
+        if best_score < rival + self.margin and not _reviewer_confirmed(context, known):
+            # A close call goes to a person, not the bin: the source waits (its
+            # interval grows) and, once a reviewer says the site is ours, it is read as ours.
+            asset_id, _ = context.store.upsert_asset(context.institution_id, host_ref, entity_id=best_entity["entity_id"], relation="unknown", note="a close call between one of ours and a look-alike")
+            return ConnectorResult(outcome="close_call", review=[{
+                "kind": "candidate_account", "asset_id": asset_id, "entity_id": best_entity["entity_id"], "url": host_ref.url,
+                "title": f"Close call: {host_ref.handle} names {best_entity['name'][:80]} about as strongly as the look-alike {str((rival_entity or {}).get('name') or '')[:80]}",
+                "detail": f"{best_entity['name'][:80]} {best_score:.2f} against {str((rival_entity or {}).get('name') or 'a look-alike')[:80]} {rival:.2f}; confirm the site if it is ours, mark it a look-alike if not.",
+            }])
         asset_id, created = context.store.upsert_asset(context.institution_id, host_ref, entity_id=best_entity["entity_id"], relation="unknown", note="found through a link on a mapped site")
         context.store.add_evidence(context.institution_id, asset_id=asset_id, kind="backlink", detail=f"matches {best_entity['name'][:80]} ({best_score:.2f})", source_url=target, channel="lead", observed_via="live", run_id=context.run_id)
         result = ConnectorResult(outcome="ok", touched={asset_id}, new_assets=[host_ref.key] if created else [], yield_count=int(created))
@@ -206,6 +216,17 @@ class LeadPageConnector:
         record_health(context, asset_id, report, final_url, host_ref.key.removeprefix("web:"), digest, incidents)
         regrade(context.store, context.institution_id, [asset_id])
         return ConnectorResult(outcome="ok" if report.status == CLEAN else "unhealthy", touched={asset_id}, new_assets=[host_ref.key] if created else [], yield_count=int(created), incidents=incidents)
+
+
+def _reviewer_confirmed(context: ConnectorContext, asset: Mapping[str, Any] | None) -> bool:
+    """Whether a reviewer (or the owner) confirmed this asset after any rejection of it."""
+
+    if asset is None:
+        return False
+    rows = context.store.evidence_for(context.institution_id, [asset["asset_id"]])[asset["asset_id"]]
+    confirmed = max((str(row["observed_at"]) for row in rows if row["polarity"] == "supports" and row["kind"] in {"reviewer_confirm", "owner_claim"}), default="")
+    refuted = max((str(row["observed_at"]) for row in rows if row["polarity"] == "refutes" and row["kind"] in {"reviewer_reject", "lookalike", "impersonation"}), default="")
+    return bool(confirmed) and confirmed > refuted
 
 
 @dataclass(slots=True)

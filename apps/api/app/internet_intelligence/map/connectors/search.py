@@ -137,7 +137,17 @@ class SearchConnector:
                 continue
             if ref.kind not in {ACCOUNT, GROUP} or context.store.is_suppressed(context.institution_id, ref.key):
                 continue
-            found = match_entity(context, url=hit.url, title=hit.title, text=hit.snippet)
+            close: list[Any] = []
+            found = match_entity(context, url=hit.url, title=hit.title, text=hit.snippet, close=close)
+            if found is None and close and names_entity(close[0].entity, handle=ref.handle, title=hit.title) and not person_shaped(ref.key):
+                # An account that names one of ours about as strongly as a look-alike: a person decides.
+                asset_id, _ = context.store.upsert_asset(context.institution_id, ref, entity_id=close[0].entity["entity_id"], relation="unknown", note="a close call between one of ours and a look-alike")
+                result.review.append({
+                    "kind": "candidate_account", "asset_id": asset_id, "entity_id": close[0].entity["entity_id"], "url": ref.url,
+                    "title": f"Close call: {ref.handle} names {close[0].entity['name'][:80]} about as strongly as a look-alike",
+                    "detail": f"{close[0].score:.2f} against a look-alike's {close[0].rival:.2f}; confirm it if it is ours, mark it a look-alike if not.",
+                })
+                continue
             if found is None or not names_entity(found.entity, handle=ref.handle, title=hit.title):
                 continue
             if person_shaped(ref.key) and not names_entity(found.entity, handle=ref.handle, title=""):

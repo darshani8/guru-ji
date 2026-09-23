@@ -172,8 +172,13 @@ class EntityHit:
     rival: float
 
 
-def match_entity(context: ConnectorContext, *, url: str, title: str, text: str, margin: float = 0.2, entity_id: str | None = None) -> EntityHit | None:
-    """The mapped entity a page or result is about, if it names one clearly more strongly than any look-alike."""
+def match_entity(context: ConnectorContext, *, url: str, title: str, text: str, margin: float = 0.2, entity_id: str | None = None, close: list[EntityHit] | None = None) -> EntityHit | None:
+    """The mapped entity a page or result is about, if it names one clearly more strongly than any look-alike.
+
+    A close call (one of ours matched, but a look-alike within ``margin``)
+    returns None and, when ``close`` is given, is appended to it so the
+    caller can send it to a person instead of dropping it.
+    """
 
     best: tuple[dict[str, Any], float] | None = None
     rival = 0.0
@@ -186,7 +191,11 @@ def match_entity(context: ConnectorContext, *, url: str, title: str, text: str, 
             rival = max(rival, match.score)
         elif (entity_id is None or entity["entity_id"] == entity_id) and match.level in {HIGH, MEDIUM} and (best is None or match.score > best[1]):
             best = (entity, match.score)
-    if best is None or best[1] < rival + margin:
+    if best is None:
+        return None
+    if best[1] < rival + margin:
+        if close is not None:
+            close.append(EntityHit(best[0], best[1], rival))
         return None
     return EntityHit(best[0], best[1], rival)
 
