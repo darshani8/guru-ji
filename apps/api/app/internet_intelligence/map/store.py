@@ -604,7 +604,10 @@ class MapStoreScheduling:
 
         The fetcher's ``host_slots``. Like ``reserve_budget`` the claim is one
         conditional upsert, applied only once the host's next allowed time has
-        passed, so of several workers exactly one gets each slot.
+        passed, so of several workers exactly one gets each slot. The fetcher
+        asks for the gap plus its whole request deadline, so the claim is a
+        lease that holds the host while the request runs; ``release_host_slot``
+        hands it back when the request is over.
         """
 
         moment = time.time() if now is None else now
@@ -618,6 +621,19 @@ class MapStoreScheduling:
         if took:
             return 0.0
         return max(0.0, float(row["next_allowed_at"]) - moment) if row else float(interval)
+
+    def release_host_slot(self, host: str, interval: float, *, now: float | None = None) -> None:
+        """Hand back a host this process claimed, its request now over: the next may start ``interval`` from now.
+
+        The fetcher's ``host_release``, called when a request ends however it
+        ended. The claim's lease outlasts the request (the request is cut off
+        at the fetcher's deadline, the lease runs a gap past it), so the row
+        still holds this worker's lease and no one else's.
+        """
+
+        moment = time.time() if now is None else now
+        with self.backend.transaction():
+            self.backend.execute("UPDATE intel_host_slots SET next_allowed_at = ? WHERE host = ?", (moment + float(interval), host.strip().lower().rstrip(".")[:255]))
 
     def spend(self, *, day: str) -> dict[str, dict[str, float]]:
         with self.backend.transaction():

@@ -14,10 +14,13 @@ from uuid import uuid4
 
 import httpx
 
+from app.api.platform_runtime import build_platform
+from app.config.settings import AppSettings
 from app.internet_intelligence.fetch import MAX_CRAWL_DELAY_SECONDS, PublicPageFetcher, resolve_host
 from app.internet_intelligence.map import store as store_module
-from app.internet_intelligence.map.assets import asset_ref
+from app.internet_intelligence.map.assets import SOCIAL_PLATFORMS, asset_ref, platform_of
 from app.internet_intelligence.map.connectors.base import ConnectorContext, ConnectorRegistry
+from app.internet_intelligence.map.connectors.common import FAILED_OUTCOMES
 from app.internet_intelligence.map.connectors.hubs import DirectoryConnector
 from app.internet_intelligence.map.connectors.web import LeadPageConnector, OfficialSiteConnector, RecheckConnector
 from app.internet_intelligence.map.engine import EngineConfig, MapEngine
@@ -27,6 +30,10 @@ from app.internet_intelligence.map.integrity import assess
 from app.internet_intelligence.map.pipeline import regrade, sync_profile
 from app.internet_intelligence.map.store import GLOBAL_TABLES, TENANT_TABLES, MapStore
 from app.internet_intelligence.map.structure import HIDDEN, parse_sitemap, parse_structure
+from app.observability.tracing import TraceRecorder
+from app.persistence.database import InMemoryControlStore
+from app.policy.pdp import LocalPolicyDecisionPoint
+from app.storage.object_store import InMemoryObjectStore
 from test_intelligence_map_engine import CONTACT, HOME, NOW, PROFILE, PUBLIC_IP, Clock, Site
 
 POSTGRES_URL = os.environ.get("GURU_TEST_POSTGRES_URL", "")
@@ -141,8 +148,8 @@ class PolitenessTests(unittest.IsolatedAsyncioTestCase):
 
         fetcher = self.fetcher(robots="User-agent: *\n", host_slots=slots)
         self.assertTrue((await fetcher.retrieve("https://bgscet.ac.in/a")).ok)
-        self.assertEqual(calls, [("bgscet.ac.in", 1.0)] * 3, "robots.txt and the page each claim the host; the refused claim is retried")
-        self.assertIn(7.0, self.time.slept, "the other process's slot is waited out")
+        self.assertEqual(calls, [("bgscet.ac.in", 1.0 + fetcher.deadline)] * 3, "robots.txt and the page each lease the host for the gap and the whole request; the refused claim is retried")
+        self.assertEqual(self.time.slept[0], 1.0, "asked again a gap later: the other process may hand the host back before its lease runs out")
 
 
 class HostSlotStoreTests(unittest.TestCase):
@@ -154,6 +161,14 @@ class HostSlotStoreTests(unittest.TestCase):
         self.assertEqual(store.claim_host_slot("bgscet.ac.in", 30, now=130.0), 0.0)
         self.assertIn("intel_host_slots", GLOBAL_TABLES)
         self.assertNotIn("intel_host_slots", TENANT_TABLES)
+
+    def test_a_lease_holds_the_host_until_handed_back_a_gap_after_its_request(self):
+        store = MapStore(":memory:", suppression_key=b"k")
+        self.assertEqual(store.claim_host_slot("bgscet.ac.in", 25, now=100.0), 0.0)
+        self.assertEqual(store.claim_host_slot("bgscet.ac.in", 25, now=110.0), 15.0, "held while the request runs")
+        store.release_host_slot("BGSCET.ac.in.", 1, now=112.0)
+        self.assertEqual(store.claim_host_slot("bgscet.ac.in", 25, now=112.5), 0.5, "a gap after the request ended")
+        self.assertEqual(store.claim_host_slot("bgscet.ac.in", 25, now=113.0), 0.0)
 
 
 @unittest.skipUnless(POSTGRES_URL, "set GURU_TEST_POSTGRES_URL to run the PostgreSQL tests")
@@ -175,6 +190,184 @@ class PostgresHostSlotTests(unittest.TestCase):
         self.assertEqual(sorted(wait == 0.0 for wait in waits), [False, False, False, True])
         self.assertAlmostEqual(max(waits), 30.0, places=3)
         self.assertEqual(stores[0].claim_host_slot(host, 30, now=now + 30), 0.0)
+        stores[1].release_host_slot(host, 1, now=now + 31)
+        self.assertAlmostEqual(stores[2].claim_host_slot(host, 30, now=now + 31.5), 0.5, places=3, msg="handed back a gap after the request")
+        self.assertEqual(stores[3].claim_host_slot(host, 30, now=now + 32), 0.0)
+
+
+class HostLeaseTests(unittest.IsolatedAsyncioTestCase):
+    """Workers sharing the host table: a claim holds the host for its whole request, and nothing goes out unclaimed."""
+
+    def setUp(self):
+        self.time, self.store, self.inflight, self.peak, self.paths = FakeTime(), MapStore(":memory:", suppression_key=b"k"), 0, 0, []
+
+    def worker(self, **kwargs) -> PublicPageFetcher:
+        """One worker process's fetcher; every worker shares the store's table and the clock."""
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            self.paths.append(request.url.path)
+            self.inflight += 1
+            self.peak = max(self.peak, self.inflight)
+            try:
+                for _ in range(4):
+                    await self.time.sleep(0.5)  # a slow page, answered in steps the other worker can act between
+            finally:
+                self.inflight -= 1
+            if request.url.path == "/robots.txt":
+                return httpx.Response(404, request=request)
+            return httpx.Response(200, headers={"content-type": "text/html"}, text=CONTACT, request=request)
+
+        def claim(host: str, lease: float) -> float:
+            return self.store.claim_host_slot(host, lease, now=self.time())
+
+        return PublicPageFetcher(transport=httpx.MockTransport(handler), resolver=lambda host: (PUBLIC_IP,), clock=self.time, sleep=self.time.sleep, **{"host_slots": claim, **kwargs})
+
+    def release(self, host: str, gap: float) -> None:
+        self.store.release_host_slot(host, gap, now=self.time())
+
+    async def test_two_workers_never_have_two_requests_in_flight_to_one_site(self):
+        for handed_back in (True, False):
+            with self.subTest(handed_back=handed_back):
+                self.setUp()
+                kwargs = {"host_release": self.release} if handed_back else {}
+                results = await asyncio.gather(self.worker(**kwargs).retrieve("https://bgscet.ac.in/contact"), self.worker(**kwargs).retrieve("https://bgscet.ac.in/about"))
+                self.assertEqual([result.outcome for result in results], ["ok", "ok"])
+                self.assertEqual(self.peak, 1, "the host is held while a request runs, not only when it starts (a lease never handed back runs out)")
+                self.assertEqual(sorted(self.paths), ["/about", "/contact", "/robots.txt", "/robots.txt"])
+
+    async def test_a_site_another_worker_keeps_gets_no_request_and_the_retrieval_is_busy(self):
+        leases = []
+
+        def held(host: str, lease: float) -> float:
+            leases.append(lease)
+            return 30.0
+
+        fetcher = self.worker(host_slots=held, host_release=self.release)
+        result = await fetcher.retrieve("https://bgscet.ac.in/contact")
+        self.assertEqual((result.outcome, self.paths), ("busy", []), "not even robots.txt goes out without a claim")
+        self.assertLessEqual(sum(self.time.slept), MAX_CRAWL_DELAY_SECONDS + leases[0] + 1.0, "the wait is bounded")
+        self.assertIn("busy", FAILED_OUTCOMES, "its source backs off")
+        fetcher.host_slots = lambda host, lease: 0.0
+        self.assertEqual((await fetcher.retrieve("https://bgscet.ac.in/contact")).outcome, "ok", "a busy host is not remembered as a robots refusal")
+
+
+async def drip(seconds: float = 100.0):
+    """A body sent a byte at a time, each well inside any read timeout."""
+
+    for _ in range(int(seconds / 0.01)):
+        yield b" "
+        await asyncio.sleep(0.01)
+
+
+class DeadlineTests(unittest.IsolatedAsyncioTestCase):
+    """One request, from sending it to the last byte of its body, is over within the fetcher's deadline."""
+
+    def fetcher(self, robots, page) -> PublicPageFetcher:
+        self.paths, self.released = [], []
+
+        async def handler(request: httpx.Request) -> httpx.Response:
+            self.paths.append(request.url.path)
+            return await (robots if request.url.path == "/robots.txt" else page)(request)
+
+        return PublicPageFetcher(
+            transport=httpx.MockTransport(handler), resolver=lambda host: (PUBLIC_IP,), min_host_interval=0, deadline_seconds=0.2, host_slots=lambda host, lease: 0.0,
+            host_release=lambda host, gap: self.released.append(host),
+        )
+
+    @staticmethod
+    async def no_robots(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404, request=request)
+
+    @staticmethod
+    async def dripping(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, headers={"content-type": "text/html"}, content=drip(), request=request)
+
+    @staticmethod
+    async def stalled(request: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(100)
+        return httpx.Response(200, headers={"content-type": "text/html"}, text=CONTACT, request=request)
+
+    def test_the_deadline_is_three_timeouts_unless_set(self):
+        self.assertEqual((PublicPageFetcher().deadline, PublicPageFetcher(timeout_seconds=2).deadline, PublicPageFetcher(timeout_seconds=2, deadline_seconds=5).deadline), (24.0, 6.0, 5))
+
+    async def test_a_page_dripped_a_byte_at_a_time_or_never_answered_times_out(self):
+        for page in (self.dripping, self.stalled):
+            with self.subTest(page=page.__name__):
+                fetcher, started = self.fetcher(self.no_robots, page), time.monotonic()
+                result = await fetcher.retrieve("https://lookalike.example/")
+                self.assertEqual((result.outcome, result.body), ("timeout", b""))
+                self.assertLess(time.monotonic() - started, 5.0, "not the drip's hundred seconds")
+                self.assertEqual(self.released, ["lookalike.example"] * 2, "robots.txt's lease and the page's are both handed back")
+
+    async def test_a_dripping_robots_txt_times_out_and_the_site_is_refused_for_a_while(self):
+        fetcher, started = self.fetcher(self.dripping, self.no_robots), time.monotonic()
+        self.assertEqual((await fetcher.retrieve("https://lookalike.example/")).outcome, "timeout")
+        self.assertLess(time.monotonic() - started, 5.0)
+        self.assertEqual((await fetcher.retrieve("https://lookalike.example/")).outcome, "robots", "a failed read, remembered like any other")
+        self.assertEqual((self.paths, self.released), (["/robots.txt"], ["lookalike.example"]), "the page itself is never requested")
+
+
+SOCIAL_SHORT_HOSTS = ("threads.com", "fb.me", "fb.com", "youtu.be", "t.me", "telegram.me", "wa.me", "whatsapp.com", "pinterest.com", "snapchat.com", "sharechat.com")
+
+
+class NeverFetchedHostTests(unittest.IsolatedAsyncioTestCase):
+    """Social and never-fetched sites get no request, whether named directly or reached by a page's or a robots.txt's redirect."""
+
+    def fetcher(self, redirects: dict[tuple[str, str], str] | None = None) -> PublicPageFetcher:
+        self.hosts = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            host = request.headers["host"].rstrip(".")
+            self.hosts.append(host)
+            location = (redirects or {}).get((host, request.url.path))
+            if location:
+                return httpx.Response(302, headers={"location": location}, request=request)
+            if request.url.path == "/robots.txt":
+                return httpx.Response(404, request=request)
+            return httpx.Response(200, headers={"content-type": "text/html"}, text=CONTACT, request=request)
+
+        return PublicPageFetcher(transport=httpx.MockTransport(handler), resolver=lambda host: (PUBLIC_IP,), min_host_interval=0)
+
+    async def test_every_social_host_the_map_knows_is_snippet_only(self):
+        fetcher = self.fetcher()
+        for host in SOCIAL_SHORT_HOSTS:
+            self.assertIn(platform_of(f"https://{host}/x"), SOCIAL_PLATFORMS, host)
+            for url in (f"https://{host}/x", f"https://www.{host}/x", f"https://{host}./x"):
+                self.assertFalse(fetcher.allowed_domain(url), url)
+                self.assertEqual((await fetcher.retrieve(url)).outcome, "snippet_only", url)
+        for url in ("https://www.facebook.com./bgscet", "https://www.justdial.com./bgscet", "https://www.glassdoor.co.in./x"):
+            self.assertEqual((fetcher.allowed_domain(url), (await fetcher.retrieve(url)).outcome), (False, "snippet_only"), url)
+        self.assertEqual(self.hosts, [])
+        self.assertTrue(fetcher.allowed_domain("https://linktr.ee/bgscet") and fetcher.allowed_domain("https://bio.link/bgscet"), "link hubs are read on purpose")
+
+    async def test_a_page_redirecting_to_a_social_host_is_not_followed(self):
+        for target in [f"https://www.{host}/bgscet" for host in SOCIAL_SHORT_HOSTS] + ["https://www.facebook.com./bgscet"]:
+            fetcher = self.fetcher({("hub.example", "/"): target})
+            self.assertEqual((await fetcher.retrieve("https://hub.example/")).outcome, "snippet_only", target)
+            self.assertEqual(self.hosts, ["hub.example", "hub.example"], target)
+
+    async def test_a_robots_txt_redirected_to_a_social_or_never_fetched_site_is_not_followed(self):
+        for target in ("https://www.justdial.com/robots.txt", "https://www.facebook.com/robots.txt", "https://www.facebook.com./robots.txt", "https://www.threads.com/robots.txt", "https://fb.me/robots.txt", "https://www.glassdoor.co.in/robots.txt"):
+            fetcher = self.fetcher({("evil.example", "/robots.txt"): target})
+            self.assertEqual((await fetcher.retrieve("https://evil.example/")).outcome, "robots", target)
+            self.assertEqual(self.hosts, ["evil.example"], f"{target}: neither it nor the page is requested")
+        fetcher = self.fetcher({("evil.example", "/robots.txt"): "https://www.evil.example/robots.txt"})
+        self.assertEqual((await fetcher.retrieve("https://evil.example/")).outcome, "ok", "an ordinary robots.txt redirect is still followed")
+        self.assertEqual(self.hosts, ["evil.example", "www.evil.example", "evil.example"])
+
+
+class RuntimeHostSlotTests(unittest.TestCase):
+    def test_investigations_lease_sites_from_the_maps_table(self):
+        settings = AppSettings(control_database_url=":memory:", object_store_backend="memory", intelligence_map_enabled=True)
+        runtime = build_platform(settings, control_store=InMemoryControlStore(), pdp=LocalPolicyDecisionPoint(), tracer=TraceRecorder(), model=None, objects=InMemoryObjectStore(), search_provider=object())
+        try:
+            investigations, crawl, store = runtime.intelligence.fetcher, runtime.intelligence_map.fetcher, runtime.intelligence_map.store
+            self.assertEqual((investigations.host_slots, investigations.host_release), (store.claim_host_slot, store.release_host_slot))
+            self.assertEqual((crawl.host_slots, crawl.host_release), (store.claim_host_slot, store.release_host_slot))
+            self.assertEqual(investigations.host_slots("bgscet.ac.in", 30), 0.0)
+            self.assertGreater(crawl.host_slots("bgscet.ac.in", 30), 0.0, "a site an investigation holds is held from the crawl too")
+        finally:
+            runtime.close()
 
 
 class SitemapTests(MapCase):

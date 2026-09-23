@@ -198,12 +198,19 @@ def _services(settings: AppSettings, store: InstitutionDataStore, intelligence_s
 _SHARED_ONLY_URLS = frozenset({":memory:", "sqlite:///:memory:", ""})
 
 
+def _share_host_slots(fetcher: PublicPageFetcher | None, store: MapStore) -> None:
+    """Investigations fetch pages too: they lease sites through the map's table, so no site ever has two workers' requests at once."""
+
+    if fetcher is not None:
+        fetcher.host_slots, fetcher.host_release = store.claim_host_slot, store.release_host_slot
+
+
 def _map_service(
     settings: AppSettings, backend: Any, intelligence_store: IntelligenceStore, provider: Any | None, notifications: NotificationService | None = None, email: EmailService | None = None,
 ) -> MapService:
     store = MapStore(backend=backend, suppression_key=_suppression_key(settings))
-    # host_slots: the shared table spaces requests to one site across every worker process.
-    fetcher = PublicPageFetcher(timeout_seconds=settings.web_extract_timeout_seconds, max_response_bytes=settings.web_extract_max_bytes, user_agent=crawler_user_agent(settings.intelligence_crawler_contact), host_slots=store.claim_host_slot) if settings.intelligence_fetch_pages else None
+    # host_slots: the shared table leases each site to one request at a time across every worker process.
+    fetcher = PublicPageFetcher(timeout_seconds=settings.web_extract_timeout_seconds, max_response_bytes=settings.web_extract_max_bytes, user_agent=crawler_user_agent(settings.intelligence_crawler_contact), host_slots=store.claim_host_slot, host_release=store.release_host_slot) if settings.intelligence_fetch_pages else None
 
     def recipients(institution_id: str) -> tuple[str, ...]:
         profile = intelligence_store.get_profile(institution_id)
@@ -287,6 +294,7 @@ def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: P
     intelligence_map = _map_service(settings, store.backend, intelligence_store, provider, request.notifications, request.email) if settings.intelligence_map_enabled else None
     if intelligence_map is not None and request.intelligence is not None:
         request.intelligence.map_store = intelligence_map.store  # the map's look-alikes screen investigations too
+        _share_host_slots(request.intelligence.fetcher, intelligence_map.store)
     # The in-process worker works on its own connection when the database can
     # open one, so its transactions never hold the request path's lock.
     worker_store: InstitutionDataStore | None = None
@@ -302,6 +310,7 @@ def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: P
         worker_map = _map_service(settings, worker_store.backend, worker_intelligence_store, provider, worker.notifications, worker.email) if settings.intelligence_map_enabled else None
         if worker_map is not None and worker.intelligence is not None:
             worker.intelligence.map_store = worker_map.store  # and the scheduled monitor's runs
+            _share_host_slots(worker.intelligence.fetcher, worker_map.store)
         worker_agent = MasterAgent(worker.gateway, worker.registry, worker.data, worker_store, control_store, planner=DeterministicPlanner(), model_planner=model_planner, model=model, model_max_tokens=settings.model_max_tokens, tracer=tracer, background=jobs)
         register_handlers(
             jobs, ingestion=worker.ingestion, agent=worker_agent, monitor=worker.monitor, notifications=worker.notifications, map_engine=worker_map.engine if worker_map else None, map_desk=worker_map.desk if worker_map else None,
