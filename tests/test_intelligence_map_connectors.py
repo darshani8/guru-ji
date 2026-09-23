@@ -338,10 +338,13 @@ class InfrastructureTests(Fixture):
                 return 200, {"Status": 0, "Answer": [{"data": "93.184.216.34"}]}
             return 200, {"Status": 0, "Answer": [{"data": "ns1.sedoparking.com."}, {"data": "ns2.sedoparking.com."}]}
 
+        await OfficialSiteHarvester(Site({"https://bgscet.ac.in/": (200, HOME)}).fetcher(), self.store).harvest(INSTITUTION, self.domain_id)
+        self.assertEqual(self.grade_of("instagram:bgscet_engg_coll"), "A")
         result = await DnsConnector(active=True, client=api({("dns.google", "/resolve"): answers})).run({"target": self.domain_id}, self.context())
         self.assertEqual(result.incidents[0]["kind"], "site_parked")
         regrade(self.store, INSTITUTION, [self.domain_id])
         self.assertEqual(self.store.get_asset(INSTITUTION, self.domain_id)["grade"], "D")
+        self.assertEqual(self.grade_of("instagram:bgscet_engg_coll"), "A-arch", "a parked name vouches for nothing now: what it linked is history")
         gone = await DnsConnector(active=True, client=api({("dns.google", "/resolve"): (200, {"Status": 3})})).run({"target": self.domain_id}, self.context())
         self.assertEqual((gone.outcome, gone.incidents[0]["kind"]), ("nxdomain", "domain_not_resolving"))
 

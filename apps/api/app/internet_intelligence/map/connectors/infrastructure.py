@@ -239,6 +239,10 @@ class DnsConnector:
         if ns_outcome == "ok" and parking:
             context.store.add_evidence(context.institution_id, asset_id=domain["asset_id"], kind="integrity", polarity="refutes", detail=f"parked:name servers {','.join(parking)[:120]}", source_url=f"dns:{host}", channel="dns", observed_via="live", run_id=context.run_id)
             result.incidents.append({"kind": "site_parked", "target": host, "signals": [f"parking name servers: {', '.join(parking)[:120]}"], "severity": "high"})
+            # A parked name is out of the institution's hands: what it vouched for (and what its owner file listed) is history now.
+            from ..pipeline import lose_anchor  # the pipeline imports the connectors' neighbours; keep this edge one-way
+
+            result.touched |= set(lose_anchor(context.store, context.institution_id, domain["asset_id"], reason="parked (name servers)", run_id=context.run_id))
         result.notes.append(f"{len(addresses)} addresses; name servers {', '.join(servers)[:120]}")
         return result
 
