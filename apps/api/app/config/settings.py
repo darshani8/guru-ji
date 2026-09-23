@@ -13,6 +13,7 @@ from ..config.institution_connectors import (
 )
 from ..providers.anthropic import DEFAULT_MODEL_ID as ANTHROPIC_DEFAULT_MODEL_ID
 from ..providers.anthropic import EFFORT_LEVELS as ANTHROPIC_EFFORT_LEVELS
+from ..providers.anthropic import OPEN_TASK_MODEL_ID as OPEN_TASK_DEFAULT_MODEL_ID
 from ..web_research.domain_allowlist import DEFAULT_ALLOWED_DOMAINS
 
 
@@ -255,6 +256,27 @@ class AppSettings:
     # opts in with GURU_WEB_CONSOLE_ENABLED=true (ideally one that clients do not
     # reach). The API routes keep their own capability checks either way.
     web_console_enabled: bool | None = None
+    # The open-task agent: when the planner's tools cannot do a job (a
+    # presentation, a Word document, charts, a custom analysis), Claude reads
+    # the records through the tool gateway as the person who asked, writes and
+    # runs Python in a sandbox, and hands back the files as reports. Off unless
+    # a deployment turns it on; needs a Claude provider and the data platform.
+    open_task_enabled: bool = False
+    open_task_model_id: str = OPEN_TASK_DEFAULT_MODEL_ID
+    open_task_effort: str = "high"
+    # One model turn may think for a while; the whole task has its own deadline.
+    open_task_turn_timeout_seconds: float = 300.0
+    open_task_deadline_seconds: float = 900.0
+    open_task_max_turns: int = 30
+    open_task_per_person_per_day: int = 10
+    # Run tasks as background jobs (with a notification) when a thread or SQS queue is configured.
+    open_task_background: bool = True
+    # isolated (namespaces; the only mode production accepts) | auto | guarded (development only).
+    open_task_sandbox: str = "isolated"
+    open_task_run_timeout_seconds: float = 120.0
+    open_task_memory_mb: int = 2048
+    open_task_sandbox_dir: str | None = None
+    open_task_hidden_paths: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         if self.platform_enabled is None:
@@ -409,6 +431,19 @@ class AppSettings:
             web_searches_per_person_per_day=int(os.getenv("GURU_WEB_SEARCHES_PER_PERSON_PER_DAY", "25")),
             assistant_web_exclude_domains=tuple(item.strip().lower().rstrip(".") for item in os.getenv("GURU_ASSISTANT_WEB_EXCLUDE_DOMAINS", "").split(",") if item.strip()),
             web_console_enabled=None if os.getenv("GURU_WEB_CONSOLE_ENABLED") is None else _bool_env("GURU_WEB_CONSOLE_ENABLED", False),
+            open_task_enabled=_bool_env("GURU_OPEN_TASK_ENABLED", False),
+            open_task_model_id=os.getenv("GURU_OPEN_TASK_MODEL_ID", OPEN_TASK_DEFAULT_MODEL_ID).strip(),
+            open_task_effort=os.getenv("GURU_OPEN_TASK_EFFORT", "high").strip().lower(),
+            open_task_turn_timeout_seconds=float(os.getenv("GURU_OPEN_TASK_TURN_TIMEOUT_SECONDS", "300")),
+            open_task_deadline_seconds=float(os.getenv("GURU_OPEN_TASK_DEADLINE_SECONDS", "900")),
+            open_task_max_turns=int(os.getenv("GURU_OPEN_TASK_MAX_TURNS", "30")),
+            open_task_per_person_per_day=int(os.getenv("GURU_OPEN_TASK_PER_PERSON_PER_DAY", "10")),
+            open_task_background=_bool_env("GURU_OPEN_TASK_BACKGROUND", True),
+            open_task_sandbox=os.getenv("GURU_OPEN_TASK_SANDBOX", "isolated").strip().lower(),
+            open_task_run_timeout_seconds=float(os.getenv("GURU_OPEN_TASK_RUN_TIMEOUT_SECONDS", "120")),
+            open_task_memory_mb=int(os.getenv("GURU_OPEN_TASK_MEMORY_MB", "2048")),
+            open_task_sandbox_dir=(os.getenv("GURU_OPEN_TASK_SANDBOX_DIR") or "").strip() or None,
+            open_task_hidden_paths=tuple(item.strip() for item in os.getenv("GURU_OPEN_TASK_HIDDEN_PATHS", "").split(",") if item.strip()),
         )
 
     def resolved_institution_database_url(self) -> str:
@@ -605,6 +640,7 @@ class AppSettings:
                 if parsed_endpoint.username or parsed_endpoint.password or parsed_endpoint.query or parsed_endpoint.fragment:
                     raise ValueError(f"{field_name} must not contain credentials, query, or fragment data")
         self._validate_platform()
+        self._validate_open_task()
         if self.environment != "production":
             return
         if self.web_search_provider == "tavily" and urlparse(self.web_search_endpoint).scheme != "https":
@@ -654,6 +690,32 @@ class AppSettings:
                 raise ValueError("production requires GURU_JOB_QUEUE=thread or sqs")
             if self.email_provider == "smtp" and not self.smtp_use_tls:
                 raise ValueError("production requires GURU_SMTP_USE_TLS=true")
+        if self.open_task_enabled and self.open_task_sandbox != "isolated":
+            # Without namespaces nothing but an audit hook stands between model-written code and the host.
+            raise ValueError("production requires GURU_OPEN_TASK_SANDBOX=isolated when the open-task agent is enabled")
+
+    def _validate_open_task(self) -> None:
+        if not self.open_task_enabled:
+            return
+        if self.model_provider not in {"anthropic", "bedrock"}:
+            raise ValueError("GURU_OPEN_TASK_ENABLED needs GURU_MODEL_PROVIDER=anthropic or bedrock")
+        if not self.platform_enabled:
+            raise ValueError("GURU_OPEN_TASK_ENABLED needs the data platform (GURU_PLATFORM_ENABLED)")
+        if not self.open_task_model_id:
+            raise ValueError("GURU_OPEN_TASK_MODEL_ID must not be blank")
+        if self.open_task_effort not in ANTHROPIC_EFFORT_LEVELS:
+            raise ValueError(f"GURU_OPEN_TASK_EFFORT must be one of {', '.join(ANTHROPIC_EFFORT_LEVELS)}")
+        if self.open_task_sandbox not in {"isolated", "auto", "guarded"}:
+            raise ValueError("GURU_OPEN_TASK_SANDBOX must be isolated, auto, or guarded")
+        for name, value in (
+            ("GURU_OPEN_TASK_TURN_TIMEOUT_SECONDS", self.open_task_turn_timeout_seconds), ("GURU_OPEN_TASK_DEADLINE_SECONDS", self.open_task_deadline_seconds),
+            ("GURU_OPEN_TASK_MAX_TURNS", self.open_task_max_turns), ("GURU_OPEN_TASK_PER_PERSON_PER_DAY", self.open_task_per_person_per_day),
+            ("GURU_OPEN_TASK_RUN_TIMEOUT_SECONDS", self.open_task_run_timeout_seconds),
+        ):
+            if value <= 0:
+                raise ValueError(f"{name} must be positive")
+        if self.open_task_memory_mb < 256:
+            raise ValueError("GURU_OPEN_TASK_MEMORY_MB must be at least 256")
 
     def _validate_platform(self) -> None:
         if self.object_store_backend not in {"memory", "local", "s3"}:

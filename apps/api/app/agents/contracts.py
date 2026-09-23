@@ -21,6 +21,9 @@ class AgentCommand:
     conversation_id: str | None = None
     approval_id: str | None = None
     run_in_background: bool = False
+    # Set by the background worker: the command is already running as a job
+    # and must never be queued again.
+    in_background: bool = False
 
     def __post_init__(self) -> None:
         text = " ".join(self.text.split())

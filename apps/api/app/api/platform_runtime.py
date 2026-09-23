@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any
@@ -45,6 +46,8 @@ from ..internet_intelligence.service import InternetIntelligenceService
 from ..internet_intelligence.store import IntelligenceStore
 from ..normalization.mapping import MappingEngine
 from ..observability.tracing import TraceRecorder
+from ..open_task.agent import OpenTaskAgent, OpenTaskLimits
+from ..open_task.sandbox import Sandbox, SandboxConfig
 from ..persistence.database import InMemoryControlStore, PostgresControlStore, SqliteControlStore
 from ..platform_tools.build import build_platform_registry
 from ..platform_tools.context import PlatformServices
@@ -271,7 +274,30 @@ def map_connectors(settings: AppSettings, *, transport: Any | None = None, cache
     ])
 
 
-def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: PolicyDecisionPoint, tracer: TraceRecorder, model: TextModel | None, planner_model: TextModel | None = None, institution_store: InstitutionDataStore | None = None, objects: ObjectStore | None = None, search_provider: Any | None = None, start_workers: bool = False) -> PlatformRuntime:
+def _sandbox_hidden_paths(settings: AppSettings) -> tuple[str, ...]:
+    """Local data the sandbox must not see, beyond the service tree it hides anyway."""
+
+    paths = list(settings.open_task_hidden_paths)
+    if settings.object_store_backend == "local":
+        paths.append(settings.object_store_path)
+    for url in (settings.control_database_url or "", settings.resolved_institution_database_url()):
+        if url.startswith("sqlite:///") and url not in _SHARED_ONLY_URLS:
+            paths.append(url.removeprefix("sqlite:///"))
+    return tuple(os.path.abspath(path) for path in paths if path and path != ":memory:")
+
+
+def _open_task_agent(settings: AppSettings, services: "_Services", control_store: ControlStore, tracer: TraceRecorder, model: Any | None) -> OpenTaskAgent | None:
+    if not settings.open_task_enabled or model is None:
+        return None
+    sandbox = Sandbox(SandboxConfig(
+        mode=settings.open_task_sandbox, run_timeout_seconds=settings.open_task_run_timeout_seconds, memory_mb=settings.open_task_memory_mb,
+        base_dir=settings.open_task_sandbox_dir, hidden_paths=_sandbox_hidden_paths(settings),
+    ))
+    limits = OpenTaskLimits(max_turns=settings.open_task_max_turns, deadline_seconds=settings.open_task_deadline_seconds, per_person_per_day=settings.open_task_per_person_per_day)
+    return OpenTaskAgent(services.gateway, services.registry, services.reports, control_store, model, sandbox=sandbox, limits=limits, tracer=tracer, background=settings.open_task_background)
+
+
+def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: PolicyDecisionPoint, tracer: TraceRecorder, model: TextModel | None, planner_model: TextModel | None = None, institution_store: InstitutionDataStore | None = None, objects: ObjectStore | None = None, search_provider: Any | None = None, start_workers: bool = False, open_task_model: Any | None = None) -> PlatformRuntime:
     """Assemble the platform.
 
     ``start_workers`` is set only by processes meant to run background jobs
@@ -302,8 +328,9 @@ def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: P
         worker_store = InstitutionDataStore(database_url)
     jobs = _job_queue(settings, store, worker_store)
     planner_model = planner_model or model
-    model_planner = ModelPlanner(planner_model) if (settings.agent_planner == "model" and planner_model is not None) else None
-    agent = MasterAgent(request.gateway, request.registry, request.data, store, control_store, planner=DeterministicPlanner(), model_planner=model_planner, model=model, model_max_tokens=settings.model_max_tokens, tracer=tracer, background=jobs)
+    open_task = _open_task_agent(settings, request, control_store, tracer, open_task_model)
+    model_planner = ModelPlanner(planner_model, open_task=open_task is not None) if (settings.agent_planner == "model" and planner_model is not None) else None
+    agent = MasterAgent(request.gateway, request.registry, request.data, store, control_store, planner=DeterministicPlanner(), model_planner=model_planner, model=model, model_max_tokens=settings.model_max_tokens, tracer=tracer, background=jobs, open_task=open_task)
     if worker_store is not None:
         worker_intelligence_store = IntelligenceStore(backend=worker_store.backend)
         worker = _services(settings, worker_store, worker_intelligence_store, **build)
@@ -311,7 +338,10 @@ def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: P
         if worker_map is not None and worker.intelligence is not None:
             worker.intelligence.map_store = worker_map.store  # and the scheduled monitor's runs
             _share_host_slots(worker.intelligence.fetcher, worker_map.store)
-        worker_agent = MasterAgent(worker.gateway, worker.registry, worker.data, worker_store, control_store, planner=DeterministicPlanner(), model_planner=model_planner, model=model, model_max_tokens=settings.model_max_tokens, tracer=tracer, background=jobs)
+        worker_agent = MasterAgent(
+            worker.gateway, worker.registry, worker.data, worker_store, control_store, planner=DeterministicPlanner(), model_planner=model_planner, model=model,
+            model_max_tokens=settings.model_max_tokens, tracer=tracer, background=jobs, open_task=_open_task_agent(settings, worker, control_store, tracer, open_task_model),
+        )
         register_handlers(
             jobs, ingestion=worker.ingestion, agent=worker_agent, monitor=worker.monitor, notifications=worker.notifications, map_engine=worker_map.engine if worker_map else None, map_desk=worker_map.desk if worker_map else None,
             retention=partial(prune_intelligence, worker_intelligence_store, worker_map.store if worker_map else None, settings.intelligence_retention_days),
