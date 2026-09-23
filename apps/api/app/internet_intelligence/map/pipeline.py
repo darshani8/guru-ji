@@ -75,14 +75,20 @@ def regrade(
             store.set_status(institution_id, asset_id, status=status, verified_via=result.verified_via, verified_at=result.verified_at)
         elif result.verified_at and result.verified_at != asset.get("last_verified_at"):
             store.set_status(institution_id, asset_id, status=asset["status"], verified_via=result.verified_via, verified_at=result.verified_at)
-        if result.grade != asset["grade"] or result.reasons != asset.get("grade_reasons"):
-            stale = bool(asset.get("scorer_version")) and asset.get("scorer_version") != SCORER_VERSION
+        stale = bool(asset.get("scorer_version")) and asset.get("scorer_version") != SCORER_VERSION
+        if result.grade == asset["grade"]:
+            # Same grade: the reasons and the rule are brought up to date, and a
+            # proposal waiting for a manager is left exactly as it is.
+            if stale or result.reasons != asset.get("grade_reasons"):
+                store.restamp_grade(institution_id, asset_id, reasons=result.reasons, scorer_version=SCORER_VERSION)
+        else:
             # A grade already waiting for a manager (a held pass or re-scoring) stays waiting: a later pass never publishes around the gate.
             pending = asset.get("proposed_grade") is not None
             lowered = GRADE_RANK.get(result.grade, 1) < GRADE_RANK.get(asset["grade"], 1)
             urgent = publish or (lowered and (result.grade == "D" or (result.status or asset["status"]) in SECURITY_STATUSES))
-            park = (proposed or ((stale or pending) and not urgent)) and result.grade != asset["grade"]
-            parked_run = run_id if proposed else (asset.get("proposed_run_id") or run_id)
+            park = proposed or ((stale or pending) and not urgent)
+            # Never re-tag another run's proposal: publishing or discarding a run acts on its own proposals alone.
+            parked_run = asset.get("proposed_run_id") or run_id
             store.set_grade(institution_id, asset_id, grade=result.grade, reasons=result.reasons, scorer_version=SCORER_VERSION, proposed=park, run_id=parked_run if park else None)
             if park:
                 continue

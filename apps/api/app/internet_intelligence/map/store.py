@@ -929,10 +929,17 @@ class MapStoreReview:
             )
 
     def discard_proposed(self, institution_id: str, *, run_id: str | None = None) -> int:
+        """Drop proposed grades (one run's, or every one): the published grade stays.
+
+        A manager who discards a re-scoring keeps the grade under the new rule,
+        so the same proposal is not raised again at the next pass.
+        """
+
         scope, params = ("AND proposed_run_id = ?", (run_id,)) if run_id else ("", ())
         with self._tenant(institution_id):
             return self.backend.execute(
-                f"UPDATE intel_assets SET proposed_grade = NULL, proposed_reasons_json = NULL, proposed_scorer = NULL, proposed_run_id = NULL, updated_at = ? WHERE institution_id = ? AND proposed_grade IS NOT NULL {scope}",
+                "UPDATE intel_assets SET scorer_version = COALESCE(proposed_scorer, scorer_version), proposed_grade = NULL, proposed_reasons_json = NULL, proposed_scorer = NULL, proposed_run_id = NULL, "
+                f"updated_at = ? WHERE institution_id = ? AND proposed_grade IS NOT NULL {scope}",
                 (now_iso(), institution_id, *params),
             )
 
@@ -1238,6 +1245,15 @@ class MapStore(MapStoreScheduling, MapStoreReview, MapStoreIncidents):
                     "WHERE institution_id = ? AND asset_id = ?",
                     (grade, _json(list(reasons)), scorer_version, now_iso(), institution_id, asset_id),
                 )
+
+    def restamp_grade(self, institution_id: str, asset_id: str, *, reasons: Sequence[str], scorer_version: str) -> None:
+        """Bring an unchanged grade's reasons and rule up to date, leaving any waiting proposal as it is."""
+
+        with self._tenant(institution_id):
+            self.backend.execute(
+                "UPDATE intel_assets SET grade_reasons_json = ?, scorer_version = ?, updated_at = ? WHERE institution_id = ? AND asset_id = ?",
+                (_json(list(reasons)), scorer_version, now_iso(), institution_id, asset_id),
+            )
 
     def set_status(self, institution_id: str, asset_id: str, *, status: str, verified_via: str | None = None, verified_at: str | None = None) -> None:
         if status not in ASSET_STATUSES:
