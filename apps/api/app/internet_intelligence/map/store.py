@@ -1051,6 +1051,13 @@ class MapStore(MapStoreScheduling, MapStoreReview, MapStoreIncidents):
         self, institution_id: str, *, name: str, kind: str = "institution", group_label: str = "", names: Sequence[str] = (), locations: Sequence[str] = (),
         parent_id: str | None = None, authority: str = "self", status: str = "active", notes: str = "",
     ) -> str:
+        """Add an entity or merge into the existing one.
+
+        ``authority`` only ever moves an existing entity away from 'self' (a
+        re-import that now knows the Math is not ours); nothing an import says
+        hands another authority's entity back to the institution.
+        """
+
         name = " ".join(name.split())
         if not name:
             raise ValueError("an entity needs a name")
@@ -1064,8 +1071,9 @@ class MapStore(MapStoreScheduling, MapStoreReview, MapStoreIncidents):
                 merged_names = list(dict.fromkeys([*_loads(existing["names_json"], []), *cleaned_names]))
                 merged_locations = list(dict.fromkeys([*_loads(existing["locations_json"], []), *locations]))
                 self.backend.execute(
-                    "UPDATE intel_entities SET names_json = ?, locations_json = ?, group_label = CASE WHEN ? = '' THEN group_label ELSE ? END, parent_id = COALESCE(?, parent_id), updated_at = ? WHERE institution_id = ? AND entity_id = ?",
-                    (_json(merged_names), _json(merged_locations), group_label, group_label, parent_id, stamp, institution_id, existing["entity_id"]),
+                    "UPDATE intel_entities SET names_json = ?, locations_json = ?, group_label = CASE WHEN ? = '' THEN group_label ELSE ? END, parent_id = COALESCE(?, parent_id), "
+                    "authority = CASE WHEN authority = 'self' THEN ? ELSE authority END, updated_at = ? WHERE institution_id = ? AND entity_id = ?",
+                    (_json(merged_names), _json(merged_locations), group_label, group_label, parent_id, authority, stamp, institution_id, existing["entity_id"]),
                 )
                 return str(existing["entity_id"])
             entity_id = f"ient-{uuid4().hex}"
@@ -1382,13 +1390,19 @@ class MapStore(MapStoreScheduling, MapStoreReview, MapStoreIncidents):
                 (now_iso(), status, stop_reason, gate, _json(dict(spend or {})), _json(dict(counts or {})), _json(dict(metrics or {})), error, institution_id, run_id),
             )
 
-    def list_map_runs(self, institution_id: str, *, kind: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+    def list_map_runs(self, institution_id: str, *, kind: str | None = None, status: str | None = None, since: str | None = None, limit: int = 20) -> list[dict[str, Any]]:
+        """Runs, newest first; ``since`` filters in SQL, so a window's runs are all there (up to 10,000) however often ticks run."""
+
         clauses, params = ["institution_id = ?"], [institution_id]
-        if kind:
-            clauses.append("kind = ?")
-            params.append(kind)
+        for column, value in (("kind", kind), ("status", status)):
+            if value:
+                clauses.append(f"{column} = ?")
+                params.append(value)
+        if since:
+            clauses.append("started_at >= ?")
+            params.append(since)
         with self._tenant(institution_id):
-            rows = self.backend.fetchall(f"SELECT * FROM intel_map_runs WHERE {' AND '.join(clauses)} ORDER BY started_at DESC, run_id DESC LIMIT ?", (*params, max(1, min(limit, 500))))
+            rows = self.backend.fetchall(f"SELECT * FROM intel_map_runs WHERE {' AND '.join(clauses)} ORDER BY started_at DESC, run_id DESC LIMIT ?", (*params, max(1, min(limit, 10_000 if since else 500))))
         for row in rows:
             for column in ("spend", "counts", "metrics"):
                 row[column] = _loads(row.pop(f"{column}_json", "{}"), {})

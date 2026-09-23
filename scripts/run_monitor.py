@@ -5,10 +5,12 @@ the pass completes. ``--every SECONDS`` keeps it running instead, one pass per
 interval (the compose ``monitor`` service uses this). ``--map`` runs the
 internet map engine instead: one tick per institution with monitoring
 enabled, each picking up where the last stopped. ``--digest`` sends each
-institution's daily map digest (open incidents, the review queue, what was
-found), then applies the intelligence retention period
-(GURU_INTELLIGENCE_RETENTION_DAYS) to that institution's data; schedule it
-once a day. Alerts go to each
+institution's map digest (open incidents, the review queue, what was found
+since the last digest) once its last one is 23 hours old, then applies the
+intelligence retention period (GURU_INTELLIGENCE_RETENTION_DAYS) to that
+institution's data; run it hourly (``--digest --every 3600``) so a failed
+digest is retried within the hour and a restart never sends one twice.
+Alerts go to each
 profile's alert recipients as in-app notifications (and onward through the
 control-plane outbox).
 """
@@ -31,8 +33,18 @@ async def _run(runtime, institution_id: str | None, map_mode: bool = False, dige
         institutions = [institution_id] if institution_id else platform.intelligence_store.monitored_institutions()
         if digest:
             desk, days = platform.intelligence_map.desk, runtime.settings.intelligence_retention_days
-            desk.store.cache_prune()  # the shared public-web cache: drop what expired, once a day
-            return [{**{key: value for key, value in desk.send_digest(item).items() if key != "incidents"}, "pruned": _prune(platform, days, item)} for item in institutions]
+            desk.store.cache_prune()  # the shared public-web cache: drop what expired
+            results: list[dict[str, object]] = []
+            for item in institutions:
+                try:
+                    digest = desk.send_digest(item, only_if_due=True)
+                    entry: dict[str, object] = {key: value for key, value in digest.items() if key != "incidents"}
+                    if digest.get("due", True):
+                        entry["pruned"] = _prune(platform, days, item)  # once a day, with the digest
+                    results.append(entry)
+                except Exception as exc:  # noqa: BLE001 - one institution's failure must not hold back the others' digests
+                    results.append({"institution_id": item, "error": str(exc)[:300]})
+            return results
         return await platform.intelligence_map.engine.tick_all(institutions)
     if platform is None or platform.monitor is None:
         raise SystemExit("internet monitoring is not configured (GURU_INTELLIGENCE_SEARCH_PROVIDER)")
@@ -66,7 +78,7 @@ def main() -> None:
     parser.add_argument("--institution", help="run only this institution (default: every institution with monitoring enabled)")
     parser.add_argument("--every", type=float, default=0.0, help="repeat the pass every SECONDS instead of exiting (minimum 60)")
     parser.add_argument("--map", action="store_true", help="run internet-map engine ticks instead of the mention monitor")
-    parser.add_argument("--digest", action="store_true", help="send each institution's daily internet-map digest (schedule once a day)")
+    parser.add_argument("--digest", action="store_true", help="send each institution's internet-map digest when its last one is 23 hours old (run hourly)")
     args = parser.parse_args()
     if args.every and args.every < 60:
         parser.error("--every must be at least 60 seconds")

@@ -176,13 +176,14 @@ services:
       - ../../scripts:/app/scripts:ro
 
   # The internet map's daily digest to each institution's alert recipients
-  # (open incidents, the review queue, what was found):
+  # (open incidents, the review queue, what was found). It checks hourly and
+  # sends once the last digest is 23 hours old, so a failure is retried soon:
   #   docker compose --profile monitor up map-digest
   map-digest:
     build:
       context: ../..
       dockerfile: infra/docker/Dockerfile.api
-    command: ["python", "scripts/run_monitor.py", "--digest", "--every", "86400"]
+    command: ["python", "scripts/run_monitor.py", "--digest", "--every", "3600"]
     profiles: ["monitor"]
     environment:
       GURU_ENVIRONMENT: development

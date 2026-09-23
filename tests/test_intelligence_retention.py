@@ -421,6 +421,8 @@ class RetentionHookTests(unittest.TestCase):
         def fail(institution_id: str):
             raise RuntimeError("lock timeout")
 
+        # Something new since the first digest, so the second one has something to send.
+        desk.record("bgscet", [{"kind": "domain_not_resolving", "target": "exams.bgscet.ac.in"}])
         register_handlers(broken, map_desk=desk, retention=fail)
         with self.assertLogs("app.workers.handlers", level="WARNING"):
             result = asyncio.run(broken.handlers["intelligence.map_digest"]({"institution_id": "bgscet"}))

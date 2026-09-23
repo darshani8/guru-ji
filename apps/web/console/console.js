@@ -378,6 +378,7 @@ ${payload.headers.map((header) => `<div>${escapeHtml(header)}</div><div><select 
       $('profile-exclusions').value = (profile.exclusions || []).join(', ');
       $('profile-monitoring').value = String(Boolean(profile.monitoring_enabled));
       $('profile-alerts').value = (profile.alert_recipients || []).join(', ');
+      $('profile-security').value = (profile.security_contacts || []).join(', ');
     } catch (error) {
       $('profile-result').textContent = error.message;
     }
@@ -387,6 +388,7 @@ ${payload.headers.map((header) => `<div>${escapeHtml(header)}</div><div><select 
       await api('/v1/intelligence/profile', { method: 'PUT', json: {
         name: $('profile-name').value, location: $('profile-location').value, aliases: list($('profile-aliases').value), official_domains: list($('profile-domains').value),
         programs: list($('profile-programs').value), exclusions: list($('profile-exclusions').value), monitoring_enabled: $('profile-monitoring').value === 'true', alert_recipients: list($('profile-alerts').value),
+        security_contacts: list($('profile-security').value),
       } });
       toast('Profile saved.');
     } catch (error) { toast(error.message); }

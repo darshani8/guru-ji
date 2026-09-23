@@ -7,6 +7,9 @@ each page's health, and records every identity link as ``official_link``
 evidence whose strength is the domain's own grade: a footer link on an A
 domain is A, on a B domain B. Hidden links never count, pages on other
 hosts or subdomains never anchor, and an unhealthy page vouches for nothing.
+A site vouches only for its own entity and that entity's units: a link to
+an account of another authority's entity (the Math's page, the Swamiji's X
+account) is held at C and queued for that authority's approvers.
 """
 
 from __future__ import annotations
@@ -19,6 +22,7 @@ from urllib.parse import urljoin, urlparse
 
 from ..fetch import PublicPageFetcher, Retrieval
 from .assets import ACCOUNT, GROUP, asset_ref
+from .authority import authorities, within
 from .integrity import CLEAN, IntegrityReport, assess
 from .connectors.common import names_entity, person_shaped
 from .pipeline import anchor_grade, lose_anchor, nominated, regrade
@@ -44,11 +48,12 @@ class HarvestResult:
     incidents: list[dict[str, Any]] = field(default_factory=list)
     raised: list[str] = field(default_factory=list)  # accounts whose grade went up in this harvest
     requests: int = 0  # page requests actually made (what the harvest really cost)
+    held: list[str] = field(default_factory=list)  # linked accounts of another authority's entity: C, queued for its approvers
 
     def as_dict(self) -> dict[str, Any]:
         return {
             "domain": self.domain, "pages": self.pages, "integrity": self.integrity, "accounts": self.accounts, "new_assets": self.new_assets, "feeds": self.feeds,
-            "leads": self.leads[:50], "evidence": self.evidence, "anchor": self.anchor, "incidents": self.incidents,
+            "leads": self.leads[:50], "evidence": self.evidence, "anchor": self.anchor, "incidents": self.incidents, "held": self.held,
         }
 
 
@@ -75,7 +80,7 @@ class OfficialSiteHarvester:
         homepage = await self._retrieve(institution_id, asset["url"], result)
         if homepage.outcome == "not_modified":
             # Unchanged since this institution's last clean harvest: the links it gave then still stand.
-            touched = self._reconfirm(institution_id, domain_asset_id, homepage.url, run_id, result)
+            touched = self._reconfirm(institution_id, domain_asset_id, homepage.url, run_id, result, home_id=asset["entity_id"])
             current = self.store.get_asset(institution_id, domain_asset_id) or asset
             if touched and current["status"] == "live":
                 self._liveness(institution_id, domain_asset_id, homepage, run_id)
@@ -135,6 +140,7 @@ class OfficialSiteHarvester:
             return result
         touched: set[str] = set()
         seen_on_page: dict[str, set[str]] = {}
+        scope: _Scope | None = None
         for page_url, structure, _ in pages:
             result.feeds.extend(feed for feed in structure.feeds if feed not in result.feeds)
             # Any visible link to another website is a lead for discovery (a
@@ -155,6 +161,11 @@ class OfficialSiteHarvester:
                     continue
                 if ref.kind not in {ACCOUNT, GROUP} or self.store.is_suppressed(institution_id, ref.key) or not vouchable(entity, ref, position, text):
                     continue
+                scope = scope or _Scope.load(self.store, institution_id, asset["entity_id"])
+                other = scope.owner(self.store.find_asset(institution_id, ref.key), ref, text)
+                if other is not None:
+                    touched.add(self._hold(institution_id, domain_asset_id, host, ref, position, page_url, other, scope, run_id, result))
+                    continue
                 seen_on_page.setdefault(page_url, set()).add(ref.key)
                 target_id, created = self.store.upsert_asset(institution_id, ref, entity_id=asset["entity_id"], relation="official", note=f"linked from {host}")
                 self.store.add_evidence(institution_id, asset_id=target_id, kind="official_link", detail=f"{anchor}:{position}", source_url=page_url, source_asset_id=domain_asset_id, channel=f"site:{host}", observed_via="live", run_id=run_id)
@@ -171,6 +182,35 @@ class OfficialSiteHarvester:
             self.store.record_fetch(institution_id, asset["url"], outcome=homepage.outcome, etag=homepage.etag, last_modified=homepage.last_modified, content_sha256=hashlib.sha256(homepage.body).hexdigest())
         return result
 
+    def _hold(
+        self, institution_id: str, domain_asset_id: str, host: str, ref: Any, position: str, page_url: str, other: dict[str, Any], scope: "_Scope", run_id: str | None, result: HarvestResult,
+    ) -> str:
+        """Record a link to another authority's account as a C lead from this site, and queue it for that authority's approvers.
+
+        It is neither an official link nor filed under the site's entity, and
+        the evidence carries no channel, so it never counts as an independent
+        confirmation either: a BGSCET footer cannot lift one of the Swamiji's
+        X accounts above the other. A look-alike's name only holds the link
+        back; the account is not filed under the look-alike.
+        """
+
+        lookalike = other["kind"] == "lookalike"
+        entity_id = None if lookalike else str(other["entity_id"])
+        chain = authorities(scope.entities.get, other["entity_id"])
+        target_id, created = self.store.upsert_asset(institution_id, ref, entity_id=entity_id, relation="unknown", note=f"linked from {host}")
+        self.store.add_evidence(institution_id, asset_id=target_id, kind="hub_link", detail=f"C:{position}:{other['name']}"[:200], source_url=page_url, source_asset_id=domain_asset_id, channel="", observed_via="live", run_id=run_id)
+        whose = f"names the look-alike {other['name']}" if lookalike else f"belongs to {other['name']} ({chain[0] if chain else 'another authority'})"
+        self.store.add_review_item(
+            institution_id, kind="candidate_account", title=f"{host} links {ref.key} ({position}); it {whose}"[:300], url=ref.url, asset_id=target_id, entity_id=entity_id, connector="official_site", run_id=run_id,
+            detail="" if lookalike else f"Only an approver for {chain[0] if chain else other['name']} (GURU_INTELLIGENCE_ENTITY_APPROVERS) can confirm it; a link from {host} does not settle which accounts are theirs.",
+        )
+        result.evidence += 1
+        if ref.key not in result.held:
+            result.held.append(ref.key)
+        if created:
+            result.new_assets.append(ref.key)
+        return target_id
+
     @staticmethod
     def _note_raised(changes: list[dict[str, Any]], result: HarvestResult) -> None:
         result.raised.extend(change["asset_key"] for change in changes if GRADE_RANK.get(change["to"], 1) > GRADE_RANK.get(change["from"], 1) and change["asset_key"] not in result.new_assets)
@@ -181,15 +221,23 @@ class OfficialSiteHarvester:
         result.requests += 1
         return await self.fetcher.retrieve(url, etag=(state or {}).get("etag"), last_modified=(state or {}).get("last_modified"))
 
-    def _reconfirm(self, institution_id: str, domain_asset_id: str, page_url: str, run_id: str | None, result: HarvestResult) -> set[str]:
-        """Repeat the latest official-link observation from an unchanged page (a 304 answer)."""
+    def _reconfirm(self, institution_id: str, domain_asset_id: str, page_url: str, run_id: str | None, result: HarvestResult, *, home_id: str | None = None) -> set[str]:
+        """Repeat the latest official-link observation from an unchanged page (a 304 answer).
+
+        An official link recorded before the site's scope was checked, to an
+        account now filed under another authority's entity, is not repeated:
+        with nothing left to repeat the page is read afresh, and the link
+        is held back and withdrawn like any other.
+        """
 
         latest: dict[str, dict[str, object]] = {}
         for item in self.store.links_from(institution_id, domain_asset_id, source_urls=[page_url]):
             latest[item["asset_id"]] = item
+        foreign = _Scope.load(self.store, institution_id, home_id).foreign if latest else {}
+        linked = self.store.get_assets(institution_id, latest) if latest else {}
         touched: set[str] = set()
         for asset_id, item in latest.items():
-            if item["polarity"] != "supports":
+            if item["polarity"] != "supports" or (linked.get(asset_id) or {}).get("entity_id") in foreign:
                 continue
             self.store.add_evidence(institution_id, asset_id=asset_id, kind="official_link", detail=str(item["detail"]), source_url=page_url, source_asset_id=domain_asset_id, channel=str(item["channel"]), observed_via="live", run_id=run_id)
             result.evidence += 1
@@ -260,6 +308,31 @@ class OfficialSiteHarvester:
         for href in structure.same_as:
             out.setdefault((href, "same_as"), "")
         return [(href, position, text) for (href, position), text in out.items()]
+
+
+@dataclass(slots=True)
+class _Scope:
+    """What a domain may vouch for: its own entity and that entity's units, never another authority's entities or a look-alike."""
+
+    home: dict[str, Any] | None
+    entities: dict[str, dict[str, Any]]
+    foreign: dict[str, dict[str, Any]]  # entity id -> entity, in the map's order
+
+    @classmethod
+    def load(cls, store: MapStore, institution_id: str, home_id: str | None) -> "_Scope":
+        entities = {str(entity["entity_id"]): entity for entity in store.list_entities(institution_id, limit=5000)}
+        home_chain = set(authorities(entities.get, home_id))
+        foreign = {entity_id: entity for entity_id, entity in entities.items() if not within(entities.get, entity_id, home_id) and set(authorities(entities.get, entity_id)) != home_chain}
+        return cls(entities.get(home_id) if home_id else None, entities, foreign)
+
+    def owner(self, existing: dict[str, Any] | None, ref: Any, text: str) -> dict[str, Any] | None:
+        """The other entity a link is about: its account is already mapped under it, or its handle or link text names it."""
+
+        if existing is not None and existing.get("entity_id") in self.foreign:
+            return self.foreign[existing["entity_id"]]
+        if self.home is not None and names_entity(self.home, handle=ref.handle, title=text):
+            return None
+        return next((entity for entity in self.foreign.values() if names_entity(entity, handle=ref.handle, title=text)), None)
 
 
 # A contact or about page itself, not a page beneath it (/about/principal lists people).

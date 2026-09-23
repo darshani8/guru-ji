@@ -216,5 +216,27 @@ class EmailService:
             "unresolved_recipients": unresolved, "attachments": attachment_meta, "error": delivery.error,
         }
 
+    def system_send(self, institution_id: str, recipients: Sequence[str], subject: str, body: str) -> dict[str, Any]:
+        """Platform-originated email (a security alert to a site owner), sent on no one's request.
+
+        Recipients go through the same policy as ``send`` (the institution's
+        directory or an allowed domain), so a profile field cannot turn the
+        platform into a mailer for outside addresses. Nothing is raised for an
+        address the policy refuses: the caller reads ``status`` ("unresolved"
+        when nobody could be reached) and decides what counts as delivered.
+        """
+
+        resolved, unresolved = self.resolve_recipients(institution_id, recipients)
+        if not resolved or not subject.strip() or not body.strip():
+            return {"email_id": None, "status": "unresolved" if not resolved else "empty", "recipients": [], "unresolved_recipients": unresolved, "error": None}
+        message = OutgoingEmail(to=tuple(item["email"] for item in resolved), subject=subject.strip()[:200], body=body.strip() + "\n\n--\nSent automatically by the institutional assistant.")
+        delivery = self.sender.send(message)
+        email_id = f"eml-{uuid4().hex}"
+        self.store.add_email(
+            institution_id, email_id=email_id, recipients=list(message.to), subject=message.subject, body=message.body, attachments=[], status=delivery.status,
+            provider=delivery.provider, provider_message_id=delivery.provider_message_id, created_by="system", error=delivery.error,
+        )
+        return {"email_id": email_id, "status": delivery.status, "provider": delivery.provider, "recipients": list(message.to), "unresolved_recipients": unresolved, "error": delivery.error}
+
 
 __all__ = ["EmailAttachment", "EmailDelivery", "EmailSender", "EmailService", "OutboxEmailSender", "OutgoingEmail", "SesEmailSender", "SmtpEmailSender"]

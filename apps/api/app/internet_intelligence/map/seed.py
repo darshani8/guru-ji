@@ -179,12 +179,22 @@ def in_holdout(asset_key: str, percent: int) -> bool:
 
 def import_seed(
     store: MapStore, institution_id: str, rows: Sequence[SeedRow], *, lookalikes: Iterable[Lookalike] = (), groups: Sequence[str] | None = None, holdout_percent: int = 20,
-    source: str = "sweep-2026-09-22", entities: Iterable[EntitySeed] | None = None,
+    source: str = "sweep-2026-09-22", entities: Iterable[EntitySeed] | None = None, own_groups: Sequence[str] | None = None,
 ) -> SeedSummary:
-    """Import sweep rows as claims; ``entities`` (default: the bundled entities.tsv) names and places the entities they create."""
+    """Import sweep rows as unverified claims.
+
+    ``entities`` (default: the bundled entities.tsv) names and places the
+    entities they create. ``own_groups`` are the institution's own sweep
+    groups (operator configuration). Every other group's entities get that
+    group as their authority: mapping the Math is not speaking for it, so
+    only the group's named approvers may settle anything about them. None (a
+    caller that does not say which groups are whose) keeps every entity the
+    institution's own.
+    """
 
     summary = SeedSummary()
     wanted = {group.strip().lower() for group in groups} if groups else None
+    own = None if own_groups is None else {group.strip().lower() for group in own_groups}
     entity_ids: dict[tuple[str, str], str] = {}
     specs: dict[str, EntitySeed] = {}
     for spec in load_default_entities() if entities is None else entities:
@@ -221,7 +231,8 @@ def import_seed(
             # pulls another group's organisation into this import.
             parent = parent or (described.parent if entity_key(described.parent) in mapped else "")
             parent_id = entity(parent, _parent_kind(parent), group) if parent and describe(parent, _parent_kind(parent)).name != described.name else None
-            entity_ids[key] = store.upsert_entity(institution_id, name=described.name, kind=described.kind, group_label=group, parent_id=parent_id, names=described.names, locations=described.locations)
+            authority = "self" if own is None or group.strip().lower() in own else group
+            entity_ids[key] = store.upsert_entity(institution_id, name=described.name, kind=described.kind, group_label=group, parent_id=parent_id, names=described.names, locations=described.locations, authority=authority)
             mapped.update({alias: key for alias in map(entity_key, (described.name, *described.names)) if alias and alias not in mapped})
             summary.entities += 1
         return entity_ids[key]
