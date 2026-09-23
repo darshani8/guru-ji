@@ -14,6 +14,7 @@ from urllib.parse import urlparse
 
 from ...search import IntelligenceSearchUnavailable
 from ..assets import ACCOUNT, DOMAIN, GROUP, asset_ref
+from ..cache import calls_made, calls_so_far
 from ..integrity import spam_terms
 from ..store import GRADE_RANK
 from .base import ConnectorContext, ConnectorResult, Lead
@@ -61,19 +62,21 @@ class SearchConnector:
 
     async def run(self, source: Mapping[str, Any], context: ConnectorContext) -> ConnectorResult:
         if context.search is None:
-            return ConnectorResult(outcome="search_disabled", failed=True)
+            return ConnectorResult(outcome="search_disabled", failed=True, cost=0.0)
         entity_id, _, domain = str(source["target"]).partition("|")
         entity = context.store.get_entity(context.institution_id, entity_id)
         if entity is None or not domain:
-            return ConnectorResult(outcome="entity_missing", prune=True)
+            return ConnectorResult(outcome="entity_missing", prune=True, cost=0.0)
         location = (entity.get("locations") or [""])[0]
         query = f'"{entity["name"]}" {location}'.strip()[:300]
         provider = getattr(context.search, "provider_name", "search")
+        before = calls_so_far(context.search)
         try:
             hits = await context.search.search(query, max_results=self.results_per_query, include_domains=[domain])
         except IntelligenceSearchUnavailable as exc:
             return ConnectorResult(outcome="search_unavailable", failed=True, notes=[str(exc)[:200]])
-        result = ConnectorResult(outcome="ok", cost=1.0)
+        # The cost is the provider calls really made: an answer from the shared cache costs 0.
+        result = ConnectorResult(outcome="ok", cost=calls_made(context.search, before))
         anchored = self._anchored_accounts(context)
         for hit in hits:
             try:
@@ -155,11 +158,12 @@ class SpamProbeConnector:
 
     async def run(self, source: Mapping[str, Any], context: ConnectorContext) -> ConnectorResult:
         if context.search is None:
-            return ConnectorResult(outcome="search_disabled", failed=True)
+            return ConnectorResult(outcome="search_disabled", failed=True, cost=0.0)
         domain = context.store.get_asset(context.institution_id, str(source["target"]))
         if domain is None or domain["kind"] != "domain":
-            return ConnectorResult(outcome="asset_missing", prune=True)
+            return ConnectorResult(outcome="asset_missing", prune=True, cost=0.0)
         host = domain["asset_key"].removeprefix("web:")
+        before = calls_so_far(context.search)
         try:
             hits = await context.search.search(_SPAM_QUERY, max_results=10, include_domains=[host])
         except IntelligenceSearchUnavailable as exc:
@@ -170,7 +174,7 @@ class SpamProbeConnector:
             terms = spam_terms(f"{hit.title} {hit.snippet} {urlparse(hit.url).path}")
             if (hit_host == host or hit_host.endswith("." + host)) and terms:
                 spam.append((hit.url, terms))
-        result = ConnectorResult(outcome="spam_found" if spam else "clean", touched={domain["asset_id"]}, cost=1.0)
+        result = ConnectorResult(outcome="spam_found" if spam else "clean", touched={domain["asset_id"]}, cost=calls_made(context.search, before))
         if spam:
             detail = f"spam_indexed:{len(spam)}:{','.join(sorted({term for _, terms in spam for term in terms}))[:120]}"
             context.store.add_evidence(context.institution_id, asset_id=domain["asset_id"], kind="spam_indexed", polarity="refutes", detail=detail, source_url=spam[0][0], channel=f"search:{getattr(context.search, 'provider_name', 'search')}", observed_via="index", run_id=context.run_id)

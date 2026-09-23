@@ -101,6 +101,22 @@ class PostgresMapStoreTests(unittest.TestCase):
         self.assertEqual(len(sent), 2)
         self.assertTrue(desk.send_digest(institution)["sent"])
 
+    def test_the_shared_cache_is_global(self):
+        from app.internet_intelligence.map.store import MapStore
+
+        store = MapStore(POSTGRES_URL, suppression_key=b"k")
+        self.addCleanup(store.close)
+        key = f"pgt-{uuid4().hex}"
+        with store.batch(f"pgt-{uuid4().hex[:10]}"):
+            store.cache_put("search", key, [{"url": "https://example.org/"}], 3600)
+        with store.batch(f"pgt-{uuid4().hex[:10]}"):
+            self.assertEqual(store.cache_get("search", key), [{"url": "https://example.org/"}], "another institution reads the same public answer")
+        store.cache_put("search", key, [], 0)
+        self.assertIsNone(store.cache_get("search", key), "an upsert with no time left has expired")
+        self.assertGreaterEqual(store.cache_prune(), 1)
+        row = store.backend.fetchone("SELECT relrowsecurity, relforcerowsecurity FROM pg_class WHERE relname = 'intel_shared_cache' AND relnamespace = current_schema()::regnamespace")
+        self.assertEqual((row["relrowsecurity"], row["relforcerowsecurity"]), (False, False), "public-web data, outside row-level security")
+
     def test_investigation_quota(self):
         from app.internet_intelligence.store import IntelligenceStore
 

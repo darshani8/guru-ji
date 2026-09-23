@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlparse, urlsplit
 
 import httpx
 
@@ -54,6 +54,34 @@ def _outcome(status: int) -> str:
     return "error"
 
 
+# Parameters and headers that carry a credential: never part of a cache key,
+# and a request that sends a credential header is not shared at all.
+SECRET_PARAMS = frozenset({"key", "token", "api_key", "apikey", "access_token"})
+_CREDENTIAL_HEADERS = frozenset({"authorization", "proxy-authorization", "cookie"})
+
+
+def api_cache_key(url: str, params: Mapping[str, Any] | None = None, *, method: str = "GET", headers: Mapping[str, str] | None = None, body: bool = False) -> str | None:
+    """URL and sorted parameters without any key or token; None for a request that must not be shared."""
+
+    parts = urlsplit(url)
+    if method.upper() != "GET" or body or parts.username or parts.password or any(name.lower() in _CREDENTIAL_HEADERS or "token" in name.lower() or "key" in name.lower() for name in headers or {}):
+        return None
+    pairs = parse_qsl(parts.query, keep_blank_values=True) + [(str(name), str(value)) for name, value in (params or {}).items()]
+    return json.dumps([f"{parts.scheme}://{parts.netloc}{parts.path}", sorted((name, value) for name, value in pairs if name.lower() not in SECRET_PARAMS)], separators=(",", ":"))
+
+
+def _shareable(content_type: str, body: bytes) -> bool:
+    """Only a JSON or XML answer that is valid UTF-8 text goes into the shared cache."""
+
+    if not any(kind in content_type.lower() for kind in ("json", "xml")):
+        return False
+    try:
+        body.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
 @dataclass(slots=True)
 class ApiClient:
     """Calls documented public APIs at fixed HTTPS endpoints (not pages, so no robots.txt).
@@ -66,10 +94,18 @@ class ApiClient:
     timeout_seconds: float = 10.0
     max_bytes: int = 2_000_000
     transport: httpx.AsyncBaseTransport | None = field(default=None, repr=False)
+    # The shared public-web cache (the map store), for open APIs only: a 200
+    # JSON or XML answer to a GET is kept for every institution.
+    cache: Any | None = field(default=None, repr=False)
+    cache_ttl_seconds: int = 86400
 
     async def request(self, url: str, *, method: str = "GET", params: Mapping[str, Any] | None = None, headers: Mapping[str, str] | None = None, json_body: Any = None, data: Mapping[str, Any] | None = None) -> ApiResponse:
         if urlparse(url).scheme != "https":
             raise ValueError("API endpoints must be HTTPS")
+        cache_key = api_cache_key(url, params, method=method, headers=headers, body=json_body is not None or data is not None) if self.cache is not None else None
+        cached = self.cache.cache_get("api", cache_key) if cache_key else None
+        if isinstance(cached, dict) and isinstance(cached.get("body"), str):
+            return ApiResponse("ok", 200, cached["body"].encode("utf-8"))
         current = url
         try:
             async with httpx.AsyncClient(timeout=self.timeout_seconds, transport=self.transport, follow_redirects=False) as client:
@@ -84,7 +120,10 @@ class ApiClient:
                             continue
                         if response.status_code != 200:
                             return ApiResponse(_outcome(response.status_code), response.status_code)
-                        return ApiResponse("ok", 200, await read_bounded(response, self.max_bytes))
+                        body = await read_bounded(response, self.max_bytes)
+                        if cache_key and _shareable(response.headers.get("content-type", ""), body):
+                            self.cache.cache_put("api", cache_key, {"body": body.decode("utf-8")}, self.cache_ttl_seconds)
+                        return ApiResponse("ok", 200, body)
         except WebPayloadTooLarge:
             return ApiResponse("too_large")
         except httpx.TimeoutException:

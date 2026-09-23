@@ -274,6 +274,18 @@ _STATEMENTS: tuple[str, ...] = (
         PRIMARY KEY(day, connector)
     )
     """,
+    # Public-web answers (search results, open-API bodies) shared by every
+    # institution, keyed by a hash of the request; never page validators.
+    """
+    CREATE TABLE IF NOT EXISTS intel_shared_cache (
+        key_sha256 TEXT PRIMARY KEY,
+        kind TEXT NOT NULL,
+        payload TEXT NOT NULL,
+        fetched_at TEXT NOT NULL,
+        expires_at TEXT NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_intel_shared_cache_expiry ON intel_shared_cache(expires_at)",
 
 )
 # Columns added after the table first existed; created where missing at start-up.
@@ -286,7 +298,7 @@ ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("intel_sources", "base_interval_seconds", "INTEGER"),
 )
 TENANT_TABLES: tuple[str, ...] = ("intel_entities", "intel_assets", "intel_evidence", "intel_gold_items", "intel_suppression", "intel_map_runs", "intel_sources", "intel_quota", "intel_review_items", "intel_incidents", "intel_fetch_validators")
-GLOBAL_TABLES: tuple[str, ...] = ("intel_budget_ledger",)
+GLOBAL_TABLES: tuple[str, ...] = ("intel_budget_ledger", "intel_shared_cache")
 SOURCE_CLASSES = frozenset({"rotation", "recheck", "explore"})
 REVIEW_KINDS = frozenset({"impersonation_candidate", "court_record", "dispute", "canary_leak", "run_gate", "candidate_account"})
 REVIEW_STATUSES = frozenset({"open", "decided", "expired"})
@@ -532,6 +544,36 @@ class MapStoreScheduling:
                 "content_sha256 = COALESCE(excluded.content_sha256, intel_fetch_validators.content_sha256), fetched_at = excluded.fetched_at",
                 (institution_id, key, etag, last_modified, outcome[:40], content_sha256, now_iso()),
             )
+
+    # ------------------------------------------------------------ shared cache
+    @staticmethod
+    def _shared_key(kind: str, key: str) -> str:
+        """Only a hash of the request is stored, so a query or URL never sits in the table in clear."""
+
+        return hashlib.sha256(f"{kind}\n{key}".encode("utf-8")).hexdigest()
+
+    def cache_get(self, kind: str, key: str, *, now: str | None = None) -> Any | None:
+        """A public-web answer any institution fetched before, or None when there is none or it has expired."""
+
+        with self.backend.transaction():
+            row = self.backend.fetchone("SELECT payload FROM intel_shared_cache WHERE key_sha256 = ? AND kind = ? AND expires_at > ?", (self._shared_key(kind, key), kind, now or now_iso()))
+        return _loads(row["payload"], None) if row else None
+
+    def cache_put(self, kind: str, key: str, payload: Any, ttl_seconds: int, *, now: str | None = None) -> None:
+        stamp = now or now_iso()
+        expires = (datetime.fromisoformat(stamp) + timedelta(seconds=max(0, int(ttl_seconds)))).isoformat()
+        with self.backend.transaction():
+            self.backend.execute(
+                "INSERT INTO intel_shared_cache(key_sha256, kind, payload, fetched_at, expires_at) VALUES (?, ?, ?, ?, ?) "
+                "ON CONFLICT (key_sha256) DO UPDATE SET kind = excluded.kind, payload = excluded.payload, fetched_at = excluded.fetched_at, expires_at = excluded.expires_at",
+                (self._shared_key(kind, key), kind, _json(payload), stamp, expires),
+            )
+
+    def cache_prune(self, now: str | None = None) -> int:
+        """Drop expired answers (the daily digest job calls this)."""
+
+        with self.backend.transaction():
+            return self.backend.execute("DELETE FROM intel_shared_cache WHERE expires_at <= ?", (now or now_iso(),))
 
     # ---------------------------------------------------------------- run lock
     def try_start_map_run(self, institution_id: str, *, kind: str, lock_seconds: int) -> str | None:

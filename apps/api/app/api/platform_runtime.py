@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from ..actions.email import EmailSender, EmailService, OutboxEmailSender, SesEmailSender, SmtpEmailSender
@@ -192,7 +192,7 @@ def _map_service(settings: AppSettings, backend: Any, intelligence_store: Intell
 
     desk = IncidentDesk(store, recipients=recipients, notify=notify)
     engine = MapEngine(
-        store, map_connectors(settings), EngineConfig(sources_per_tick=settings.intelligence_sources_per_tick, budgets=settings.intelligence_budget_caps(), tenant_share=settings.intelligence_tenant_share),
+        store, map_connectors(settings, cache=store), EngineConfig(sources_per_tick=settings.intelligence_sources_per_tick, budgets=settings.intelligence_budget_caps(), tenant_share=settings.intelligence_tenant_share),
         fetcher=fetcher, search=provider, profile_loader=intelligence_store.get_profile, incidents=desk,
     )
     return MapService(store, fetcher=fetcher, engine=engine, seed_groups=settings.intelligence_seed_group_map(), desk=desk)
@@ -202,25 +202,29 @@ def _suppression_key(settings: AppSettings) -> bytes:
     return (settings.intelligence_suppression_key or "guru-ji-development-only").encode("utf-8")
 
 
-def map_connectors(settings: AppSettings, *, transport: Any | None = None) -> ConnectorRegistry:
+def map_connectors(settings: AppSettings, *, transport: Any | None = None, cache: Any | None = None) -> ConnectorRegistry:
     """The connectors the map engine may use.
 
     The public-page connectors (and the owner check, which reads only the
     institution's own domains) are always on; every other one stays off
     until GURU_INTELLIGENCE_CONNECTORS names it (and its key is configured).
+    ``cache`` (the map store) shares open-API answers across institutions for
+    Wikidata, OpenStreetMap, RDAP and the certificate log; never for YouTube
+    (quota is per key) or court records (sensitive).
     """
 
     on = set(settings.intelligence_connectors)
     client = ApiClient(user_agent=crawler_user_agent(settings.intelligence_crawler_contact), timeout_seconds=settings.web_extract_timeout_seconds, transport=transport)
+    shared = replace(client, cache=cache) if cache is not None else client
     return ConnectorRegistry([
         OfficialSiteConnector(), LeadPageConnector(), RecheckConnector(),
         SearchConnector(active="search" in on), SpamProbeConnector(active="spam_probe" in on), FeedConnector(active="feed" in on),
         YouTubeConnector(api_key=settings.intelligence_youtube_api_key or "", active="youtube" in on, client=client),
-        WikidataConnector(active="wikidata" in on, client=client),
+        WikidataConnector(active="wikidata" in on, client=shared),
         CourtRecordsConnector(api_token=settings.intelligence_indiankanoon_token or "", active="court_records" in on, client=client),
-        CertificateConnector(active="certificates" in on, client=client), RdapConnector(active="rdap" in on, client=client), DnsConnector(active="dns" in on, client=client),
+        CertificateConnector(active="certificates" in on, client=shared), RdapConnector(active="rdap" in on, client=shared), DnsConnector(active="dns" in on, client=client),
         WaybackConnector(active="wayback" in on, client=client), LinkHubConnector(active="link_hub" in on), DirectoryConnector(active="directory" in on),
-        OpenStreetMapConnector(active="openstreetmap" in on, client=client), GooglePlayConnector(active="google_play" in on),
+        OpenStreetMapConnector(active="openstreetmap" in on, client=shared), GooglePlayConnector(active="google_play" in on),
         # Reads only the institution's own domains; the DNS TXT check uses DNS over HTTPS only when the dns connector is allowed.
         OwnerClaimsConnector(key=_suppression_key(settings), dns=client if "dns" in on else None),
     ])
