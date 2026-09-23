@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
@@ -45,6 +46,28 @@ def _bool_env(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+_EMAIL_ADDRESS = re.compile(r"[^@\s]+@[^@\s]+\.[A-Za-z]{2,}")
+
+
+def _group_lists(raw: str, name: str, what: str) -> dict[str, tuple[str, ...]]:
+    """A JSON object of sweep group label to a list of non-blank strings (approvers, contacts)."""
+
+    if not raw:
+        return {}
+    import json
+
+    message = f"{name} must be a JSON object of sweep group label to a list of {what}"
+    try:
+        parsed = json.loads(raw)
+    except ValueError as exc:
+        raise ValueError(message) from exc
+    if not isinstance(parsed, dict) or not all(
+        isinstance(key, str) and key.strip() and isinstance(value, list) and all(isinstance(item, str) and item.strip() for item in value) for key, value in parsed.items()
+    ):
+        raise ValueError(message)
+    return {key.strip(): tuple(item.strip() for item in value) for key, value in parsed.items()}
 
 
 # Connectors the internet map may use beyond the always-on public-page ones
@@ -171,6 +194,8 @@ class AppSettings:
     intelligence_sources_per_tick: int = 25
     intelligence_connectors: tuple[str, ...] = ()
     intelligence_seed_groups: str = ""
+    intelligence_entity_approvers: str = ""
+    intelligence_authority_contacts: str = ""
     intelligence_investigations_per_day: int = 20
     intelligence_youtube_api_key: str | None = field(default=None, repr=False)
     intelligence_indiankanoon_token: str | None = field(default=None, repr=False)
@@ -303,6 +328,8 @@ class AppSettings:
             intelligence_tenant_share=float(os.getenv("GURU_INTELLIGENCE_TENANT_SHARE", "0.5")),
             intelligence_sources_per_tick=int(os.getenv("GURU_INTELLIGENCE_SOURCES_PER_TICK", "25")),
             intelligence_seed_groups=os.getenv("GURU_INTELLIGENCE_SEED_GROUPS", "").strip(),
+            intelligence_entity_approvers=os.getenv("GURU_INTELLIGENCE_ENTITY_APPROVERS", "").strip(),
+            intelligence_authority_contacts=os.getenv("GURU_INTELLIGENCE_AUTHORITY_CONTACTS", "").strip(),
             intelligence_investigations_per_day=int(os.getenv("GURU_INTELLIGENCE_INVESTIGATIONS_PER_DAY", "20")),
             intelligence_connectors=tuple(item.strip().lower() for item in os.getenv("GURU_INTELLIGENCE_CONNECTORS", "").split(",") if item.strip()),
             intelligence_youtube_api_key=os.getenv("GURU_INTELLIGENCE_YOUTUBE_API_KEY") or None,
@@ -370,6 +397,25 @@ class AppSettings:
         if not isinstance(parsed, dict) or not all(isinstance(key, str) and isinstance(value, list) and all(isinstance(item, str) for item in value) for key, value in parsed.items()):
             raise ValueError("GURU_INTELLIGENCE_SEED_GROUPS must be a JSON object of institution ID to a list of sweep group labels")
         return {key: tuple(value) for key, value in parsed.items()}
+
+    def intelligence_entity_approver_map(self) -> dict[str, tuple[str, ...]]:
+        """Who may decide for another group's entities (GURU_INTELLIGENCE_ENTITY_APPROVERS, JSON of sweep group to principal IDs).
+
+        Without an entry, the institution's managers can only dismiss review
+        items about that group's entities: which of the Swamiji's accounts is
+        real is for the Math or trust IT office to say.
+        """
+
+        return _group_lists(self.intelligence_entity_approvers, "GURU_INTELLIGENCE_ENTITY_APPROVERS", "principal IDs")
+
+    def intelligence_authority_contact_map(self) -> dict[str, tuple[str, ...]]:
+        """Where another group's security incidents are emailed (GURU_INTELLIGENCE_AUTHORITY_CONTACTS, JSON of sweep group to addresses)."""
+
+        contacts = _group_lists(self.intelligence_authority_contacts, "GURU_INTELLIGENCE_AUTHORITY_CONTACTS", "email addresses")
+        invalid = [address for addresses in contacts.values() for address in addresses if not _EMAIL_ADDRESS.fullmatch(address)]
+        if invalid:
+            raise ValueError(f"GURU_INTELLIGENCE_AUTHORITY_CONTACTS lists something that is not an email address: {invalid[0]}")
+        return contacts
 
     def intelligence_budget_caps(self) -> dict[str, float]:
         """Daily platform-wide caps per connector budget, defaults overridden by GURU_INTELLIGENCE_BUDGETS (JSON)."""
@@ -571,6 +617,8 @@ class AppSettings:
             raise ValueError("intelligence query limits must be between 1 and 20")
         self.intelligence_budget_caps()
         self.intelligence_seed_group_map()
+        self.intelligence_entity_approver_map()
+        self.intelligence_authority_contact_map()
         if not 0 <= self.intelligence_investigations_per_day <= 1000:
             raise ValueError("GURU_INTELLIGENCE_INVESTIGATIONS_PER_DAY must be between 0 and 1000")
         if not 0 < self.intelligence_tenant_share <= 1:

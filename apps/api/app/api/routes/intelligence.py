@@ -27,6 +27,7 @@ class ProfileBody(BaseModel):
     exclusions: list[str] = Field(default_factory=list, max_length=20)
     monitoring_enabled: bool = False
     alert_recipients: list[str] = Field(default_factory=list, max_length=20)
+    security_contacts: list[str] = Field(default_factory=list, max_length=10, description="Email addresses of whoever runs the institution's sites; high-severity incidents are emailed to them at once")
     institution_id: str | None = Field(default=None, max_length=128)
 
 

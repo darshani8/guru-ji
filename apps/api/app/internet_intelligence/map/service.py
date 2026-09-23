@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import partial
 from typing import Any
 from urllib.parse import urlparse
 
@@ -15,6 +16,7 @@ from .engine import MapEngine
 from .export import export_tsv
 from .gate import rescore
 from .assets import asset_ref
+from .authority import approves, authorities
 from .connectors.base import ConnectorContext
 from .incidents import IncidentDesk
 from .learning import coverage_estimate, gap_grid
@@ -37,6 +39,9 @@ DECISIONS: dict[str, frozenset[str]] = {
     "court_record": frozenset({"acknowledge", "dismiss"}), "run_gate": frozenset({"publish", "discard"}),
 }
 ASSET_DECISIONS = frozenset({"confirm", "reject", "lookalike", "impersonation", "personal"})
+# Decisions that settle nothing about an entity: any manager may take them,
+# whoever's entity the item concerns.
+DEFERRING = frozenset({"dismiss", "acknowledge"})
 
 
 @dataclass(slots=True)
@@ -47,6 +52,9 @@ class MapService:
     # institution -> the sweep groups that are its own (operator configuration)
     seed_groups: Mapping[str, Sequence[str]] = field(default_factory=dict)
     desk: IncidentDesk | None = None
+    # sweep group -> the principals who may decide for that group's entities
+    # (GURU_INTELLIGENCE_ENTITY_APPROVERS): the Math's or the trust's IT office
+    approvers: Mapping[str, Sequence[str]] = field(default_factory=dict)
 
     @staticmethod
     def guard(principal: Principal, institution_id: str, capability: Capability) -> None:
@@ -54,6 +62,28 @@ class MapService:
             raise PermissionError("the requested institution is outside the caller's scope")
         if not principal.has_capability(capability):
             raise PermissionError(f"{capability.value} capability is required")
+
+    def authority_over(self, principal: Principal, institution_id: str, *entity_ids: str | None) -> str | None:
+        """Check the principal may change what the map says about these entities; returns the other authority involved, if any.
+
+        Managing the map is enough for the institution's own entities. Another
+        authority's (the Math, the Swamiji, a branch, a look-alike) needs a
+        principal named as an approver for an authority on that entity's
+        parent chain: a BGSCET reviewer cannot settle which of the Swamiji's
+        two X accounts is real.
+        """
+
+        found: str | None = None
+        for entity_id in dict.fromkeys(item for item in entity_ids if item):
+            chain = authorities(partial(self.store.get_entity, institution_id), entity_id)
+            if not chain:
+                continue
+            found = found or chain[0]
+            if approves(self.approvers, chain, principal.principal_id) is None:
+                raise PermissionError(
+                    f"this concerns an entity under the authority of {chain[0]!r}; only its approvers (GURU_INTELLIGENCE_ENTITY_APPROVERS) can decide it, others can only dismiss it"
+                )
+        return found
 
     # --------------------------------------------------------------- reading
     def assets(self, principal: Principal, institution_id: str, **filters: Any) -> list[dict[str, Any]]:
@@ -115,7 +145,10 @@ class MapService:
             )
         lookalikes: list[Lookalike] = parse_lookalikes(lookalikes_text) if lookalikes_text.strip() else []
         with self.store.batch(institution_id):
-            summary: SeedSummary = import_seed(self.store, institution_id, rows, lookalikes=lookalikes, groups=None if all_groups else groups, holdout_percent=holdout_percent, source=source)
+            summary: SeedSummary = import_seed(
+                self.store, institution_id, rows, lookalikes=lookalikes, groups=None if all_groups else groups, holdout_percent=holdout_percent, source=source,
+                own_groups=self.seed_groups.get(institution_id, ()),
+            )
         record = {"imported_by": principal.principal_id, "groups": summary.groups, "all_groups": all_groups, "approved_by": approver or None, "needed_approval": needs_approval, "source": source}
         baseline = record_baseline(self.store, institution_id, import_record=record)
         return {"summary": summary.as_dict(), "baseline": baseline, "approved_by": approver or None, "needed_approval": needs_approval}
@@ -206,7 +239,11 @@ class MapService:
         asset = self.store.get_asset(institution_id, item["asset_id"]) if item.get("asset_id") else None
         if decision in ASSET_DECISIONS and asset is None:
             raise ValueError("the asset this item was about is no longer in the map")
+        # Whose entity the item concerns decides who may settle it; dismissing it settles nothing.
+        authority = None if decision in DEFERRING and not relation else self.authority_over(principal, institution_id, item.get("entity_id"), asset["entity_id"] if asset else None)
         effect: dict[str, Any] = {"decision": decision}
+        if authority:
+            effect.update(authority=authority, approver=principal.principal_id)
         reviewer = f"reviewer:{principal.principal_id}"
         detail = (note or decision).strip()[:300]
         if decision == "confirm":
@@ -256,11 +293,13 @@ class MapService:
             keys = [ref.key, ref.url, value]
         except ValueError:
             ref = None
+        existing = self.store.find_asset(institution_id, ref.key) if ref else None
+        # Removing another authority's account (the Swamiji's) is theirs to decide, like any verdict on it.
+        authority = self.authority_over(principal, institution_id, existing["entity_id"]) if existing else None
         for key in dict.fromkeys(keys):
             self.store.suppress(institution_id, key, reason=reason[:200])
-        existing = self.store.find_asset(institution_id, ref.key) if ref else None
         removed = bool(existing) and self.store.forget_asset(institution_id, existing["asset_id"])
-        return {"suppressed": True, "removed": removed}
+        return {"suppressed": True, "removed": removed, **({"authority": authority, "approver": principal.principal_id} if authority else {})}
 
     # ----------------------------------------------------------------- summary
     def summary(self, principal: Principal, institution_id: str) -> dict[str, Any]:
@@ -359,4 +398,4 @@ class MapService:
         return {"day": day, "platform": self.store.spend(day=day), "institution": self.store.tenant_spend(institution_id, day=day), "caps": caps, "tenant_caps": {key: value * share for key, value in caps.items()}}
 
 
-__all__ = ["ASSET_DECISIONS", "DECISIONS", "MANUAL_SOURCE_CONNECTORS", "MAX_HARVEST_DOMAINS", "MAX_SEED_BYTES", "MAX_SEED_ROWS", "MapService"]
+__all__ = ["ASSET_DECISIONS", "DECISIONS", "DEFERRING", "MANUAL_SOURCE_CONNECTORS", "MAX_HARVEST_DOMAINS", "MAX_SEED_BYTES", "MAX_SEED_ROWS", "MapService"]

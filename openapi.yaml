@@ -3677,6 +3677,14 @@ components:
           type: array
           maxItems: 20
           title: Alert Recipients
+        security_contacts:
+          items:
+            type: string
+          type: array
+          maxItems: 10
+          title: Security Contacts
+          description: Email addresses of whoever runs the institution's sites; high-severity
+            incidents are emailed to them at once
         institution_id:
           anyOf:
           - type: string

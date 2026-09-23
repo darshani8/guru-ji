@@ -258,7 +258,10 @@ async def decide(review_id: str, body: DecisionBody, request: Request) -> dict[s
     except (ValueError, PermissionError) as exc:
         audit_map_action(request, principal, "review_decision", outcome=AuditOutcome.DENIED if isinstance(exc, PermissionError) else AuditOutcome.FAILED, metadata={"institution_id": target, "review_id": review_id, "decision": body.decision})
         raise translate(exc) from exc
-    audit_map_action(request, principal, "review_decision", metadata={"institution_id": target, "review_id": review_id, "kind": result["kind"], "decision": body.decision, "relation": body.relation})
+    # A decision on another authority's entity names that authority and the approver who took it.
+    audit_map_action(request, principal, "review_decision", metadata={
+        "institution_id": target, "review_id": review_id, "kind": result["kind"], "decision": body.decision, "relation": body.relation, "authority": result.get("authority"), "approver": result.get("approver"),
+    })
     return result
 
 
@@ -346,7 +349,7 @@ async def suppress(request: Request, body: SuppressBody) -> dict[str, Any]:
     except (ValueError, PermissionError) as exc:
         raise translate(exc) from exc
     # The audit record names who suppressed and why, never what: that would undo the point.
-    audit_map_action(request, principal, "suppress", metadata={"institution_id": target, "removed": bool(result["removed"]), "reason": body.reason[:200]})
+    audit_map_action(request, principal, "suppress", metadata={"institution_id": target, "removed": bool(result["removed"]), "reason": body.reason[:200], "authority": result.get("authority"), "approver": result.get("approver")})
     return result
 
 

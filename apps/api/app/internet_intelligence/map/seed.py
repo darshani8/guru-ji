@@ -125,17 +125,28 @@ def in_holdout(asset_key: str, percent: int) -> bool:
 
 def import_seed(
     store: MapStore, institution_id: str, rows: Sequence[SeedRow], *, lookalikes: Iterable[Lookalike] = (), groups: Sequence[str] | None = None, holdout_percent: int = 20,
-    source: str = "sweep-2026-09-22",
+    source: str = "sweep-2026-09-22", own_groups: Sequence[str] | None = None,
 ) -> SeedSummary:
+    """Import sweep rows as unverified claims.
+
+    ``own_groups`` are the institution's own sweep groups (operator
+    configuration). Every other group's entities get that group as their
+    authority: mapping the Math is not speaking for it, so only the group's
+    named approvers may settle anything about them. None (a caller that does
+    not say which groups are whose) keeps every entity the institution's own.
+    """
+
     summary = SeedSummary()
     wanted = {group.strip().lower() for group in groups} if groups else None
+    own = None if own_groups is None else {group.strip().lower() for group in own_groups}
     entity_ids: dict[tuple[str, str], str] = {}
 
     def entity(name: str, kind: str, group: str, parent: str = "") -> str:
         key = (kind, name)
         if key not in entity_ids:
             parent_id = entity("" if not parent else parent, _parent_kind(parent), group) if parent and parent != name else None
-            entity_ids[key] = store.upsert_entity(institution_id, name=name, kind=kind, group_label=group, parent_id=parent_id)
+            authority = "self" if own is None or group.strip().lower() in own else group
+            entity_ids[key] = store.upsert_entity(institution_id, name=name, kind=kind, group_label=group, parent_id=parent_id, authority=authority)
             summary.entities += 1
         return entity_ids[key]
 
