@@ -46,7 +46,13 @@ _LOGIN_PATH = re.compile(r"/(?:accounts/)?log[-_]?in\b|/authwall|/signin\b|/chec
 _ROBOTS_AGENT_VERSION = re.compile(r"^(\s*user-agent\s*:\s*[^/\s#]+)/[^\s#]*", re.IGNORECASE | re.MULTILINE)
 
 
-DEFAULT_SNIPPET_ONLY_DOMAINS = ("facebook.com", "instagram.com", "twitter.com", "x.com", "linkedin.com", "youtube.com", "threads.net", "reddit.com", "redd.it", "quora.com", "justdial.com", "glassdoor.com")
+# Every host map/assets.py reads as a social platform, short links included (fb.me, youtu.be, t.me, wa.me),
+# since a redirect from any page can land on one. Link hubs (linktr.ee, bio.link) stay fetchable on
+# purpose: the link-hub connector reads them.
+DEFAULT_SNIPPET_ONLY_DOMAINS = (
+    "facebook.com", "fb.com", "fb.me", "instagram.com", "twitter.com", "x.com", "linkedin.com", "youtube.com", "youtu.be", "threads.net", "threads.com", "t.me", "telegram.me", "wa.me",
+    "whatsapp.com", "pinterest.com", "snapchat.com", "sharechat.com", "reddit.com", "redd.it", "quora.com", "justdial.com", "glassdoor.com",
+)
 # Sites whose pages are never fetched under any country domain (glassdoor.co.in,
 # justdial.co.in ...): search snippets about them are all the platform uses.
 NEVER_FETCHED_SITES = ("glassdoor", "justdial", "quora", "reddit")
@@ -64,13 +70,19 @@ _NAT64 = ipaddress.ip_network("64:ff9b::/96")
 # Crawl-delay stretches the gap, but never past a minute.
 MIN_HOST_INTERVAL_SECONDS = 1.0
 MAX_CRAWL_DELAY_SECONDS = 60.0
+# httpx's timeout bounds each socket operation, not the request: a site that drips a byte just inside it
+# would hold the host (and the job waiting on it) for days. One request, body included, gets this many
+# times ``timeout_seconds`` in all, unless the fetcher is given its own ``deadline_seconds``.
+DEADLINE_TIMEOUTS = 3.0
 # getaddrinfo's answers for a name that does not exist or has no address; any
 # other resolver failure (a timeout, SERVFAIL) is an outage, not a lapsed name.
 _NO_SUCH_NAME = frozenset(code for code in (getattr(socket, "EAI_NONAME", None), getattr(socket, "EAI_NODATA", None), getattr(socket, "EAI_ADDRFAMILY", None)) if code is not None)
 
 HostResolver = Callable[[str], Sequence[str]]
-# (host, seconds between requests) -> seconds to wait before trying to claim the host again; 0 means claimed.
+# (host, seconds to hold it) -> seconds to wait before trying to claim the host again; 0 means claimed.
 HostSlots = Callable[[str, float], float]
+# (host, seconds until the next request may start): hands a claimed host back once its request is over.
+HostRelease = Callable[[str, float], None]
 
 
 class _Unfetchable(ValueError):
@@ -79,6 +91,14 @@ class _Unfetchable(ValueError):
     def __init__(self, outcome: str) -> None:
         super().__init__(outcome)
         self.outcome = outcome
+
+
+class _HostBusy(Exception):
+    """Another worker kept the host for longer than the fetcher waits: the request is not made.
+
+    Not a ValueError like ``_Unfetchable``, so a robots.txt lookup never
+    swallows it and caches the site as disallowed; ``retrieve`` says "busy".
+    """
 
 
 def _refused(error: BaseException) -> bool:
@@ -225,12 +245,21 @@ class PublicPageFetcher:
     min_host_interval: float = MIN_HOST_INTERVAL_SECONDS
     sleep: Callable[[float], Awaitable[None]] = field(default=asyncio.sleep, repr=False)
     host_slots: HostSlots | None = field(default=None, repr=False)  # spaces requests across processes too (the map store's shared table)
+    host_release: HostRelease | None = field(default=None, repr=False)  # hands a claimed host back early; without it the claim runs out on its own
+    deadline_seconds: float | None = None  # the most one request may take in all; DEADLINE_TIMEOUTS x timeout_seconds when unset
     _robots_cache: dict[str, tuple[float, robotparser.RobotFileParser | None]] = field(default_factory=dict, repr=False)
     _host_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = field(default_factory=weakref.WeakKeyDictionary, repr=False)
     _host_last: dict[str, float] = field(default_factory=dict, repr=False)
 
+    @property
+    def deadline(self) -> float:
+        """Seconds one request may take, from sending it to the last byte of its body."""
+
+        return self.deadline_seconds if self.deadline_seconds is not None else DEADLINE_TIMEOUTS * self.timeout_seconds
+
     def allowed_domain(self, url: str) -> bool:
-        domain = domain_of(url)
+        # "www.facebook.com." names the same host as "www.facebook.com": the root's dot must not slip it past the list.
+        domain = domain_of(url).rstrip(".")
         if any(domain == item or domain.endswith("." + item) for item in self.snippet_only_domains):
             return False
         return not _never_fetched(domain)
@@ -250,7 +279,11 @@ class PublicPageFetcher:
         Crawl-delay (at most a minute), counted from when the last request
         finished. The host's lock is held through the request, so this process
         never has two requests in flight to one host; ``host_slots`` extends
-        the spacing to every process that shares it.
+        that to every process that shares it. Its claim is a lease on the host
+        for the gap plus the whole request (``deadline``, which the request
+        cannot outlast), handed back through ``host_release`` when the request
+        ends so the next may start a gap later. A host another worker keeps
+        past the wait is not requested at all: ``_HostBusy``.
         """
 
         parsed = urlparse(url)
@@ -264,17 +297,22 @@ class PublicPageFetcher:
             wait = self._host_last.get(host, float("-inf")) + interval - self.clock()
             if wait > 0:
                 await self.sleep(wait)
-            waited = 0.0
-            # Another process holds the host: try again when its slot ends, for a bounded time
-            # (past that the request goes ahead rather than starve behind a busy worker).
-            while self.host_slots is not None and interval > 0 and waited < MAX_CRAWL_DELAY_SECONDS + interval and (wait := float(self.host_slots(host, interval))) > 0:
-                wait = min(max(wait, 0.05), MAX_CRAWL_DELAY_SECONDS)
+            lease, waited = interval + self.deadline, 0.0
+            # Another process holds the host: ask again at least once a gap (it may hand the host back
+            # before its lease runs out), for a bounded time; past that the request is not made.
+            while self.host_slots is not None and (wait := float(self.host_slots(host, lease))) > 0:
+                if waited >= MAX_CRAWL_DELAY_SECONDS + lease:
+                    raise _HostBusy(host)
+                wait = min(max(wait, 0.05), max(interval, 1.0))
                 await self.sleep(wait)
                 waited += wait
             try:
                 yield
             finally:
                 self._host_last[host] = self.clock()
+                if self.host_slots is not None and self.host_release is not None:
+                    with contextlib.suppress(Exception):  # a failed hand-back only keeps the host until its lease runs out
+                        self.host_release(host, interval)
 
     async def _public_address(self, hostname: str | None) -> str | None:
         """The address to connect to, or None unless every address the host resolves to is public.
@@ -333,18 +371,21 @@ class PublicPageFetcher:
 
         The first request reuses the address vetted for the page, so one
         lookup covers both. Redirects (apex to www, http to https) are followed
-        with the same checks as page requests. A missing file restricts
-        nothing; an oversize, failed or unreadable one disallows everything.
+        with the same checks as page requests, the domain list included: a
+        robots.txt sent on to a social or never-fetched site is a failed read,
+        never a request there. A missing file restricts nothing; an oversize,
+        failed or unreadable one disallows everything; one that outlasts the
+        deadline raises TimeoutError for ``retrieve`` to report.
         """
 
         parser = robotparser.RobotFileParser()
         current = f"{origin}/robots.txt"
         try:
             for hop in range(self.max_redirects + 1):
-                target = self._pin(current, address) if hop == 0 else await self._vet(current, check_domain=False)
+                target = self._pin(current, address) if hop == 0 else await self._vet(current)
                 if target is None:
                     return None
-                async with self._turn(target.url), client.stream("GET", target.pinned_url, headers=target.headers, extensions=target.extensions) as response:
+                async with self._turn(target.url), asyncio.timeout(self.deadline), client.stream("GET", target.pinned_url, headers=target.headers, extensions=target.extensions) as response:
                     if response.status_code in _REDIRECT_STATUSES:
                         location = response.headers.get("location")
                         if not location:
@@ -376,7 +417,12 @@ class PublicPageFetcher:
         now = self.clock()
         cached = self._robots_cache.get(origin)
         if cached is None or cached[0] <= now:
-            loaded = await self._load_robots(client, origin, urlparse(target.pinned_url).hostname or "")
+            try:
+                loaded = await self._load_robots(client, origin, urlparse(target.pinned_url).hostname or "")
+            except TimeoutError:
+                # Past the deadline is a failed read like any other; only this retrieval says it timed out.
+                self._robots_cache[origin] = (now + self.robots_failure_ttl_seconds, None)
+                raise
             ttl = self.robots_ttl_seconds if loaded is not None else self.robots_failure_ttl_seconds
             cached = (now + ttl, loaded)
             self._robots_cache[origin] = cached
@@ -394,8 +440,10 @@ class PublicPageFetcher:
         outcome is reported instead of collapsed into None: robots refusal,
         a block (403/429/999), a login wall, not found, a server error, a
         timeout, a disallowed content type, or ``not_modified`` when the
-        validators from the last fetch still hold. ``accept`` names the
-        content families wanted (html, text, feed, xml, json, pdf).
+        validators from the last fetch still hold, or ``busy`` when another
+        worker kept the host past the wait. ``accept`` names the content
+        families wanted (html, text, feed, xml, json, pdf). Each request, body
+        included, must be over within ``deadline`` or it is a timeout.
         """
 
         warnings: list[str] = []
@@ -416,7 +464,7 @@ class PublicPageFetcher:
                         headers["If-None-Match"] = etag
                     if last_modified:
                         headers["If-Modified-Since"] = last_modified
-                    async with self._turn(target.url), client.stream("GET", target.pinned_url, headers=headers, extensions=target.extensions) as response:
+                    async with self._turn(target.url), asyncio.timeout(self.deadline), client.stream("GET", target.pinned_url, headers=headers, extensions=target.extensions) as response:
                         if response.status_code in _REDIRECT_STATUSES:
                             location = response.headers.get("location")
                             if not location:
@@ -441,8 +489,10 @@ class PublicPageFetcher:
                     return Retrieval(url=current, outcome="redirect_loop")
         except WebPayloadTooLarge:
             return Retrieval(url=current, outcome="too_large")
-        except httpx.TimeoutException:
+        except (httpx.TimeoutException, TimeoutError):
             return Retrieval(url=current, outcome="timeout")
+        except _HostBusy:
+            return Retrieval(url=current, outcome="busy")
         except _Unfetchable as exc:
             return Retrieval(url=current, outcome=exc.outcome)
         except httpx.ConnectError as exc:
@@ -509,7 +559,7 @@ class Retrieval:
     """What happened when a URL was fetched; ``body`` is set only when ``outcome`` is ok."""
 
     url: str
-    outcome: str  # ok | not_modified | robots | blocked | login_wall | not_found | gone | server_error | timeout | content_type | too_large | not_public | unresolved | unreachable | snippet_only | redirect_loop | error
+    outcome: str  # ok | not_modified | robots | blocked | login_wall | not_found | gone | server_error | timeout | busy | content_type | too_large | not_public | unresolved | unreachable | snippet_only | redirect_loop | error
     http_status: int | None = None
     content_type: str = ""
     body: bytes = b""
@@ -526,4 +576,4 @@ class Retrieval:
         return self.body.decode("utf-8", errors="replace")
 
 
-__all__ = ["DEFAULT_SNIPPET_ONLY_DOMAINS", "FetchedPage", "HTML_TYPES", "MAX_CRAWL_DELAY_SECONDS", "MAX_REDIRECTS", "MIN_HOST_INTERVAL_SECONDS", "NEVER_FETCHED_SITES", "PublicPageFetcher", "ROBOTS_FAILURE_TTL_SECONDS", "ROBOTS_MAX_BYTES", "ROBOTS_TTL_SECONDS", "Retrieval", "USER_AGENT", "crawler_user_agent", "is_public_address", "product_token", "published_from_html", "resolve_host", "robots_lines"]
+__all__ = ["DEADLINE_TIMEOUTS", "DEFAULT_SNIPPET_ONLY_DOMAINS", "FetchedPage", "HTML_TYPES", "MAX_CRAWL_DELAY_SECONDS", "MAX_REDIRECTS", "MIN_HOST_INTERVAL_SECONDS", "NEVER_FETCHED_SITES", "PublicPageFetcher", "ROBOTS_FAILURE_TTL_SECONDS", "ROBOTS_MAX_BYTES", "ROBOTS_TTL_SECONDS", "Retrieval", "USER_AGENT", "crawler_user_agent", "is_public_address", "product_token", "published_from_html", "resolve_host", "robots_lines"]

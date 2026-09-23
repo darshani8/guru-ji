@@ -133,7 +133,8 @@ class ApiClient:
         return ApiResponse("error")
 
 
-FAILED_OUTCOMES = frozenset({"blocked", "server_error", "timeout", "too_large", "error", "robots", "login_wall", "not_public", "unresolved", "unreachable", "content_type", "redirect_loop"})
+# "busy" (another worker kept the host) says nothing about the page, but the source still backs off.
+FAILED_OUTCOMES = frozenset({"blocked", "server_error", "timeout", "busy", "too_large", "error", "robots", "login_wall", "not_public", "unresolved", "unreachable", "content_type", "redirect_loop"})
 
 
 # ----------------------------------------------------------------- entities
