@@ -83,8 +83,14 @@ def _detail(item: Mapping[str, Any]) -> str:
     return str(item.get("detail") or "")
 
 
-def grade(asset: Mapping[str, Any], evidence: Sequence[Mapping[str, Any]], *, now: datetime | None = None) -> GradeResult:
-    """Grade one asset from its evidence (oldest first)."""
+def grade(asset: Mapping[str, Any], evidence: Sequence[Mapping[str, Any]], *, now: datetime | None = None, found_by: Mapping[str, frozenset[str]] | None = None) -> GradeResult:
+    """Grade one asset from its evidence (oldest first).
+
+    ``found_by`` maps a source asset (a hub, a site) to the channels that
+    support it: a hub the same search found is not a second, independent
+    channel for what it lists (the source that found an item cannot be the
+    one that confirms it).
+    """
 
     current = now or datetime.now(timezone.utc)
     ordered = sorted(evidence, key=lambda item: (_when(item.get("observed_at")), str(item.get("evidence_id", ""))))
@@ -136,6 +142,7 @@ def grade(asset: Mapping[str, Any], evidence: Sequence[Mapping[str, Any]], *, no
     )
     candidates: list[tuple[str, str]] = []
     channels: dict[str, str] = {}
+    came_through: dict[str, set[str]] = {}  # a hub or backlink channel -> the source assets it came through
     for item in supports:
         if item.get("kind") == "official_link" and str(item.get("source_url")) in withdrawn and withdrawn[str(item.get("source_url"))] > _when(item.get("observed_at")):
             continue
@@ -193,6 +200,13 @@ def grade(asset: Mapping[str, Any], evidence: Sequence[Mapping[str, Any]], *, no
             # Wikidata, OpenStreetMap and user-made directories can all be edited
             # by anyone (the same person, even), so together they are one channel.
             channels.setdefault("community" if kind == "community_record" else str(item["channel"]), str(kind))
+            if kind in {"hub_link", "backlink"} and item.get("source_asset_id"):
+                came_through.setdefault(str(item["channel"]), set()).add(str(item["source_asset_id"]))
+    for channel, sources in came_through.items():
+        # Independent only if some source it came through stands on a channel the item does not already count.
+        others = set(channels) - {channel}
+        if found_by is not None and all(found_by.get(source) is not None and found_by[source] <= others for source in sources):
+            channels.pop(channel, None)
     if len(channels) >= 2:
         candidates.append(("B", f"{len(channels)} independent channels agree ({', '.join(sorted(channels))[:120]})"))
     if not candidates:

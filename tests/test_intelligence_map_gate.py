@@ -257,9 +257,6 @@ class ManualHarvestTests(Base):
         self.assertIn("gate", result)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class ProfileRemovalTests(Base):
     def test_a_domain_taken_out_of_the_profile_stops_anchoring_until_named_again(self):
@@ -289,3 +286,22 @@ class ReviewerNoteTests(Base):
         [signal] = effect["incident"]["signals"]
         self.assertNotIn("Ravi Kumar", signal)
         self.assertIn("BGS College of Engineering and Technology", signal, "the institution's own name stays")
+
+
+class ProvenanceTests(Base):
+    def test_a_hub_found_by_the_same_search_is_not_a_second_channel(self):
+        hub = self.asset("https://linktr.ee/bgscet")
+        account = self.asset("https://www.instagram.com/bgscet/")
+        self.evidence(hub, "search:stub")
+        self.evidence(account, "search:stub")
+        self.store.add_evidence(INSTITUTION, asset_id=account, kind="hub_link", detail="C:hub", source_asset_id=hub, channel="hub:bgscet", observed_via="live")
+        regrade(self.store, INSTITUTION)
+        self.assertEqual(self.grade(account), "C", "the search found the hub too: that is one channel, not two")
+        # Once the hub stands on something else (a directory listing), it is a second channel.
+        self.store.add_evidence(INSTITUTION, asset_id=hub, kind="directory_record", detail="listing:unstop.com", channel="directory:unstop", observed_via="index")
+        regrade(self.store, INSTITUTION)
+        self.assertEqual(self.grade(account), "B")
+
+
+if __name__ == "__main__":
+    unittest.main()

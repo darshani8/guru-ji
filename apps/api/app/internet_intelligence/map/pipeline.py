@@ -31,7 +31,13 @@ def regrade(store: MapStore, institution_id: str, asset_ids: Iterable[str] | Non
         assets = store.get_assets(institution_id, wanted)
     # Every row of every graded asset: an ascending cap would drop the newest.
     evidence_by_asset = store.evidence_for(institution_id, [asset_id for asset_id in wanted if asset_id in assets])
-    results = {asset_id: grade(assets[asset_id], evidence_by_asset.get(asset_id, []), now=current) for asset_id in wanted if asset_id in assets}
+    # What each hub or site that passed evidence on was itself found through (see grade's found_by).
+    sources = {str(row["source_asset_id"]) for rows in evidence_by_asset.values() for row in rows if row["kind"] in {"hub_link", "backlink"} and row.get("source_asset_id")}
+    found_by = {
+        source: frozenset(str(row["channel"]) for row in rows if row["polarity"] == "supports" and row.get("channel"))
+        for source, rows in (store.evidence_for(institution_id, sorted(sources)).items() if sources else ())
+    }
+    results = {asset_id: grade(assets[asset_id], evidence_by_asset.get(asset_id, []), now=current, found_by=found_by) for asset_id in wanted if asset_id in assets}
     # Disputes compare an entity's official accounts on one platform, so the
     # rest of each affected group is loaded too.
     peers = dict(assets)
