@@ -24,9 +24,63 @@ the map reads from your sites and how you can confirm, correct or limit it.
 * It does not fetch pages on Facebook, Instagram, X, LinkedIn, YouTube,
   Threads, Reddit or Quora. Accounts there are known from links on your
   own site, from search-engine snippets, and from the platforms' public
-  APIs where the operator has a key. The one exception is YouTube's public
-  channel feed (`/feeds/videos.xml`), a machine endpoint read only when the
-  operator enables feeds, and still subject to robots.txt.
+  APIs where the operator has a key. YouTube's channel feeds
+  (`/feeds/videos.xml`) are not read, because youtube.com's robots.txt
+  disallows them; when the operator has a YouTube Data API key, a
+  channel's last upload is read from its uploads playlist through the API.
+
+## Other public sources it may use
+
+Each of these is off until the operator enables it.
+
+* **News feeds.** The public RSS feeds of a few English and Kannada news
+  publishers, read once a day, are searched for items that name your
+  institution. A mention never changes a grade or adds an account. One
+  that mentions a court case or a controversy is shown to your map
+  managers for review; the rest are only counted in the daily digest.
+* **Look-alike domains.** Names one slip away from your own domain (a
+  letter missing or doubled, another suffix such as `.com` or `.org`,
+  look-alike Cyrillic letters) are resolved over DNS, and certificate
+  transparency logs (SSLMate's Cert Spotter) are checked for your name
+  under other suffixes. A name that is registered goes to your managers
+  to look at; the map draws no conclusion from it.
+* **Regulators' listings.** A listing counts as a regulator's only on these
+  exact hosts: `facilities.aicte-india.org` and `www.aicte-india.org`
+  (AICTE), `www.nirfindia.org` (NIRF), `www.ugc.gov.in` (UGC),
+  `naac.gov.in` and `assessmentonline.naac.gov.in` (NAAC), `vtu.ac.in`
+  (VTU), `rguhs.ac.in` and `www.rguhs.ac.in` (RGUHS), and `nmc.org.in` and
+  `www.nmc.org.in` (NMC). Other subdomains of a regulator's domain do not
+  count. The first time a regulator's listing names a domain that nothing
+  else ties to your institution, a reviewer confirms it before it counts.
+  PDF listings are not read.
+* **The Wayback Machine.** For each of your own domains the map asks the
+  Internet Archive once a month which hosts it has captured under that
+  domain; a host the map does not know yet is visited once as a lead. For
+  a domain that has lapsed or been taken over, archived copies of its
+  homepage, contact and about pages show which accounts it linked then.
+
+## OpenStreetMap
+
+When the operator enables it, the map looks up each institution on
+OpenStreetMap through the Nominatim API, within Nominatim's usage policy:
+
+* requests carry the crawler's User-Agent with the operator's contact, and
+  the connector cannot be enabled without one
+  (`GURU_INTELLIGENCE_CRAWLER_CONTACT`);
+* at least 15 seconds pass between requests, and each institution is
+  looked up about once a month;
+* the place is searched for once; after that the chosen object is re-read
+  by its ID (`/lookup`), and searched for again only if it disappears or
+  no longer carries the institution's name.
+
+A campus's `website` and `contact:*` tags are recorded as a community
+record: OpenStreetMap is edited by anyone, so its tags (like Wikidata's)
+count as one source among others and never make an account official on
+their own. Map data from OpenStreetMap is © OpenStreetMap contributors and
+available under the Open Database License (ODbL); the map's export and
+console attribute it wherever rows derived from it are shown. To correct
+what OpenStreetMap says about your campus, edit it at
+openstreetmap.org.
 
 ## How accounts are graded
 

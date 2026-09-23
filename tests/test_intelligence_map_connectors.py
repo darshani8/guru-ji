@@ -195,26 +195,24 @@ YT_FEED = """<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom"><tit
 
 
 class FeedConnectorTests(Fixture):
-    async def test_a_channel_feed_keeps_the_channel_alive_and_dated(self):
+    async def test_youtube_channel_feeds_are_refused_by_robots_and_site_feeds_date_the_site(self):
         channel_id, _ = self.store.upsert_asset(INSTITUTION, asset_ref(f"https://www.youtube.com/channel/{YT_CHANNEL}"), entity_id=self.entity_id, relation="official")
         connector = FeedConnector(active=True)
-        [lead] = connector.plan(self.context())
-        self.assertEqual((lead.target, lead.asset_id), (youtube_feed_url(YT_CHANNEL), channel_id))
-        site = Site({youtube_feed_url(YT_CHANNEL).split("?")[0]: (200, YT_FEED, "application/atom+xml")}, etags=True)
-        # The fake web keys pages by path; answer the feed whatever the query string.
-        fetcher = site.fetcher()
-        result = await connector.run({"target": lead.target, "asset_id": channel_id, "origin": "recurring"}, self.context(fetcher=fetcher))
+        self.assertFalse(hasattr(connector, "plan"), "channels are dated through the Data API, not planned as feeds")
+        # The fake web serves youtube.com's real rule: Disallow: /feeds/videos.xml for every crawler.
+        site = Site({youtube_feed_url(YT_CHANNEL).split("?")[0]: (200, YT_FEED, "application/atom+xml")})
+        refused = await connector.run({"target": youtube_feed_url(YT_CHANNEL), "asset_id": channel_id, "origin": "recurring"}, self.context(fetcher=site.fetcher()))
+        self.assertEqual((refused.outcome, refused.failed, refused.prune), ("robots", True, True), "a feed youtube.com disallows is dropped, not retried forever")
+        self.assertEqual(site.seen, [], "the feed itself is never requested")
+        self.assertEqual(self.store.list_evidence(INSTITUTION, asset_id=channel_id), [], "a refusal says nothing about the channel")
+        fetcher = Site({"https://bgscet.ac.in/feed/": (200, YT_FEED, "application/atom+xml")}, etags=True).fetcher()
+        result = await connector.run({"target": "https://bgscet.ac.in/feed/", "asset_id": self.domain_id, "origin": "recurring"}, self.context(fetcher=fetcher))
         self.assertEqual(result.outcome, "ok")
-        asset = self.store.get_asset(INSTITUTION, channel_id)
-        self.assertEqual(asset["last_activity_at"][:10], "2026-08-30")
-        self.assertEqual(self.store.list_evidence(INSTITUTION, asset_id=channel_id)[-1]["detail"], "ok:feed")
-        again = await connector.run({"target": lead.target, "asset_id": channel_id, "origin": "recurring"}, self.context(fetcher=fetcher))
+        self.assertEqual(self.store.get_asset(INSTITUTION, self.domain_id)["last_activity_at"][:10], "2026-08-30")
+        again = await connector.run({"target": "https://bgscet.ac.in/feed/", "asset_id": self.domain_id, "origin": "recurring"}, self.context(fetcher=fetcher))
         self.assertEqual(again.outcome, "not_modified", "the second read is conditional")
-        dormant = await connector.run({"target": lead.target, "asset_id": channel_id, "origin": "recurring"}, self.context(fetcher=Site({youtube_feed_url(YT_CHANNEL).split("?")[0]: (200, YT_FEED, "application/atom+xml")}).fetcher(), now=NOW + timedelta(days=800)))
+        dormant = await connector.run({"target": "https://bgscet.ac.in/feed/", "asset_id": self.domain_id, "origin": "recurring"}, self.context(fetcher=Site({"https://bgscet.ac.in/feed/": (200, YT_FEED, "application/atom+xml")}).fetcher(), now=NOW + timedelta(days=800)))
         self.assertTrue(any(note.startswith("dormant") for note in dormant.notes))
-        gone = await connector.run({"target": lead.target, "asset_id": channel_id, "origin": "recurring"}, self.context(fetcher=Site({}).fetcher()))
-        self.assertEqual(gone.outcome, "not_found")
-        self.assertEqual(self.store.list_evidence(INSTITUTION, asset_id=channel_id)[-1]["polarity"], "refutes")
 
     async def test_other_youtube_pages_and_non_feeds(self):
         connector = FeedConnector(active=True)
@@ -299,11 +297,21 @@ class CourtRecordsTests(Fixture):
 
 class InfrastructureTests(Fixture):
     async def test_certificate_logs_find_subdomains_that_become_b(self):
-        rows = [{"name_value": "alumni.bgscet.ac.in\n*.bgscet.ac.in"}, {"name_value": "www.bgscet.ac.in"}, {"name_value": "exam.bgscet.ac.in"}, {"name_value": "bgscet.ac.in.evil.example"}]
-        connector = CertificateConnector(active=True, client=api({("crt.sh", "/"): (200, rows)}))
-        self.assertEqual([lead.target for lead in connector.plan(self.context())], [self.domain_id])
+        # Cert Spotter's issuances API (crt.sh's robots.txt disallows every path).
+        rows = [
+            {"id": "1", "dns_names": ["alumni.bgscet.ac.in", "*.bgscet.ac.in"], "not_after": "2027-01-01T00:00:00Z"}, {"id": "2", "dns_names": ["www.bgscet.ac.in"], "not_after": "2027-01-01T00:00:00Z"},
+            {"id": "3", "dns_names": ["exam.bgscet.ac.in"]}, {"id": "4", "dns_names": ["bgscet.ac.in.evil.example"]}, {"id": "5", "dns_names": ["old.bgscet.ac.in"], "not_after": "2020-01-01T00:00:00Z"},
+        ]
+        client = api({("api.certspotter.com", "/v1/issuances"): (200, rows)})
+        connector = CertificateConnector(active=True, client=client, token="cs-key")
+        self.assertEqual((connector.budget_key, [lead.target for lead in connector.plan(self.context())]), ("certificates", [self.domain_id]))
         result = await connector.run({"target": self.domain_id, "hops": 0}, self.context())
-        self.assertEqual(sorted(lead.target for lead in result.leads), ["https://alumni.bgscet.ac.in/", "https://exam.bgscet.ac.in/"])
+        self.assertEqual(sorted(lead.target for lead in result.leads), ["https://alumni.bgscet.ac.in/", "https://exam.bgscet.ac.in/"], "expired certificates are left out")
+        sent = client.seen[-1]
+        self.assertEqual((sent.url.params["domain"], sent.url.params["include_subdomains"], sent.url.params["expand"], sent.headers["authorization"]), ("bgscet.ac.in", "true", "dns_names", "Bearer cs-key"))
+        anonymous = api({("api.certspotter.com", "/v1/issuances"): (200, [])})
+        await CertificateConnector(active=True, client=anonymous).run({"target": self.domain_id, "hops": 0}, self.context())
+        self.assertNotIn("authorization", anonymous.seen[-1].headers, "no key, no Authorization header")
         site = Site({"https://alumni.bgscet.ac.in/": (200, "<html><head><title>Alumni portal</title></head><body>Sign in to the alumni network.</body></html>")})
         found = await LeadPageConnector().run({"target": "https://alumni.bgscet.ac.in/", "hops": 1}, self.context(fetcher=site.fetcher()))
         self.assertEqual(found.new_assets, ["web:alumni.bgscet.ac.in"])

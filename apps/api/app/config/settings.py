@@ -50,7 +50,10 @@ def _bool_env(name: str, default: bool) -> bool:
 # Connectors the internet map may use beyond the always-on public-page ones
 # (official_site, lead_page, recheck); each stays off until named in
 # GURU_INTELLIGENCE_CONNECTORS.
-OPTIONAL_CONNECTORS: tuple[str, ...] = ("search", "spam_probe", "feed", "youtube", "wikidata", "court_records", "certificates", "rdap", "dns", "wayback", "link_hub", "directory", "openstreetmap", "google_play")
+OPTIONAL_CONNECTORS: tuple[str, ...] = (
+    "search", "spam_probe", "feed", "youtube", "wikidata", "court_records", "certificates", "rdap", "dns", "wayback", "link_hub", "directory", "openstreetmap", "google_play",
+    "news_feed", "lookalike_domains", "google_play_search",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +177,7 @@ class AppSettings:
     intelligence_investigations_per_day: int = 20
     intelligence_youtube_api_key: str | None = field(default=None, repr=False)
     intelligence_indiankanoon_token: str | None = field(default=None, repr=False)
+    intelligence_certspotter_token: str | None = field(default=None, repr=False)
     agent_planner: str = "deterministic"
     approval_ttl_seconds: int = 900
     voice_agent_mode: str = "assistant"
@@ -307,6 +311,7 @@ class AppSettings:
             intelligence_connectors=tuple(item.strip().lower() for item in os.getenv("GURU_INTELLIGENCE_CONNECTORS", "").split(",") if item.strip()),
             intelligence_youtube_api_key=os.getenv("GURU_INTELLIGENCE_YOUTUBE_API_KEY") or None,
             intelligence_indiankanoon_token=os.getenv("GURU_INTELLIGENCE_INDIANKANOON_TOKEN") or None,
+            intelligence_certspotter_token=os.getenv("GURU_INTELLIGENCE_CERTSPOTTER_TOKEN") or None,
             agent_planner=os.getenv("GURU_AGENT_PLANNER", "deterministic").strip().lower(),
             approval_ttl_seconds=int(os.getenv("GURU_APPROVAL_TTL_SECONDS", "900")),
             voice_agent_mode=os.getenv("GURU_VOICE_AGENT_MODE", "assistant").strip().lower(),
@@ -580,8 +585,11 @@ class AppSettings:
         unknown = sorted(set(self.intelligence_connectors) - set(OPTIONAL_CONNECTORS))
         if unknown:
             raise ValueError(f"GURU_INTELLIGENCE_CONNECTORS names unknown connectors: {', '.join(unknown)} (known: {', '.join(OPTIONAL_CONNECTORS)})")
-        if {"search", "spam_probe"} & set(self.intelligence_connectors) and self.intelligence_search_provider == "disabled":
-            raise ValueError("the search and spam_probe connectors need GURU_INTELLIGENCE_SEARCH_PROVIDER")
+        if {"search", "spam_probe", "google_play_search"} & set(self.intelligence_connectors) and self.intelligence_search_provider == "disabled":
+            raise ValueError("the search, spam_probe and google_play_search connectors need GURU_INTELLIGENCE_SEARCH_PROVIDER")
+        if "openstreetmap" in self.intelligence_connectors and not self.intelligence_crawler_contact:
+            # Nominatim's usage policy asks every application to identify itself with a way to reach its operator.
+            raise ValueError("the openstreetmap connector needs GURU_INTELLIGENCE_CRAWLER_CONTACT (Nominatim's usage policy requires a contact)")
         if "youtube" in self.intelligence_connectors and not self.intelligence_youtube_api_key:
             raise ValueError("the youtube connector needs GURU_INTELLIGENCE_YOUTUBE_API_KEY")
         if "court_records" in self.intelligence_connectors and not self.intelligence_indiankanoon_token:

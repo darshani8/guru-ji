@@ -45,6 +45,10 @@ def _host(request: httpx.Request) -> str:
     return request.headers.get("host", request.url.host).split(":")[0]
 
 
+# YouTube's real rule for every crawler (an excerpt of youtube.com/robots.txt): channel feeds are off limits.
+YOUTUBE_ROBOTS = "User-agent: Mediapartners-Google*\nDisallow:\n\nUser-agent: *\nDisallow: /api/\nDisallow: /comment\nDisallow: /feeds/videos.xml\nDisallow: /login\nDisallow: /results\n"
+
+
 @dataclass
 class Site:
     """A fake web: pages by URL, with ETags so conditional requests can be answered 304."""
@@ -58,6 +62,8 @@ class Site:
     def handler(self, request: httpx.Request) -> httpx.Response:
         url = f"https://{_host(request)}{request.url.path}"
         if request.url.path == "/robots.txt":
+            if _host(request) == "www.youtube.com":
+                return httpx.Response(200, text=YOUTUBE_ROBOTS, headers={"content-type": "text/plain"}, request=request)
             return httpx.Response(404, request=request)
         self.seen.append((url, request.headers.get("if-none-match")))
         status, body, *content_type = self.pages.get(url, (404, ""))

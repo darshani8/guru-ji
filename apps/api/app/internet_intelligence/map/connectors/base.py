@@ -59,6 +59,7 @@ class ConnectorResult:
     cost: float | None = None  # actual units, when different from the estimate
     prune: bool = False  # the source proved irrelevant; stop scheduling it
     notes: list[str] = field(default_factory=list)
+    mentions: int = 0  # news items naming a mapped entity: counted for the digest, never evidence
 
 
 @dataclass(slots=True)

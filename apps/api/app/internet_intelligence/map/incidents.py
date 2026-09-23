@@ -90,7 +90,7 @@ class IncidentDesk:
     def record(self, institution_id: str, incidents: Sequence[Mapping[str, Any]], *, run_id: str | None = None) -> dict[str, int]:
         """Store what a tick or a decision found and alert at once on anything new and high."""
 
-        counts = {"new": 0, "repeat": 0, "reopened": 0, "notified": 0}
+        counts = {"new": 0, "repeat": 0, "reopened": 0, "escalated": 0, "notified": 0}
         urgent: list[dict[str, Any]] = []
         for incident in incidents:
             kind = str(incident.get("kind") or "incident")
@@ -129,7 +129,11 @@ class IncidentDesk:
             lines.append(f"[{row['severity']}] {row['title']} (seen {row['times_seen']} time(s))")
         if waiting:
             lines.append("Waiting for review: " + ", ".join(f"{count} {kind.replace('_', ' ')}" for kind, count in sorted(waiting.items())))
-        return {"institution_id": institution_id, "since": since, "incidents": incidents, "review_waiting": waiting, "found": found, "raised": raised, "passes": len(runs), "summary": "\n".join(lines)}
+        # News items that name an institution and raise no court or controversy words are only counted here.
+        mentions = sum(int((run.get("counts") or {}).get("mentions", 0)) for run in runs)
+        if mentions:
+            lines.append(f"News: {mentions} item(s) mentioning a mapped institution.")
+        return {"institution_id": institution_id, "since": since, "incidents": incidents, "review_waiting": waiting, "found": found, "raised": raised, "passes": len(runs), "mentions": mentions, "summary": "\n".join(lines)}
 
     def send_digest(self, institution_id: str, *, now: datetime | None = None) -> dict[str, Any]:
         """Send the daily digest if there is anything to say; medium incidents are notified this way."""

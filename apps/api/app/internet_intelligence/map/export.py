@@ -19,9 +19,12 @@ def export_rows(store: MapStore, institution_id: str, *, min_grade: str | None =
             continue
         entity = entities.get(asset["entity_id"] or "", {})
         reasons = "; ".join(asset.get("grade_reasons") or [])
+        # A row found on or graded from OpenStreetMap carries its ODbL attribution.
+        osm = "OpenStreetMap" in (asset.get("note") or "") or "osm:" in reasons
         rows.append({
             "group": entity.get("group_label", ""), "entity": entity.get("name", ""), "url": asset["url"], "grade": asset["grade"], "relation": asset["relation"],
-            "status": asset["status"], "last_verified": (asset.get("last_verified_at") or "")[:10], "note": " · ".join(part for part in (reasons, asset.get("note") or "") if part)[:500],
+            "status": asset["status"], "last_verified": (asset.get("last_verified_at") or "")[:10],
+            "note": " · ".join(part for part in (reasons, asset.get("note") or "") if part)[: 460 if osm else 500] + (" · © OpenStreetMap contributors (ODbL)" if osm else ""),
         })
     rows.sort(key=lambda row: (row["group"], row["entity"], -GRADE_RANK.get(row["grade"], 1), row["url"]))
     return rows

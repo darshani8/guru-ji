@@ -219,9 +219,12 @@ class FeedItem:
     link: str
     title: str
     published_at: datetime | None
+    summary: str = ""  # the item's description / summary as plain text (news items are matched on it)
 
 
 _DECLARATIONS = re.compile(rb"<!\s*(?:DOCTYPE|ENTITY)", re.IGNORECASE)
+# Descriptions often carry escaped HTML; only its text is kept.
+_MARKUP = re.compile(r"<[^>]*>")
 
 
 def parse_feed(body: bytes, *, limit: int = 100) -> tuple[str, list[FeedItem]] | None:
@@ -230,6 +233,8 @@ def parse_feed(body: bytes, *, limit: int = 100) -> tuple[str, list[FeedItem]] |
     Documents that declare a DOCTYPE or entities are refused outright, so no
     entity expansion or external lookup can happen whatever the XML parser.
     """
+
+    from html import unescape
 
     if _DECLARATIONS.search(body):
         return None
@@ -265,7 +270,8 @@ def parse_feed(body: bytes, *, limit: int = 100) -> tuple[str, list[FeedItem]] |
                     link = str(child.get("href"))
                     break
         published = child_text(element, "pubdate", "published", "updated", "date")
-        items.append(FeedItem(link=link[:1000], title=child_text(element, "title")[:300], published_at=parse_published(published)))
+        summary = unescape(_MARKUP.sub(" ", child_text(element, "description", "summary")))
+        items.append(FeedItem(link=link[:1000], title=child_text(element, "title")[:300], published_at=parse_published(published), summary=" ".join(summary.split())[:1000]))
         if len(items) >= limit:
             break
     if kind == "feed" and not title:
