@@ -122,14 +122,19 @@ class IncidentDesk:
         incidents = [row for row in self.store.list_incidents(institution_id, since=since, limit=200) if row["status"] != "resolved"]
         waiting = self.store.review_counts(institution_id)
         runs = [run for run in self.store.list_map_runs(institution_id, kind="tick", limit=200) if str(run["started_at"]) >= since]
-        found = sum(int((run.get("counts") or {}).get("new_assets", 0)) for run in runs)
-        raised = sum(int((run.get("counts") or {}).get("raised", 0)) for run in runs)
+        # A held run's findings are not published, so they are not reported as found either.
+        passed = [run for run in runs if run.get("status") == "succeeded" and run.get("gate") != "held"]
+        held = [run for run in runs if run.get("gate") == "held"]
+        found = sum(int((run.get("counts") or {}).get("new_assets", 0)) for run in passed)
+        raised = sum(int((run.get("counts") or {}).get("raised", 0)) for run in passed)
         lines = [f"Internet map, last {days} day(s): {found} new account(s) or site(s) found, {raised} grade(s) raised, {len(runs)} scheduled pass(es)."]
+        if held:
+            lines.append(f"{len(held)} pass(es) held for approval; their results are not published until a manager publishes them.")
         for row in incidents[:10]:
             lines.append(f"[{row['severity']}] {row['title']} (seen {row['times_seen']} time(s))")
         if waiting:
             lines.append("Waiting for review: " + ", ".join(f"{count} {kind.replace('_', ' ')}" for kind, count in sorted(waiting.items())))
-        return {"institution_id": institution_id, "since": since, "incidents": incidents, "review_waiting": waiting, "found": found, "raised": raised, "passes": len(runs), "summary": "\n".join(lines)}
+        return {"institution_id": institution_id, "since": since, "incidents": incidents, "review_waiting": waiting, "found": found, "raised": raised, "passes": len(runs), "held": len(held), "summary": "\n".join(lines)}
 
     def send_digest(self, institution_id: str, *, now: datetime | None = None) -> dict[str, Any]:
         """Send the daily digest if there is anything to say; medium incidents are notified this way."""

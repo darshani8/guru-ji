@@ -12,11 +12,13 @@ from .grading import SCORER_VERSION, apply_disputes, grade
 from .store import MapStore
 
 
-def regrade(store: MapStore, institution_id: str, asset_ids: Iterable[str] | None = None, *, now: datetime | None = None, proposed: bool = False) -> list[dict[str, Any]]:
+def regrade(store: MapStore, institution_id: str, asset_ids: Iterable[str] | None = None, *, now: datetime | None = None, proposed: bool = False, run_id: str | None = None) -> list[dict[str, Any]]:
     """Recompute grades (all assets, or the given ones); returns the changes.
 
-    ``proposed`` parks the new grades in ``proposed_grade`` instead of
-    publishing them, for a run whose results a gate must approve first.
+    ``proposed`` parks the new grades in ``proposed_grade`` (tagged with
+    ``run_id``) instead of publishing them, for a run whose results a gate
+    must approve first. A grade last computed by an older rule is always
+    parked: a rule change reaches readers only through the gate (``rescore``).
     """
 
     current = now or datetime.now(timezone.utc)
@@ -56,7 +58,14 @@ def regrade(store: MapStore, institution_id: str, asset_ids: Iterable[str] | Non
         elif result.verified_at and result.verified_at != asset.get("last_verified_at"):
             store.set_status(institution_id, asset_id, status=asset["status"], verified_via=result.verified_via, verified_at=result.verified_at)
         if result.grade != asset["grade"] or result.reasons != asset.get("grade_reasons"):
-            store.set_grade(institution_id, asset_id, grade=result.grade, reasons=result.reasons, scorer_version=SCORER_VERSION, proposed=proposed and result.grade != asset["grade"])
+            stale = bool(asset.get("scorer_version")) and asset.get("scorer_version") != SCORER_VERSION
+            # A grade already waiting for a manager (a held pass or re-scoring) stays waiting: a later pass never publishes around the gate.
+            pending = asset.get("proposed_grade") is not None
+            park = (proposed or stale or pending) and result.grade != asset["grade"]
+            parked_run = run_id if proposed else (asset.get("proposed_run_id") or run_id)
+            store.set_grade(institution_id, asset_id, grade=result.grade, reasons=result.reasons, scorer_version=SCORER_VERSION, proposed=park, run_id=parked_run if park else None)
+            if park:
+                continue
         if result.grade != asset["grade"]:
             changes.append({"asset_id": asset_id, "asset_key": asset["asset_key"], "from": asset["grade"], "to": result.grade, "reasons": result.reasons})
     return changes

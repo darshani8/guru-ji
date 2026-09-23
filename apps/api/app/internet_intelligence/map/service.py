@@ -13,7 +13,7 @@ from ..fetch import PublicPageFetcher
 from ..profile import InstitutionProfile
 from .engine import MapEngine
 from .export import export_tsv
-from .gate import rescore
+from .gate import gate_pass, guard_canaries, rescore, snapshot
 from .assets import asset_ref
 from .connectors.base import ConnectorContext
 from .incidents import IncidentDesk
@@ -61,8 +61,12 @@ class MapService:
         assets = self.store.list_assets(institution_id, **filters)
         if not principal.has_capability(Capability.INTELLIGENCE_MANAGE):
             # Readers see what the map stands behind; unverified and refuted
-            # rows are working material for the people who manage it.
-            assets = [asset for asset in assets if asset["grade"] in {"O", "A", "A-arch", "B"} or asset["relation"] == "community" and asset["grade"] == "C"]
+            # rows, and grades a gate has not published, are working material
+            # for the people who manage it.
+            assets = [
+                {key: value for key, value in asset.items() if not key.startswith("proposed_")}
+                for asset in assets if asset["grade"] in {"O", "A", "A-arch", "B"} or asset["relation"] == "community" and asset["grade"] == "C"
+            ]
         return assets
 
     def entities(self, principal: Principal, institution_id: str, *, kind: str | None = None) -> list[dict[str, Any]]:
@@ -142,12 +146,21 @@ class MapService:
             domains = [asset for asset in self.store.list_assets(institution_id, kind="domain", relation="official", limit=500) if asset["grade"] in {"O", "A", "B"}]
         harvester = OfficialSiteHarvester(self.fetcher, self.store)
         run_id = self.store.start_map_run(institution_id, kind="harvest")
+        # A harvest a manager starts goes through the same gate as a scheduled pass.
+        before, published = map_metrics(self.store, institution_id), snapshot(self.store, institution_id)
         results = []
         for asset in domains[:MAX_HARVEST_DOMAINS]:
             results.append((await harvester.harvest(institution_id, asset["asset_id"], run_id=run_id)).as_dict())
-        counts = {"domains": len(results), "accounts": sum(len(item["accounts"]) for item in results), "new_assets": sum(len(item["new_assets"]) for item in results)}
-        self.store.finish_map_run(institution_id, run_id, status="succeeded", stop_reason="completed" if len(domains) <= MAX_HARVEST_DOMAINS else "domain_limit", counts=counts)
-        return {"run_id": run_id, "results": results, "skipped": max(0, len(domains) - MAX_HARVEST_DOMAINS), **counts}
+        gated = gate_pass(self.store, institution_id, before=before, published=published, run_id=run_id, label="harvest")
+        if gated["review"]:
+            self.store.add_review_item(institution_id, run_id=run_id, **gated["review"])
+        found = [incident for item in results for incident in item["incidents"]] + gated["leaks"]
+        if found and self.desk is not None:
+            # A hacked or hijacked site found now is recorded (and alerted) now, not at the next weekly pass.
+            self.desk.record(institution_id, found, run_id=run_id)
+        counts = {"domains": len(results), "accounts": sum(len(item["accounts"]) for item in results), "new_assets": sum(len(item["new_assets"]) for item in results), "held": gated["held"]}
+        self.store.finish_map_run(institution_id, run_id, status="succeeded", stop_reason="completed" if len(domains) <= MAX_HARVEST_DOMAINS else "domain_limit", gate="held" if gated["reasons"] else "passed", counts=counts)
+        return {"run_id": run_id, "results": results, "skipped": max(0, len(domains) - MAX_HARVEST_DOMAINS), "gate": {"held": bool(gated["reasons"]), "reasons": gated["reasons"]}, **counts}
 
     def regrade(self, principal: Principal, institution_id: str) -> dict[str, Any]:
         self.guard(principal, institution_id, Capability.INTELLIGENCE_MANAGE)
@@ -230,9 +243,11 @@ class MapService:
             self.store.forget_asset(institution_id, asset["asset_id"], keep_review_id=review_id)
             asset = None
         elif decision == "publish":
-            effect["published"] = self.store.apply_proposed(institution_id)
+            # Only the proposal of the run this item is about, and the canary guard runs on what went live.
+            effect["published"] = self.store.apply_proposed(institution_id, run_id=item.get("run_id"))
+            effect["canary_leaks_corrected"] = len(guard_canaries(self.store, institution_id, run_id=item.get("run_id")))
         elif decision == "discard":
-            effect["discarded"] = self.store.discard_proposed(institution_id)
+            effect["discarded"] = self.store.discard_proposed(institution_id, run_id=item.get("run_id"))
         if asset is not None and decision in ASSET_DECISIONS:
             effect["changes"] = regrade(self.store, institution_id, [asset["asset_id"]])
         if not self.store.decide_review_item(institution_id, review_id, decision=decision, decided_by=principal.principal_id, note=note, redact=decision == "personal"):

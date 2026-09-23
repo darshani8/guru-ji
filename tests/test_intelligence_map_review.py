@@ -137,8 +137,8 @@ class GateTests(Base):
         result = asyncio.run(MapEngine(self.store, ConnectorRegistry([Touch()]), clock=lambda: NOW).tick(INSTITUTION))
         self.assertEqual(self.store.get_asset(INSTITUTION, leak)["grade"], "D", "two channels made it B; ground truth sets it back")
         self.assertEqual([incident["kind"] for incident in result["incidents"]], ["canary_leak"])
-        self.assertEqual(self.store.list_map_runs(INSTITUTION, kind="tick")[0]["gate"], "canary_held")
-        self.assertEqual([item["kind"] for item in self.store.list_review_items(INSTITUTION)], ["canary_leak"])
+        self.assertEqual(self.store.list_map_runs(INSTITUTION, kind="tick")[0]["gate"], "held")
+        self.assertEqual(sorted(item["kind"] for item in self.store.list_review_items(INSTITUTION)), ["canary_leak", "run_gate"])
         self.assertEqual(map_metrics(self.store, INSTITUTION)["canary_leaks"], [])
 
     def test_a_rescore_that_loses_ground_truth_waits_for_a_person(self):

@@ -127,10 +127,13 @@ class SourceStoreTests(unittest.TestCase):
         past, now = (NOW - timedelta(days=1)).isoformat(), NOW.isoformat()
         dud, _ = self.store.upsert_source("bgscet", connector="lead_page", target="https://dud.example/", origin="lead", work_class="explore", expires_at=past)
         productive, _ = self.store.upsert_source("bgscet", connector="lead_page", target="https://good.example/", origin="lead", work_class="explore", expires_at=past)
+        waiting, _ = self.store.upsert_source("bgscet", connector="lead_page", target="https://deferred.example/", origin="lead", work_class="explore", expires_at=past)
         watch, _ = self.store.upsert_source("bgscet", connector="official_site", target="asset-1", origin="recurring")
         self.store.complete_source("bgscet", productive, outcome="ok", next_due=now, interval_seconds=3600, yield_count=1, cost=1, failed=False)
+        self.store.complete_source("bgscet", dud, outcome="ok", next_due=now, interval_seconds=3600, yield_count=0, cost=1, failed=False)
         self.assertEqual(self.store.expire_sources("bgscet", now=now), 1)
-        self.assertEqual({source_id: self.store.get_source("bgscet", source_id)["status"] for source_id in (dud, productive, watch)}, {dud: "expired", productive: "active", watch: "active"})
+        statuses = {source_id: self.store.get_source("bgscet", source_id)["status"] for source_id in (dud, productive, waiting, watch)}
+        self.assertEqual(statuses, {dud: "expired", productive: "active", waiting: "active", watch: "active"}, "a lead that never got to run (a spent budget) is not judged yet")
 
     def test_budgets_hold_per_institution_and_platform_wide(self):
         reserve = self.store.reserve_budget
@@ -234,7 +237,8 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         watch = sources[("official_site", self.store.list_assets("bgscet", kind="domain")[0]["asset_id"])]
         self.assertEqual(watch["origin"], "recurring")
         self.assertGreater(watch["due_at"], NOW.isoformat(), "the watch is rescheduled")
-        self.assertEqual(first["spend"], {"fetch": 5.0})
+        self.assertEqual(first["spend"], {"fetch": 2.0}, "charged the two requests the harvest made, not the five it reserved")
+        self.assertEqual(self.store.tenant_spend("bgscet", day=NOW.date().isoformat())["fetch"]["units"], 2.0, "the rest of the reservation was handed back")
         self.assertEqual(self.store.list_map_runs("bgscet", kind="tick")[0]["status"], "succeeded")
 
         # The next tick follows the leads: the alumni site names the college, the shop does not.

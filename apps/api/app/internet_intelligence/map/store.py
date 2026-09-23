@@ -284,6 +284,12 @@ ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("intel_sources", "priority", "REAL NOT NULL DEFAULT 0"),
     # The interval a source started with; adaptive intervals move around it.
     ("intel_sources", "base_interval_seconds", "INTEGER"),
+    # A proposal keeps its own reasons and rule, and the run that made it, so
+    # a held run is published or discarded on its own and the published
+    # grade's reasons are never overwritten by a proposal.
+    ("intel_assets", "proposed_reasons_json", "TEXT"),
+    ("intel_assets", "proposed_scorer", "TEXT"),
+    ("intel_assets", "proposed_run_id", "TEXT"),
 )
 TENANT_TABLES: tuple[str, ...] = ("intel_entities", "intel_assets", "intel_evidence", "intel_gold_items", "intel_suppression", "intel_map_runs", "intel_sources", "intel_quota", "intel_review_items", "intel_incidents", "intel_fetch_validators")
 GLOBAL_TABLES: tuple[str, ...] = ("intel_budget_ledger",)
@@ -420,7 +426,7 @@ class MapStoreScheduling:
 
     def complete_source(
         self, institution_id: str, source_id: str, *, outcome: str, next_due: str, interval_seconds: int, yield_count: int, cost: float, failed: bool,
-        etag: str | None = None, last_modified: str | None = None, status: str | None = None, origin: str | None = None, clear_expiry: bool = False,
+        etag: str | None = None, last_modified: str | None = None, status: str | None = None, origin: str | None = None, clear_expiry: bool = False, work_class: str | None = None,
     ) -> None:
         with self._tenant(institution_id):
             if clear_expiry:
@@ -430,10 +436,10 @@ class MapStoreScheduling:
                 UPDATE intel_sources SET last_outcome = ?, due_at = ?, interval_seconds = ?, yield_last = ?, yield_total = yield_total + ?, cost_total = cost_total + ?, runs = runs + 1,
                     priority = priority * 0.7 + CAST(? AS REAL) * 0.3,
                     failure_streak = CASE WHEN ? = 1 THEN failure_streak + 1 ELSE 0 END, etag = COALESCE(?, etag), last_modified = COALESCE(?, last_modified),
-                    status = COALESCE(?, status), origin = COALESCE(?, origin), lease_owner = NULL, lease_until = NULL, updated_at = ?
+                    status = COALESCE(?, status), origin = COALESCE(?, origin), work_class = COALESCE(?, work_class), lease_owner = NULL, lease_until = NULL, updated_at = ?
                 WHERE institution_id = ? AND source_id = ?
                 """,
-                (outcome[:60], next_due, max(60, int(interval_seconds)), yield_count, yield_count, float(cost), float(min(yield_count, 5)), 1 if failed else 0, etag, last_modified, status, origin, now_iso(), institution_id, source_id),
+                (outcome[:60], next_due, max(60, int(interval_seconds)), yield_count, yield_count, float(cost), float(min(yield_count, 5)), 1 if failed else 0, etag, last_modified, status, origin, work_class, now_iso(), institution_id, source_id),
             )
 
     def mark_gap_sources(self, institution_id: str, connector: str, gap_targets: Iterable[str], *, now: str, max_interval: int) -> int:
@@ -469,11 +475,15 @@ class MapStoreScheduling:
             self.backend.execute("UPDATE intel_sources SET status = ?, lease_owner = NULL, lease_until = NULL, updated_at = ? WHERE institution_id = ? AND source_id = ?", (status, now_iso(), institution_id, source_id))
 
     def expire_sources(self, institution_id: str, *, now: str) -> int:
-        """Leads past their expiry that never produced anything stop being scheduled (kept for audit)."""
+        """Leads past their expiry that ran and never produced anything stop being scheduled (kept for audit).
+
+        A lead that never got to run (deferred by an exhausted budget, or
+        while discovery was paused) is not judged yet, so it does not expire.
+        """
 
         with self._tenant(institution_id):
             return self.backend.execute(
-                "UPDATE intel_sources SET status = 'expired', updated_at = ? WHERE institution_id = ? AND status = 'active' AND expires_at IS NOT NULL AND expires_at < ? AND yield_total = 0",
+                "UPDATE intel_sources SET status = 'expired', updated_at = ? WHERE institution_id = ? AND status = 'active' AND expires_at IS NOT NULL AND expires_at < ? AND yield_total = 0 AND runs > 0",
                 (now, institution_id, now),
             )
 
@@ -507,6 +517,16 @@ class MapStoreScheduling:
                 self.backend.execute("UPDATE intel_quota SET units = units - ?, calls = calls - 1 WHERE institution_id = ? AND day = ? AND connector = ?", (float(units), institution_id, day, connector))
             return False
         return True
+
+    def refund_budget(self, institution_id: str, *, connector: str, units: float, day: str) -> None:
+        """Hand back what a run reserved but did not spend (a 304, a cache hit), to the tenant and the platform."""
+
+        if units <= 0:
+            return
+        with self._tenant(institution_id):
+            self.backend.execute("UPDATE intel_quota SET units = CASE WHEN units > ? THEN units - ? ELSE 0 END WHERE institution_id = ? AND day = ? AND connector = ?", (float(units), float(units), institution_id, day, connector))
+        with self.backend.transaction():
+            self.backend.execute("UPDATE intel_budget_ledger SET units = CASE WHEN units > ? THEN units - ? ELSE 0 END WHERE day = ? AND connector = ?", (float(units), float(units), day, connector))
 
     def spend(self, *, day: str) -> dict[str, dict[str, float]]:
         with self.backend.transaction():
@@ -692,15 +712,46 @@ class MapStoreReview:
             self.backend.execute("DELETE FROM intel_assets WHERE institution_id = ? AND asset_id = ?", (institution_id, asset_id))
         return True
 
-    def apply_proposed(self, institution_id: str) -> int:
-        """Publish every proposed grade (a gate passed or a manager approved it)."""
+    def apply_proposed(self, institution_id: str, *, run_id: str | None = None) -> int:
+        """Publish proposed grades (a gate passed or a manager approved them): one run's, or every one."""
+
+        scope, params = ("AND proposed_run_id = ?", (run_id,)) if run_id else ("", ())
+        with self._tenant(institution_id):
+            return self.backend.execute(
+                "UPDATE intel_assets SET grade = proposed_grade, grade_reasons_json = COALESCE(proposed_reasons_json, grade_reasons_json), scorer_version = COALESCE(proposed_scorer, scorer_version), "
+                f"proposed_grade = NULL, proposed_reasons_json = NULL, proposed_scorer = NULL, proposed_run_id = NULL, updated_at = ? WHERE institution_id = ? AND proposed_grade IS NOT NULL {scope}",
+                (now_iso(), institution_id, *params),
+            )
+
+    def discard_proposed(self, institution_id: str, *, run_id: str | None = None) -> int:
+        scope, params = ("AND proposed_run_id = ?", (run_id,)) if run_id else ("", ())
+        with self._tenant(institution_id):
+            return self.backend.execute(
+                f"UPDATE intel_assets SET proposed_grade = NULL, proposed_reasons_json = NULL, proposed_scorer = NULL, proposed_run_id = NULL, updated_at = ? WHERE institution_id = ? AND proposed_grade IS NOT NULL {scope}",
+                (now_iso(), institution_id, *params),
+            )
+
+    def hold_changes(self, institution_id: str, held: Sequence[Mapping[str, Any]], *, run_id: str) -> int:
+        """Set grades a held run changed back to what readers saw, and park the run's grades as its proposal.
+
+        Each item carries asset_id, the published grade/reasons/scorer before
+        the run, and the grade/reasons/scorer the run computed.
+        """
 
         with self._tenant(institution_id):
-            return self.backend.execute("UPDATE intel_assets SET grade = proposed_grade, proposed_grade = NULL, updated_at = ? WHERE institution_id = ? AND proposed_grade IS NOT NULL", (now_iso(), institution_id))
+            for item in held:
+                self.backend.execute(
+                    "UPDATE intel_assets SET grade = ?, grade_reasons_json = ?, scorer_version = ?, proposed_grade = ?, proposed_reasons_json = ?, proposed_scorer = ?, proposed_run_id = ?, updated_at = ? "
+                    "WHERE institution_id = ? AND asset_id = ?",
+                    (item["before_grade"], _json(list(item.get("before_reasons") or [])), item.get("before_scorer"), item["grade"], _json(list(item.get("reasons") or [])), item.get("scorer"), run_id, now_iso(), institution_id, item["asset_id"]),
+                )
+        return len(held)
 
-    def discard_proposed(self, institution_id: str) -> int:
+    def has_stale_scores(self, institution_id: str, scorer_version: str) -> bool:
+        """Whether any grade was computed by an older rule (a re-scoring must go through the gate first)."""
+
         with self._tenant(institution_id):
-            return self.backend.execute("UPDATE intel_assets SET proposed_grade = NULL, updated_at = ? WHERE institution_id = ? AND proposed_grade IS NOT NULL", (now_iso(), institution_id))
+            return self.backend.fetchone("SELECT 1 AS present FROM intel_assets WHERE institution_id = ? AND scorer_version IS NOT NULL AND scorer_version <> ? LIMIT 1", (institution_id, scorer_version)) is not None
 
 
 class MapStoreIncidents:
@@ -895,6 +946,7 @@ class MapStore(MapStoreScheduling, MapStoreReview, MapStoreIncidents):
 
     def _asset_row(self, row: dict[str, Any]) -> dict[str, Any]:
         row["grade_reasons"] = _loads(row.pop("grade_reasons_json", "[]"), [])
+        row["proposed_reasons"] = _loads(row.pop("proposed_reasons_json", None) or "[]", [])
         return row
 
     def get_asset(self, institution_id: str, asset_id: str) -> dict[str, Any] | None:
@@ -947,16 +999,27 @@ class MapStore(MapStoreScheduling, MapStoreReview, MapStoreIncidents):
         with self._tenant(institution_id):
             return {str(row["target"]) for row in self.backend.fetchall("SELECT target FROM intel_sources WHERE institution_id = ? AND connector = ?", (institution_id, connector))}
 
-    def set_grade(self, institution_id: str, asset_id: str, *, grade: str, reasons: Sequence[str], scorer_version: str, proposed: bool = False) -> None:
-        """Store a computed grade; ``proposed`` parks it until a run gate lets it through."""
+    def set_grade(self, institution_id: str, asset_id: str, *, grade: str, reasons: Sequence[str], scorer_version: str, proposed: bool = False, run_id: str | None = None) -> None:
+        """Store a computed grade; ``proposed`` parks it (with its reasons, rule and run) until a gate lets it through.
+
+        A proposal never touches the published grade or its reasons, so
+        readers keep seeing exactly what was last published.
+        """
 
         if grade not in GRADE_RANK:
             raise ValueError(f"unknown grade {grade!r}")
         with self._tenant(institution_id):
             if proposed:
-                self.backend.execute("UPDATE intel_assets SET proposed_grade = ?, grade_reasons_json = ?, scorer_version = ?, updated_at = ? WHERE institution_id = ? AND asset_id = ?", (grade, _json(list(reasons)), scorer_version, now_iso(), institution_id, asset_id))
+                self.backend.execute(
+                    "UPDATE intel_assets SET proposed_grade = ?, proposed_reasons_json = ?, proposed_scorer = ?, proposed_run_id = ?, updated_at = ? WHERE institution_id = ? AND asset_id = ?",
+                    (grade, _json(list(reasons)), scorer_version, run_id, now_iso(), institution_id, asset_id),
+                )
             else:
-                self.backend.execute("UPDATE intel_assets SET grade = ?, proposed_grade = NULL, grade_reasons_json = ?, scorer_version = ?, updated_at = ? WHERE institution_id = ? AND asset_id = ?", (grade, _json(list(reasons)), scorer_version, now_iso(), institution_id, asset_id))
+                self.backend.execute(
+                    "UPDATE intel_assets SET grade = ?, proposed_grade = NULL, proposed_reasons_json = NULL, proposed_scorer = NULL, proposed_run_id = NULL, grade_reasons_json = ?, scorer_version = ?, updated_at = ? "
+                    "WHERE institution_id = ? AND asset_id = ?",
+                    (grade, _json(list(reasons)), scorer_version, now_iso(), institution_id, asset_id),
+                )
 
     def set_status(self, institution_id: str, asset_id: str, *, status: str, verified_via: str | None = None, verified_at: str | None = None) -> None:
         if status not in ASSET_STATUSES:
