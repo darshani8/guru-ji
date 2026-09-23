@@ -103,6 +103,18 @@ class WebAssetTests(unittest.TestCase):
         self.assertIn("message.reason === 'retracted'", js)
         self.assertIn("if (message.type === 'speech_end') return;", js)
 
+    def test_what_was_heard_is_always_sent_and_listening_recovers(self):
+        js = (ASSISTANT / "app.js").read_text(encoding="utf-8")
+        # Interim noise may delay a heard phrase, never hold it back for good.
+        self.assertIn("const TURN_MAX_HOLD_MS = 2500;", js)
+        self.assertIn("const left = TURN_MAX_HOLD_MS - (Date.now() - state.turnStartedAt);", js)
+        self.assertIn("if (state.pendingTurn) holdTurn(TURN_QUIET_MS * 2);", js)
+        # A recogniser that went quiet without an end event is restarted.
+        self.assertIn("state.watchdogTimer = window.setInterval(checkRecognition, 2000);", js)
+        # The server learns what recognition did: counts only, never the words.
+        self.assertIn("socket.send(JSON.stringify({ type: 'client_log', ...stats, browser: browserLabel() }));", js)
+        self.assertNotIn("client_log', text", js)
+
     def test_web_sources_open_safely(self):
         js = (ASSISTANT / "app.js").read_text(encoding="utf-8")
         self.assertIn("anchor.rel = 'noopener noreferrer';", js)

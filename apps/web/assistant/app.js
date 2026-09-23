@@ -4,6 +4,14 @@ const HISTORY_TURN_CHARS = 1000;
 // A spoken turn ends after this much quiet, so "search the internet for" and
 // "the latest ISRO launch" said with a pause become one request.
 const TURN_QUIET_MS = 700;
+// Background noise keeps producing interim results; a heard phrase is sent at
+// most this long after it was first recognised, however long the noise goes on.
+const TURN_MAX_HOLD_MS = 2500;
+// Chrome can stop listening without telling the page; with nothing heard for
+// this long, recognition is restarted.
+const RECOGNITION_STALL_MS = 8000;
+// How often the browser reports what its recognition did (counts, never words).
+const CLIENT_LOG_MS = 5000;
 // Speech the microphone picks up this soon after Guru Ji stops is checked as echo.
 const ECHO_TAIL_MS = 1500;
 const STOP_WORDS = /^(stop|stop it|stop talking|please stop|wait|ok stop|ruko|ruk jao|bas|bas karo|chup|enough|रुको|रुक जाओ|बस|बस करो|चुप|ನಿಲ್ಲಿಸು|ನಿಲ್ಲಿಸಿ|ಸಾಕು)$/i;
@@ -34,6 +42,11 @@ const state = {
   language: loadLanguage(),
   pendingTurn: '',
   turnTimer: null,
+  turnStartedAt: 0,
+  recognitionActiveAt: 0,
+  watchdogTimer: null,
+  clientLogTimer: null,
+  recognitionStats: null,
   activeReplyId: null,
   echoText: '',
   echoTimer: null,
@@ -492,11 +505,24 @@ function speakWithBrowser(item, generation) {
 async function speakWithAudio(item, generation) {
   const buffer = await item.decoded;
   if (!buffer || generation !== state.playback.generation) return false;
+  const context = state.audioContext;
+  // A context the browser still holds muted would never report the end of the
+  // sentence: try to wake it, and let the device's own voice speak otherwise.
+  if (context.state !== 'running') {
+    try {
+      await Promise.race([context.resume(), new Promise((resolve) => setTimeout(resolve, 300))]);
+    } catch {
+      // Resuming is best effort.
+    }
+    if (context.state !== 'running') return false;
+  }
   return new Promise((resolve) => {
-    const source = state.audioContext.createBufferSource();
+    const source = context.createBufferSource();
     source.buffer = buffer;
-    source.connect(state.audioContext.destination);
-    source.onended = () => resolve(true);
+    source.connect(context.destination);
+    // Move on after the clip's length even if 'ended' never fires.
+    const guard = setTimeout(() => resolve(true), buffer.duration * 1000 + 1500);
+    source.onended = () => { clearTimeout(guard); resolve(true); };
     state.playback.source = source;
     source.start();
   });
@@ -588,16 +614,30 @@ function queueTurn(transcript) {
     interruptReply('stop');
     return;
   }
-  if ((state.speaking || state.echoText) && isEcho(text)) return;
+  if ((state.speaking || state.echoText) && isEcho(text)) {
+    countRecognition('dropped_echo');
+    return;
+  }
+  if (!state.pendingTurn) state.turnStartedAt = Date.now();
   state.pendingTurn = `${state.pendingTurn} ${text}`.trim();
+  if (!state.speaking) renderVoiceState(`Heard: “${state.pendingTurn}”`);
+  holdTurn(TURN_QUIET_MS);
+}
+
+// Wait a little for the rest of the sentence, but never past TURN_MAX_HOLD_MS
+// from its first words: noise that keeps Chrome's interim results coming must
+// not keep what was said from being sent.
+function holdTurn(delay) {
   clearTimeout(state.turnTimer);
-  state.turnTimer = setTimeout(flushTurn, TURN_QUIET_MS);
+  const left = TURN_MAX_HOLD_MS - (Date.now() - state.turnStartedAt);
+  state.turnTimer = setTimeout(flushTurn, Math.max(0, Math.min(delay, left)));
 }
 
 function flushTurn() {
   clearTimeout(state.turnTimer);
   const text = state.pendingTurn;
   state.pendingTurn = '';
+  state.turnStartedAt = 0;
   if (text) sendUtterance(text);
 }
 
@@ -605,6 +645,7 @@ function sendUtterance(text) {
   const value = text.trim();
   if (!value || !state.voiceTransportReady || !state.voiceSocket || state.voiceSocket.readyState !== WebSocket.OPEN) return;
   const clientMessageId = newId('voice');
+  countRecognition('sent');
   // Whatever was still being said belongs to the previous turn.
   stopSpeaking();
   state.waitingForAnswer = true;
@@ -634,12 +675,15 @@ function configureRecognition() {
   recognition.lang = state.language;
 
   recognition.onstart = () => {
+    state.recognitionActiveAt = Date.now();
+    countRecognition('starts');
     // Result indexes restart at 0 on every start, so keys from an earlier run
     // would swallow a phrase the user repeats (for example "yes" twice).
     state.finalResultKeys.clear();
     if (!state.speaking && !state.waitingForAnswer) renderVoiceState(listeningHint());
   };
   recognition.onresult = (event) => {
+    state.recognitionActiveAt = Date.now();
     let interim = '';
     for (let index = event.resultIndex; index < event.results.length; index += 1) {
       const result = event.results[index];
@@ -648,6 +692,7 @@ function configureRecognition() {
         interim += `${transcript} `;
         continue;
       }
+      countRecognition('finals');
       const resultKey = `${index}:${transcript}`;
       if (transcript && !state.finalResultKeys.has(resultKey)) {
         state.finalResultKeys.add(resultKey);
@@ -657,11 +702,9 @@ function configureRecognition() {
     }
     interim = interim.trim();
     if (!interim) return;
-    // Still talking: the turn is not over yet.
-    if (state.pendingTurn) {
-      clearTimeout(state.turnTimer);
-      state.turnTimer = setTimeout(flushTurn, TURN_QUIET_MS * 2);
-    }
+    countRecognition('interim');
+    // Still talking: the turn is not over yet (holdTurn caps the wait).
+    if (state.pendingTurn) holdTurn(TURN_QUIET_MS * 2);
     // Barge-in: two real words over Guru Ji's voice stop it at once.
     if (state.speaking && !isEcho(interim) && (words(interim).length >= 2 || STOP_WORDS.test(interim))) {
       interruptReply();
@@ -669,6 +712,7 @@ function configureRecognition() {
     if (!state.speaking) renderVoiceState(`Hearing: “${interim}”`);
   };
   recognition.onerror = (event) => {
+    countRecognition('errors', event.error);
     if (!state.voiceSessionId) return;
     if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
       handleVoiceFailure('Microphone permission was denied.');
@@ -679,11 +723,17 @@ function configureRecognition() {
       setLanguage('en-IN');
       return;
     }
-    if (event.error !== 'aborted' && event.error !== 'no-speech') {
-      renderVoiceState(`Voice input error: ${event.error}.`);
+    if (event.error === 'audio-capture') {
+      renderVoiceState('No microphone is available. Check that one is connected and not used by another app.');
+      return;
     }
+    if (event.error === 'network') {
+      renderVoiceState('Speech recognition lost its connection; trying again…');
+    }
+    // onend follows every error and restarts listening.
   };
   recognition.onend = () => {
+    countRecognition('ends');
     // Browsers end continuous recognition after silence or a network blip;
     // the conversation keeps listening until the person stops it.
     if (state.shouldListen && state.voiceSessionId && !(HALF_DUPLEX && state.speaking)) {
@@ -691,6 +741,75 @@ function configureRecognition() {
     }
   };
   return recognition;
+}
+
+// ------------------------------------------------------------------ listening health
+function freshRecognitionStats() {
+  return { starts: 0, ends: 0, interim: 0, finals: 0, dropped_echo: 0, sent: 0, restarts: 0, errors: [] };
+}
+
+function countRecognition(name, error) {
+  const stats = state.recognitionStats;
+  if (!stats) return;
+  if (name === 'errors') {
+    if (stats.errors.length < 20) stats.errors.push(RECOGNITION_ERRORS.has(error) ? error : 'other');
+    return;
+  }
+  stats[name] += 1;
+}
+
+const RECOGNITION_ERRORS = new Set(['no-speech', 'aborted', 'audio-capture', 'network', 'not-allowed', 'service-not-allowed', 'bad-grammar', 'language-not-supported']);
+
+function browserLabel() {
+  const match = navigator.userAgent.match(/(Edg|OPR|Chrome|Firefox|Version)\/(\d+)/);
+  if (!match) return 'unknown';
+  const name = { Edg: 'Edge', OPR: 'Opera', Version: 'Safari' }[match[1]] || match[1];
+  return `${name} ${match[2]}`;
+}
+
+// Tells the server, every few seconds, what speech recognition did: counts and
+// error codes only, never the words. When voice "hears nothing", the server log
+// then shows whether the browser heard anything at all.
+function sendClientLog() {
+  const stats = state.recognitionStats;
+  const socket = state.voiceSocket;
+  if (!stats || !socket || socket.readyState !== WebSocket.OPEN) return;
+  const changed = Object.entries(stats).some(([key, value]) => (key === 'errors' ? value.length : value) > 0);
+  if (!changed) return;
+  socket.send(JSON.stringify({ type: 'client_log', ...stats, browser: browserLabel() }));
+  state.recognitionStats = freshRecognitionStats();
+}
+
+// Chrome can stop listening without an end event (or after a network error):
+// restart recognition when nothing has been heard for a while.
+function checkRecognition() {
+  if (!state.shouldListen || !state.voiceSessionId || !state.recognition) return;
+  if (HALF_DUPLEX && state.speaking) return;
+  if (Date.now() - state.recognitionActiveAt < RECOGNITION_STALL_MS) return;
+  state.recognitionActiveAt = Date.now();
+  countRecognition('restarts');
+  try {
+    state.recognition.abort();
+  } catch {
+    // Not running; start it below.
+  }
+  window.setTimeout(startRecognition, 400);
+}
+
+function startListeningHealth() {
+  stopListeningHealth();
+  state.recognitionStats = freshRecognitionStats();
+  state.recognitionActiveAt = Date.now();
+  state.watchdogTimer = window.setInterval(checkRecognition, 2000);
+  state.clientLogTimer = window.setInterval(sendClientLog, CLIENT_LOG_MS);
+}
+
+function stopListeningHealth() {
+  sendClientLog();
+  clearInterval(state.watchdogTimer);
+  clearInterval(state.clientLogTimer);
+  state.watchdogTimer = null;
+  state.clientLogTimer = null;
 }
 
 function setLanguage(language) {
@@ -746,6 +865,7 @@ function handleVoiceMessage(event) {
     state.tts = message.tts || null;
     state.reconnectAttempts = 0;
     renderVoiceState(listeningHint());
+    startListeningHealth();
     startRecognition();
     return;
   }
@@ -960,10 +1080,12 @@ async function cleanupVoiceSession(closeServerSession = true) {
   state.waitingForAnswer = false;
   state.intentionalClose = true;
   state.pendingTurn = '';
+  state.turnStartedAt = 0;
   state.activeReplyId = null;
   clearTimeout(state.turnTimer);
   clearInterval(state.pingTimer);
   state.pingTimer = null;
+  stopListeningHealth();
   stopRecognition();
   stopSpeaking();
   for (const key of [...state.thinking.keys()]) removeThinking(key);
