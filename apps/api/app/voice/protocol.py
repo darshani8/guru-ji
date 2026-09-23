@@ -59,8 +59,28 @@ class CloseMessage(VoiceMessageBase):
     type: Literal["close"] = "close"
 
 
+RecognitionError = Literal[
+    "no-speech", "aborted", "audio-capture", "network", "not-allowed", "service-not-allowed", "bad-grammar", "language-not-supported", "other",
+]
+
+
+class ClientLogMessage(VoiceMessageBase):
+    """What the browser's speech recognition did since the last report: counts, never words."""
+
+    type: Literal["client_log"] = "client_log"
+    starts: int = Field(default=0, ge=0, le=10_000)
+    ends: int = Field(default=0, ge=0, le=10_000)
+    interim: int = Field(default=0, ge=0, le=100_000)
+    finals: int = Field(default=0, ge=0, le=10_000)
+    dropped_echo: int = Field(default=0, ge=0, le=10_000)
+    sent: int = Field(default=0, ge=0, le=10_000)
+    restarts: int = Field(default=0, ge=0, le=10_000)
+    errors: list[RecognitionError] = Field(default_factory=list, max_length=20)
+    browser: str | None = Field(default=None, max_length=40, pattern=r"^[A-Za-z0-9 ._/-]*$")
+
+
 VoiceInboundMessage = Annotated[
-    AuthenticateMessage | UtteranceMessage | InterruptMessage | PingMessage | CloseMessage,
+    AuthenticateMessage | UtteranceMessage | InterruptMessage | PingMessage | CloseMessage | ClientLogMessage,
     Field(discriminator="type"),
 ]
 
@@ -69,6 +89,7 @@ VOICE_MESSAGE_ADAPTER: TypeAdapter[VoiceInboundMessage] = TypeAdapter(VoiceInbou
 
 __all__ = [
     "AuthenticateMessage",
+    "ClientLogMessage",
     "CloseMessage",
     "HistoryItem",
     "InterruptMessage",
