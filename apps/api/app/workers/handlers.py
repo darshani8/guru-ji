@@ -83,6 +83,7 @@ def register_handlers(queue: JobQueue, *, ingestion: IngestionService | None = N
     if map_desk is not None:
         async def send_map_digest(payload: dict[str, Any]) -> dict[str, Any]:
             digest = map_desk.send_digest(str(payload["institution_id"]))
+            map_desk.store.cache_prune()  # the shared public-web cache: drop what expired, once a day
             return {"sent": digest["sent"], "incidents": len(digest["incidents"]), "found": digest["found"]}
 
         queue.register("intelligence.map_digest", send_map_digest)

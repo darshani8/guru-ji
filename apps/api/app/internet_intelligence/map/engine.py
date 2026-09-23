@@ -46,6 +46,7 @@ from uuid import uuid4
 
 from ..fetch import PublicPageFetcher
 from ..profile import InstitutionProfile
+from .cache import cached_search
 from .connectors.base import ConnectorContext, ConnectorRegistry, ConnectorResult, Lead
 from .gate import SECURITY_STATUSES, gate_pass, rescore, snapshot
 from .grading import SCORER_VERSION
@@ -131,7 +132,8 @@ class MapEngine:
         return added
 
     def _context(self, institution_id: str, run_id: str, profile: InstitutionProfile | None) -> ConnectorContext:
-        return ConnectorContext(self.store, institution_id, run_id, self.clock(), fetcher=self.fetcher, search=self.search, profile=profile, max_hops=self.config.max_hops, extras=self.extras)
+        # Each run gets its own cache wrapper: a search another institution already paid for costs this run 0.
+        return ConnectorContext(self.store, institution_id, run_id, self.clock(), fetcher=self.fetcher, search=cached_search(self.search, self.store, clock=self.clock), profile=profile, max_hops=self.config.max_hops, extras=self.extras)
 
     def _add_lead(self, institution_id: str, lead: Lead, *, origin_override: str | None = None) -> bool:
         if lead.hops > self.config.max_hops:

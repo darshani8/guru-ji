@@ -29,6 +29,7 @@ async def _run(runtime, institution_id: str | None, map_mode: bool = False, dige
         institutions = [institution_id] if institution_id else platform.intelligence_store.monitored_institutions()
         if digest:
             desk = platform.intelligence_map.desk
+            desk.store.cache_prune()  # the shared public-web cache: drop what expired, once a day
             return [{key: value for key, value in desk.send_digest(item).items() if key != "incidents"} for item in institutions]
         return await platform.intelligence_map.engine.tick_all(institutions)
     if platform is None or platform.monitor is None:
