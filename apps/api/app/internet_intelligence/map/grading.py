@@ -27,6 +27,10 @@ parent (only the domain's owner controls its DNS).
 
 "Blocked" (a login wall or 403) is not "dead": it changes the status, never
 the grade. A snippet never refreshes "last verified".
+
+Retention leans on this rule: past the retention period it blanks only the
+free text the rule never parses (FREE_TEXT_KINDS) and deletes only the
+observations it no longer reads (superseded_observations), so no grade moves.
 """
 
 from __future__ import annotations
@@ -43,6 +47,17 @@ DEAD_CONFIRMATION = timedelta(hours=24)
 # Kinds whose channel counts toward the two-independent-channels rule.
 _CORROBORATING = frozenset({"search_snippet", "directory_record", "community_record", "hub_link", "reviewer_confirm", "backlink", "api_identity"})
 _ONE_STEP_DOWN = {"O": "A", "A": "B", "A-arch": "C", "B": "C", "C": "C"}
+# Kinds whose detail is free text (a page or channel title, a reviewer's note,
+# an imported claim, why something is a look-alike). The rule reads only their
+# kind, polarity, channel, time and how they were observed, and quotes the
+# detail at the end of a reason, so retention (MapStore.prune_retention) can
+# replace the text with EXPIRED_DETAIL without moving a grade. A kind whose
+# detail the rule parses (official_link, hub_link, subdomain, directory_record,
+# integrity, liveness, owner_claim) must never be listed here.
+FREE_TEXT_KINDS = frozenset({"search_snippet", "imported_claim", "reviewer_confirm", "reviewer_reject", "impersonation", "lookalike", "spam_indexed", "backlink", "api_identity", "community_record"})
+EXPIRED_DETAIL = "[expired]"
+_OBSERVATIONS = frozenset({"liveness", "integrity"})
+_NOT_FOUND = frozenset({"not_found", "gone"})
 
 
 @dataclass(slots=True)
@@ -246,19 +261,73 @@ def _status(ordered: Sequence[Mapping[str, Any]], now: datetime) -> str | None:
     reason = _detail(last).split(":", 1)[0]
     if reason in {"blocked", "login_wall", "robots", "snippet_only"}:
         return "blocked"
-    if reason in {"not_found", "gone"}:
+    if reason in _NOT_FOUND:
         # Dead only when a second failure came at least a day after the first
-        # in the same unbroken run of failures.
+        # in the same unbroken run of failures (superseded_observations keeps
+        # what this reads).
         failures: list[Mapping[str, Any]] = []
         for item in reversed(liveness):
             if item.get("polarity") == "supports":
                 break
-            if _detail(item).split(":", 1)[0] in {"not_found", "gone"}:
+            if _detail(item).split(":", 1)[0] in _NOT_FOUND:
                 failures.append(item)
         if len(failures) >= 2 and _when(failures[0].get("observed_at")) - _when(failures[-1].get("observed_at")) >= DEAD_CONFIRMATION:
             return "dead"
         return None
     return None
+
+
+def expire_quotes(reasons: Sequence[str], details: Iterable[str]) -> list[str]:
+    """Grade reasons with their quotes of these details replaced by EXPIRED_DETAIL, worded as grade() now words them.
+
+    grade() quotes a detail only at the end of a reason, as "(<first 80
+    characters>)" or ": <first 120 characters>", so only such an ending is
+    replaced; the same words elsewhere in a reason stay.
+    """
+
+    texts = [text for text in dict.fromkeys(details) if text]
+
+    def expired(reason: str) -> str:
+        for text in texts:
+            for quote, blank in ((f"({text[:80]})", f"({EXPIRED_DETAIL})"), (f": {text[:120]}", f": {EXPIRED_DETAIL}")):
+                if reason.endswith(quote):
+                    return reason[: -len(quote)] + blank
+        return reason
+
+    return list(dict.fromkeys(expired(str(reason)) for reason in reasons))
+
+
+def superseded_observations(rows: Iterable[Mapping[str, Any]], *, before: datetime) -> list[str]:
+    """The liveness and integrity rows observed before ``before`` that grade() no longer reads (evidence ids).
+
+    Per asset, in grade()'s own order, every row the rule can still read is
+    kept whatever its age: the newest of each kind on each channel (the last
+    check, each channel's latest verdict); the newest success of each kind by
+    how it was observed (when the asset was last verified); every hijacked
+    verdict (a hijack stands until the owner or a reviewer confirms the domain
+    again); and of liveness, the last success and the oldest and newest
+    not-found failures after it ("dead on two checks at least a day apart"
+    spans the whole unbroken run of failures, across channels). Deleting the
+    rest leaves every grade, status and verification time as it was.
+    """
+
+    by_asset: dict[str, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        if row.get("kind") in _OBSERVATIONS:
+            by_asset.setdefault(str(row.get("asset_id")), []).append(row)
+    doomed: list[str] = []
+    for items in by_asset.values():
+        items.sort(key=lambda item: (_when(item.get("observed_at")), str(item.get("evidence_id", ""))))
+        keep = {str(item["evidence_id"]) for item in {(item["kind"], str(item.get("channel") or "")): item for item in items}.values()}
+        keep |= {str(item["evidence_id"]) for item in {(item["kind"], item.get("observed_via")): item for item in items if item.get("polarity") == "supports"}.values()}
+        keep |= {str(item["evidence_id"]) for item in items if item["kind"] == "integrity" and _detail(item).startswith("hijacked")}
+        liveness = [item for item in items if item["kind"] == "liveness"]
+        # The last success (kept above as the newest liveness success) ends the run the "dead" test walks.
+        start = max((index for index, item in enumerate(liveness) if item.get("polarity") == "supports"), default=-1)
+        failures = [item for item in liveness[start + 1 :] if _detail(item).split(":", 1)[0] in _NOT_FOUND]
+        keep |= {str(item["evidence_id"]) for item in failures[:1] + failures[-1:]}
+        doomed.extend(str(item["evidence_id"]) for item in items if str(item["evidence_id"]) not in keep and _when(item.get("observed_at")) < before)
+    return doomed
 
 
 def apply_disputes(assets: Iterable[Mapping[str, Any]], grades: Mapping[str, str]) -> dict[str, str]:
@@ -286,4 +355,4 @@ def apply_disputes(assets: Iterable[Mapping[str, Any]], grades: Mapping[str, str
     return capped
 
 
-__all__ = ["SCORER_VERSION", "GradeResult", "apply_disputes", "grade"]
+__all__ = ["EXPIRED_DETAIL", "FREE_TEXT_KINDS", "SCORER_VERSION", "GradeResult", "apply_disputes", "expire_quotes", "grade", "superseded_observations"]

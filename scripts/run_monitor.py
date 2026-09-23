@@ -6,7 +6,9 @@ interval (the compose ``monitor`` service uses this). ``--map`` runs the
 internet map engine instead: one tick per institution with monitoring
 enabled, each picking up where the last stopped. ``--digest`` sends each
 institution's daily map digest (open incidents, the review queue, what was
-found); schedule it once a day. Alerts go to each
+found), then applies the intelligence retention period
+(GURU_INTELLIGENCE_RETENTION_DAYS) to that institution's data; schedule it
+once a day. Alerts go to each
 profile's alert recipients as in-app notifications (and onward through the
 control-plane outbox).
 """
@@ -28,15 +30,24 @@ async def _run(runtime, institution_id: str | None, map_mode: bool = False, dige
             raise SystemExit("the internet map is not enabled (GURU_INTELLIGENCE_MAP_ENABLED)")
         institutions = [institution_id] if institution_id else platform.intelligence_store.monitored_institutions()
         if digest:
-            desk = platform.intelligence_map.desk
+            desk, days = platform.intelligence_map.desk, runtime.settings.intelligence_retention_days
             desk.store.cache_prune()  # the shared public-web cache: drop what expired, once a day
-            return [{key: value for key, value in desk.send_digest(item).items() if key != "incidents"} for item in institutions]
+            return [{**{key: value for key, value in desk.send_digest(item).items() if key != "incidents"}, "pruned": _prune(platform, days, item)} for item in institutions]
         return await platform.intelligence_map.engine.tick_all(institutions)
     if platform is None or platform.monitor is None:
         raise SystemExit("internet monitoring is not configured (GURU_INTELLIGENCE_SEARCH_PROVIDER)")
     if institution_id:
         return [await platform.monitor.run_for(institution_id)]
     return await platform.monitor.run_all()
+
+
+def _prune(platform, days: int, institution_id: str) -> dict[str, object]:
+    """Retention rides on the daily digest; a failure is reported, not raised (the next pass would send the digest again)."""
+
+    try:
+        return platform.prune_intelligence(days, institution_id=institution_id)
+    except Exception as exc:  # noqa: BLE001 - housekeeping must not stop the digests
+        return {"error": str(exc)[:300]}
 
 
 async def _loop(runtime, institution_id: str | None, every: float, map_mode: bool, digest: bool = False) -> None:

@@ -253,6 +253,12 @@ def build_runtime(settings: AppSettings | None = None, *, start_workers: bool = 
         tracer=tracer,
     )
     platform = build_platform(settings, control_store=store, pdp=pdp, tracer=tracer, model=model, planner_model=_build_planner_model(settings, model), start_workers=start_workers) if settings.platform_enabled else None
+    if platform is not None:
+        # The intelligence stores open with the platform, so their retention runs here rather than beside the audit pruning above.
+        try:
+            platform.prune_intelligence(settings.intelligence_retention_days)
+        except Exception as exc:  # noqa: BLE001 - housekeeping must not keep the API from starting
+            logging.getLogger(__name__).warning("intelligence retention pruning skipped at start-up: %s", exc)
     return Runtime(
         settings=settings,
         sources=sources,

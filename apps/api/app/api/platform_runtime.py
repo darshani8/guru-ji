@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+from functools import partial
 from typing import Any
 
 from ..actions.email import EmailSender, EmailService, OutboxEmailSender, SesEmailSender, SmtpEmailSender
@@ -87,6 +88,24 @@ class PlatformRuntime:
         self.store.close()
         if self.intelligence_store.backend is not self.store.backend:
             self.intelligence_store.close()
+
+    def prune_intelligence(self, days: int, *, institution_id: str | None = None) -> dict[str, dict[str, int]]:
+        """Apply the intelligence retention period to the monitoring store and, when it is on, the internet map."""
+
+        return prune_intelligence(self.intelligence_store, self.intelligence_map.store if self.intelligence_map else None, days, institution_id=institution_id)
+
+
+def prune_intelligence(intelligence_store: IntelligenceStore, map_store: MapStore | None, days: int, *, institution_id: str | None = None) -> dict[str, dict[str, int]]:
+    """GURU_INTELLIGENCE_RETENTION_DAYS for one institution or (with none named) every one: counts per store.
+
+    Runs at start-up and with the daily map digest. The map's tables are
+    pruned only while the map is on, because the map store is not opened otherwise.
+    """
+
+    return {
+        "monitoring": intelligence_store.prune_retention(days, institution_id=institution_id),
+        "map": map_store.prune_retention(days=days, institution_id=institution_id) if map_store is not None else {},
+    }
 
 
 def _object_store(settings: AppSettings) -> ObjectStore:
@@ -270,9 +289,15 @@ def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: P
         if worker_map is not None and worker.intelligence is not None:
             worker.intelligence.map_store = worker_map.store  # and the scheduled monitor's runs
         worker_agent = MasterAgent(worker.gateway, worker.registry, worker.data, worker_store, control_store, planner=DeterministicPlanner(), model_planner=model_planner, model=model, model_max_tokens=settings.model_max_tokens, tracer=tracer, background=jobs)
-        register_handlers(jobs, ingestion=worker.ingestion, agent=worker_agent, monitor=worker.monitor, notifications=worker.notifications, map_engine=worker_map.engine if worker_map else None, map_desk=worker_map.desk if worker_map else None)
+        register_handlers(
+            jobs, ingestion=worker.ingestion, agent=worker_agent, monitor=worker.monitor, notifications=worker.notifications, map_engine=worker_map.engine if worker_map else None, map_desk=worker_map.desk if worker_map else None,
+            retention=partial(prune_intelligence, worker_intelligence_store, worker_map.store if worker_map else None, settings.intelligence_retention_days),
+        )
     else:
-        register_handlers(jobs, ingestion=request.ingestion, agent=agent, monitor=request.monitor, notifications=request.notifications, map_engine=intelligence_map.engine if intelligence_map else None, map_desk=intelligence_map.desk if intelligence_map else None)
+        register_handlers(
+            jobs, ingestion=request.ingestion, agent=agent, monitor=request.monitor, notifications=request.notifications, map_engine=intelligence_map.engine if intelligence_map else None, map_desk=intelligence_map.desk if intelligence_map else None,
+            retention=partial(prune_intelligence, intelligence_store, intelligence_map.store if intelligence_map else None, settings.intelligence_retention_days),
+        )
     if start_workers:
         # The thread queue only wakes on enqueue, so start it at boot rather than
         # on the first upload, then hand back jobs whose worker stopped reporting.
@@ -287,4 +312,4 @@ def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: P
     )
 
 
-__all__ = ["PlatformRuntime", "build_platform", "map_connectors"]
+__all__ = ["PlatformRuntime", "build_platform", "map_connectors", "prune_intelligence"]

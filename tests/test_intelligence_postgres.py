@@ -161,6 +161,56 @@ class PostgresMapStoreTests(unittest.TestCase):
         self.assertEqual([store.take_investigation(institution, "p1", day="2026-09-22", cap=2) for _ in range(3)], [True, True, False])
         self.assertEqual(store.investigations_used(institution, "p1", day="2026-09-22"), 2)
 
+    def test_retention_runs_as_the_application_role_under_row_level_security(self):
+        from datetime import datetime, timedelta, timezone
+
+        from app.internet_intelligence.map.assets import asset_ref
+        from app.internet_intelligence.map.grading import EXPIRED_DETAIL
+        from app.internet_intelligence.map.store import TENANT_TABLES, MapStore
+        from app.internet_intelligence.profile import InstitutionProfile
+        from app.internet_intelligence.store import IntelligenceStore
+        from app.persistence.schema_tools import known_tenants
+
+        monitoring, store = IntelligenceStore(POSTGRES_URL), MapStore(POSTGRES_URL, suppression_key=b"k")
+        old = (datetime.now(timezone.utc) - timedelta(days=400)).isoformat()
+        named, unnamed = f"pgt-{uuid4().hex[:10]}", f"pgt-{uuid4().hex[:10]}"
+        # Only the registries outside row-level security name an institution to a pass with no tenant.
+        monitoring.save_profile(InstitutionProfile(named, "Named College"), updated_by="p")
+        rows: dict[str, dict[str, str]] = {}
+        for institution in (named, unnamed):
+            asset_id, _ = store.upsert_asset(institution, asset_ref("https://www.instagram.com/someone/"), entity_id=None)
+            old_snippet = store.add_evidence(institution, asset_id=asset_id, kind="search_snippet", detail="bing: a person's name", channel="search:bing", observed_via="index", observed_at=old)
+            recent_snippet = store.add_evidence(institution, asset_id=asset_id, kind="search_snippet", detail="bing: recent", channel="search:bing", observed_via="index")
+            old_review, _ = store.add_review_item(institution, kind="candidate_account", title="old", url="https://www.instagram.com/old/")
+            recent_review, _ = store.add_review_item(institution, kind="candidate_account", title="recent", url="https://www.instagram.com/recent/")
+            for review_id in (old_review, recent_review):
+                store.decide_review_item(institution, review_id, decision="dismiss", decided_by="p")
+            document_id, _ = monitoring.upsert_document(institution, {
+                "canonical_url": f"https://news.example/{institution}", "url": f"https://news.example/{institution}", "domain": "news.example", "source_type": "news", "title": "t", "excerpt": "e",
+                "content_sha256": "0" * 64, "match_level": "strong", "match_score": 0.9, "status": "kept",
+            })
+            with store.backend.transaction(tenant_id=institution):
+                store.backend.execute("UPDATE intel_review_items SET decided_at = ?, updated_at = ? WHERE institution_id = ? AND review_id = ?", (old, old, institution, old_review))
+                store.backend.execute("UPDATE internet_documents SET last_seen_at = ? WHERE institution_id = ? AND document_id = ?", (old, institution, document_id))
+            rows[institution] = {"asset": asset_id, "old_snippet": old_snippet, "recent_snippet": recent_snippet, "old_review": old_review, "recent_review": recent_review, "document": document_id}
+        with store.backend.transaction():
+            self.assertEqual(store.backend.fetchone("SELECT COUNT(*) AS n FROM intel_review_items WHERE institution_id IN (?, ?)", (named, unnamed))["n"], 0, "no tenant, no rows: row-level security applies")
+        self.assertIn(named, known_tenants(store.backend, TENANT_TABLES))
+        self.assertNotIn(unnamed, known_tenants(store.backend, TENANT_TABLES))
+
+        def state(institution: str) -> tuple:
+            details = {row["evidence_id"]: row["detail"] for row in store.list_evidence(institution, asset_id=rows[institution]["asset"])}
+            reviews = {row["review_id"] for row in store.list_review_items(institution, status=None)}
+            return details[rows[institution]["old_snippet"]], details[rows[institution]["recent_snippet"]], reviews, monitoring.get_document(institution, rows[institution]["document"]) is not None
+
+        store.prune_retention(days=365)
+        monitoring.prune_retention(365)
+        self.assertEqual(state(named), (EXPIRED_DETAIL, "bing: recent", {rows[named]["recent_review"]}, False))
+        self.assertEqual(state(unnamed), ("bing: a person's name", "bing: recent", {rows[unnamed]["old_review"], rows[unnamed]["recent_review"]}, True), "an institution no registry names is reached only by naming it")
+        store.prune_retention(days=365, institution_id=unnamed)
+        monitoring.prune_retention(365, institution_id=unnamed)
+        self.assertEqual(state(unnamed), (EXPIRED_DETAIL, "bing: recent", {rows[unnamed]["recent_review"]}, False))
+
     def test_migration_files_can_be_applied_twice(self):
         import psycopg
 

@@ -128,6 +128,38 @@ next weekly check.
   an impersonator, or a person's own account; a personal account is removed
   from the map entirely and never added again.
 
+## How long the map keeps things
+
+India's Digital Personal Data Protection Act asks that data be kept no
+longer than its purpose needs, so the map has a retention period: 365 days
+by default, set by the operator (`GURU_INTELLIGENCE_RETENTION_DAYS`, 30 to
+3650 days). It is applied every day, with the map's daily digest, and each
+time the service starts.
+
+* **Deleted after the period:** review decisions, resolved incidents, the
+  record of past runs, stored page validators (ETags), and leads the map
+  stopped following. Quota counters go after 30 days at most. The
+  monitoring side deletes the articles it found, its alerts, runs and
+  reports on the same schedule.
+* **Kept, with its text removed:** the evidence a grade rests on. After the
+  period, free text such as a search result's title, a reviewer's note or an
+  imported comment is replaced with `[expired]`. The record that the
+  evidence existed stays: what kind it was, when and where it was seen, and
+  whether it supported or refuted the account. So a grade never changes
+  because time passed.
+* **Thinned:** old availability and integrity checks that newer checks have
+  replaced are deleted. The latest check of each kind is always kept, and so
+  is anything that still decides a grade: a hijacking nobody has cleared, or
+  the failed checks that show a site is dead.
+* **Kept for as long as the map runs:** the accounts and sites themselves,
+  their grades, and the ground truth the map is measured against. The
+  fingerprints of suppressed accounts are also kept, so those accounts
+  never return.
+
+A decision older than the period is forgotten. If the same account turns
+up again, a reviewer is asked again, but the grade the decision set does not
+change.
+
 ## Opting out
 
 Disallowing the crawler in `robots.txt` stops it reading your pages. Your
