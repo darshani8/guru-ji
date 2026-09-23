@@ -54,6 +54,24 @@ class WebAssetTests(unittest.TestCase):
         js = (ASSISTANT / "app.js").read_text(encoding="utf-8")
         self.assertRegex(js, r"recognition\.onstart = \(\) => \{[^}]*state\.finalResultKeys\.clear\(\);")
 
+    def test_assistant_answers_from_imported_records_through_the_agent(self):
+        # The read-only chat answers from the configured sources only; the agent
+        # reads what the college imported. It stays the fallback where the
+        # platform is off (503) or the account may not run commands (403).
+        js = (ASSISTANT / "app.js").read_text(encoding="utf-8")
+        self.assertIn("api('/v1/agent/commands'", js)
+        self.assertIn("if (error.status !== 503 && error.status !== 403) throw error;", js)
+        self.assertIn("data = await askReadOnlyAssistant(text);", js)
+        self.assertIn("error.status = response.status;", js)
+        self.assertIn("mode: 'agent',", js)
+
+    def test_record_changes_wait_for_confirmation_on_the_assistant_page(self):
+        js = (ASSISTANT / "app.js").read_text(encoding="utf-8")
+        self.assertIn("answer.status === 'approval_required' && answer.approval", js)
+        self.assertIn("/v1/agent/approvals/${encodeURIComponent(approval.approval_id)}", js)
+        self.assertIn("showAnswer(await askAgent(command, approval.approval_id), { command });", js)
+        self.assertRegex((SHARED / "styles.css").read_text(encoding="utf-8"), r"\.approval-button\s*\{")
+
     def test_browser_reads_the_college_claims_the_server_accepts(self):
         # Cognito sends custom:college_id. Missing it left collegeId() empty and
         # every voice session and chat request failed validation.
