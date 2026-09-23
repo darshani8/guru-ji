@@ -10,16 +10,27 @@ from ..profile import InstitutionProfile
 from .assets import asset_ref
 from .connectors.common import _words
 from .grading import SCORER_VERSION, apply_disputes, grade
-from .store import MapStore
+from .authority import authorities
+from .store import GRADE_RANK, MapStore
 
 
-def regrade(store: MapStore, institution_id: str, asset_ids: Iterable[str] | None = None, *, now: datetime | None = None, proposed: bool = False, run_id: str | None = None) -> list[dict[str, Any]]:
+# Statuses that say a site is out of the institution's hands: never held back from readers.
+SECURITY_STATUSES = frozenset({"compromised", "hijacked", "parked", "redirected", "dead"})
+
+
+def regrade(
+    store: MapStore, institution_id: str, asset_ids: Iterable[str] | None = None, *, now: datetime | None = None, proposed: bool = False, run_id: str | None = None, publish: bool = False,
+) -> list[dict[str, Any]]:
     """Recompute grades (all assets, or the given ones); returns the changes.
 
     ``proposed`` parks the new grades in ``proposed_grade`` (tagged with
     ``run_id``) instead of publishing them, for a run whose results a gate
     must approve first. A grade last computed by an older rule is always
-    parked: a rule change reaches readers only through the gate (``rescore``).
+    parked: a rule change reaches readers only through the gate (``rescore``),
+    and so is a change to a grade already waiting for a manager. Two things
+    are never parked: a fall to D or to a site out of the institution's
+    hands (a hijack must not hide behind a pending proposal), and anything
+    with ``publish`` (a reviewer's verdict takes effect at once).
     """
 
     current = now or datetime.now(timezone.utc)
@@ -68,7 +79,9 @@ def regrade(store: MapStore, institution_id: str, asset_ids: Iterable[str] | Non
             stale = bool(asset.get("scorer_version")) and asset.get("scorer_version") != SCORER_VERSION
             # A grade already waiting for a manager (a held pass or re-scoring) stays waiting: a later pass never publishes around the gate.
             pending = asset.get("proposed_grade") is not None
-            park = (proposed or stale or pending) and result.grade != asset["grade"]
+            lowered = GRADE_RANK.get(result.grade, 1) < GRADE_RANK.get(asset["grade"], 1)
+            urgent = publish or (lowered and (result.grade == "D" or (result.status or asset["status"]) in SECURITY_STATUSES))
+            park = (proposed or ((stale or pending) and not urgent)) and result.grade != asset["grade"]
             parked_run = run_id if proposed else (asset.get("proposed_run_id") or run_id)
             store.set_grade(institution_id, asset_id, grade=result.grade, reasons=result.reasons, scorer_version=SCORER_VERSION, proposed=park, run_id=parked_run if park else None)
             if park:
@@ -113,8 +126,15 @@ def sync_profile(store: MapStore, profile: InstitutionProfile, *, run_id: str | 
     entity_id = store.upsert_entity(profile.institution_id, name=name, kind=kind, names=[item for item in names if item != name], locations=[profile.location] if profile.location else [])
     created: list[str] = []
     configured: set[str] = set()
+    refused: list[str] = []
     for domain in profile.official_domains:
         ref = asset_ref(f"https://{domain}/")
+        known = store.find_asset(profile.institution_id, ref.key)
+        if known is not None and authorities(lambda entity_id: store.get_entity(profile.institution_id, entity_id), known.get("entity_id")):
+            # Another group's domain (the Math's): the profile cannot make it the
+            # institution's own; only that group's approvers may settle it.
+            refused.append(domain)
+            continue
         asset_id, is_new = store.upsert_asset(profile.institution_id, ref, entity_id=entity_id, relation="official", note="configured in the intelligence profile")
         configured.add(asset_id)
         if _configured_now(store, profile.institution_id, asset_id) is not True:
@@ -133,7 +153,7 @@ def sync_profile(store: MapStore, profile: InstitutionProfile, *, run_id: str | 
         regrade(store, profile.institution_id, removed)
     # Profile social handles are bare ("@bgscet") and cannot be placed on a
     # platform without guessing; they stay in the profile for entity resolution.
-    return {"entity_id": entity_id, "domains_added": created, "domains_removed": removed}
+    return {"entity_id": entity_id, "domains_added": created, "domains_removed": removed, "domains_refused": refused}
 
 
 def _configured_now(store: MapStore, institution_id: str, asset_id: str) -> bool | None:
@@ -196,7 +216,7 @@ def refute_source(store: MapStore, institution_id: str, source_asset_id: str, *,
     for asset_id in sorted(linked):
         store.add_evidence(institution_id, asset_id=asset_id, kind="source_refuted", polarity="refutes", detail=reason[:120], source_asset_id=source_asset_id, channel=channel, observed_via="reviewer", run_id=run_id)
     if linked:
-        regrade(store, institution_id, sorted(linked))
+        regrade(store, institution_id, sorted(linked), publish=True)  # a reviewer's verdict takes effect at once
     return sorted(linked)
 
 
@@ -207,7 +227,7 @@ def forget(store: MapStore, institution_id: str, asset_id: str, *, keep_review_i
         cited = store.cited_by(institution_id, asset_id)
         if not store.forget_asset(institution_id, asset_id, keep_review_id=keep_review_id):
             return False
-        regrade(store, institution_id, cited)
+        regrade(store, institution_id, cited, publish=True)
     return True
 
 

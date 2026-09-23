@@ -324,7 +324,8 @@ class MapService:
             elif decision == "discard":
                 effect["discarded"] = self.store.discard_proposed(institution_id, run_id=item.get("run_id"))
             if asset is not None and decision in ASSET_DECISIONS:
-                effect["changes"] = regrade(self.store, institution_id, [asset["asset_id"]])
+                # A reviewer's verdict takes effect at once, even over a proposal waiting for a manager.
+                effect["changes"] = regrade(self.store, institution_id, [asset["asset_id"]], publish=True)
         if "incident" in effect and self.desk is not None:
             self.desk.record(institution_id, [effect["incident"]])
         return {"review_id": review_id, "kind": item["kind"], **effect}

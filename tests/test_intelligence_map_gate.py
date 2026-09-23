@@ -303,5 +303,42 @@ class ProvenanceTests(Base):
         self.assertEqual(self.grade(account), "B")
 
 
+class PendingProposalTests(Base):
+    def setUp(self):
+        super().setUp()
+        self.account_id = self.asset("https://www.instagram.com/bgscet_official_fake/")
+        self.evidence(self.account_id, "search:tavily", "wikidata")
+        regrade(self.store, INSTITUTION)
+        self.assertEqual(self.grade(self.account_id), "B")
+        # An unrelated held pass left a proposal waiting on it.
+        self.store.set_grade(INSTITUTION, self.account_id, grade="A", reasons=["held"], scorer_version=SCORER_VERSION, proposed=True, run_id="held-run")
+
+    def test_a_reviewers_verdict_is_not_swallowed_by_a_waiting_proposal(self):
+        review_id, _ = self.store.add_review_item(INSTITUTION, kind="impersonation_candidate", title="copies our logo", asset_id=self.account_id, url="https://www.instagram.com/bgscet_official_fake/")
+        self.service.decide(self.manager, INSTITUTION, review_id, decision="impersonation", note="copies our logo")
+        self.assertEqual((self.grade(self.account_id), self.store.get_asset(INSTITUTION, self.account_id)["proposed_grade"]), ("D", None))
+        self.assertNotIn(self.account_id, [asset["asset_id"] for asset in self.service.assets(self.reader, INSTITUTION)])
+
+    def test_a_security_downgrade_is_not_swallowed_either(self):
+        domain = self.store.find_asset(INSTITUTION, "web:bgscet.ac.in")["asset_id"]
+        self.store.set_grade(INSTITUTION, domain, grade="A", reasons=["held"], scorer_version=SCORER_VERSION, proposed=True, run_id="held-run")
+        self.store.add_evidence(INSTITUTION, asset_id=domain, kind="integrity", polarity="refutes", detail="hijacked:gambling", channel="fetch", observed_via="live")
+        regrade(self.store, INSTITUTION, [domain])
+        self.assertEqual((self.grade(domain), self.store.get_asset(INSTITUTION, domain)["status"]), ("D", "hijacked"))
+
+
+class ProfileAuthorityTests(Base):
+    def test_the_profile_cannot_make_another_groups_domain_the_institutions_own(self):
+        math = self.store.upsert_entity(INSTITUTION, name="Sri Adichunchanagiri Mahasamsthana Math", kind="organisation", group_label="Mutt & Swamiji", authority="Mutt & Swamiji")
+        domain, _ = self.store.upsert_asset(INSTITUTION, asset_ref("https://acmbengaluru.org/"), entity_id=math, relation="official")
+        self.store.add_evidence(INSTITUTION, asset_id=domain, kind="imported_claim", channel="seed", observed_via="import")
+        regrade(self.store, INSTITUTION, [domain])
+        widened = InstitutionProfile(INSTITUTION, PROFILE.name, "Bengaluru", aliases=["BGSCET"], official_domains=["bgscet.ac.in", "acmbengaluru.org"])
+        result = sync_profile(self.store, widened)
+        self.assertEqual(result["domains_refused"], ["acmbengaluru.org"])
+        regrade(self.store, INSTITUTION, [domain])
+        self.assertEqual(self.grade(domain), "C", "only the Math's approvers may settle the Math's domain")
+
+
 if __name__ == "__main__":
     unittest.main()

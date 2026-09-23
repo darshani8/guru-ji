@@ -21,13 +21,11 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from .metrics import map_metrics
-from .pipeline import regrade
+from .pipeline import SECURITY_STATUSES, regrade
 from .store import GRADE_RANK, MapStore, grade_at_least
 
 # How much a proposal may lower seed verification, holdout recall or precision.
 REGRESSION_TOLERANCE = 0.02
-# Statuses that say a site is out of the institution's hands: never held back from readers.
-SECURITY_STATUSES = frozenset({"compromised", "hijacked", "parked", "redirected", "dead"})
 
 
 @dataclass(slots=True)
