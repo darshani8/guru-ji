@@ -9,6 +9,7 @@ from __future__ import annotations
 
 
 from ..normalization.canonical import CANONICAL_ENTITIES, CanonicalEntity, FieldType
+from ..persistence.schema_tools import idempotent_tenant_isolation_sql
 
 SCHEMA_VERSION = "002_institution_data"
 
@@ -319,20 +320,7 @@ def postgres_row_level_security() -> tuple[str, ...]:
     for applying the schema by hand with psql.
     """
 
-    statements: list[str] = []
-    for table in TENANT_TABLES:
-        policy = f"{table}_tenant_isolation"
-        statements.append(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY")
-        statements.append(f"ALTER TABLE {table} FORCE ROW LEVEL SECURITY")
-        statements.append(
-            "DO $$ BEGIN "
-            f"IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = '{table}' AND policyname = '{policy}') THEN "
-            f"CREATE POLICY {policy} ON {table} "
-            "USING (institution_id = current_setting('app.institution_id', true)) "
-            "WITH CHECK (institution_id = current_setting('app.institution_id', true)); "
-            "END IF; END $$"
-        )
-    return tuple(statements)
+    return idempotent_tenant_isolation_sql(TENANT_TABLES)
 
 
 # Columns added after a table first shipped; ``CREATE TABLE IF NOT EXISTS`` does

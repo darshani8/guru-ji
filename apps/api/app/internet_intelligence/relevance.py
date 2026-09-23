@@ -8,27 +8,41 @@ from datetime import datetime, timedelta, timezone
 
 from .query_generator import question_terms
 
+# A keyword matches as a whole word (plus a plural "s"/"es"), so "fir" no
+# longer tags every page that says "first" and "lab" no longer matches
+# "label". A trailing "*" marks a stem that may take any ending
+# ("inaugurat*" covers inaugurated and inauguration).
 TOPIC_KEYWORDS: dict[str, tuple[str, ...]] = {
-    "admission": ("admission", "admissions", "apply", "application", "intake", "seats", "counselling", "cutoff", "eligibility"),
-    "placement": ("placement", "placements", "recruit", "recruitment", "package", "hired", "campus drive", "internship", "offer letters"),
-    "event": ("event", "fest", "seminar", "workshop", "conference", "celebrat", "inaugurat", "webinar", "hackathon", "cultural", "sports meet", "symposium"),
-    "ranking": ("rank", "ranking", "nirf", "rated", "top college"),
-    "accreditation": ("naac", "nba", "accredit", "autonomous", "affiliat", "approved by", "ugc", "aicte"),
-    "results": ("result", "results", "topper", "pass percentage", "exam", "examination", "merit"),
-    "faculty": ("faculty", "professor", "lecturer", "staff", "appointed", "principal", "vice chancellor", "hod"),
-    "campus": ("campus", "hostel", "infrastructure", "library", "lab", "building", "facility"),
-    "fees": ("fee", "fees", "scholarship", "tuition", "refund"),
-    "controversy": ("protest", "complaint", "allegation", "fir", "police", "strike", "suspend", "ragging", "harass", "fraud", "court", "notice"),
+    "admission": ("admission", "apply", "application", "intake", "seat", "counselling", "counseling", "cutoff", "cut-off", "eligibility"),
+    "placement": ("placement", "recruit*", "package", "hired", "campus drive", "internship", "offer letter"),
+    "event": ("event", "fest*", "seminar", "workshop", "conference", "celebrat*", "inaugurat*", "webinar", "hackathon", "cultural", "sports meet", "symposium"),
+    "ranking": ("rank*", "nirf", "rated", "top college"),
+    "accreditation": ("naac", "nba", "accredit*", "autonomous", "affiliat*", "approved by", "ugc", "aicte"),
+    "results": ("result", "topper", "pass percentage", "exam", "examination", "merit"),
+    "faculty": ("facult*", "professor", "lecturer", "staff", "appointed", "principal", "vice chancellor", "vice-chancellor", "hod"),
+    "campus": ("campus", "hostel", "infrastructure", "librar*", "lab", "laborator*", "building", "facilit*"),
+    "fees": ("fee", "scholarship", "tuition", "refund"),
+    "controversy": (
+        "protest*", "complaint", "allegation", "alleged", "fir", "police", "strike", "suspend*", "suspension", "ragging", "harass*", "fraud*",
+        "high court", "supreme court", "court order", "court case", "show-cause notice", "show cause notice", "petition",
+    ),
     "research": ("research", "patent", "publication", "journal", "grant", "innovation"),
-    "announcement": ("announce", "announced", "launch", "new program", "new course", "starts", "introduces"),
+    "announcement": ("announce*", "launch*", "new program", "new programme", "new course", "starts", "introduces"),
 }
 _IMPORTANT_TOPICS = frozenset({"accreditation", "ranking", "controversy", "announcement", "admission", "placement"})
 
 
+def _keyword_pattern(keywords: tuple[str, ...]) -> re.Pattern[str]:
+    parts = [re.escape(keyword[:-1]) + r"[a-z]*" if keyword.endswith("*") else re.escape(keyword) + r"(?:s|es)?" for keyword in keywords]
+    return re.compile(r"(?<![a-z0-9])(?:" + "|".join(parts) + r")(?![a-z0-9])")
+
+
+_TOPIC_PATTERNS = {topic: _keyword_pattern(keywords) for topic, keywords in TOPIC_KEYWORDS.items()}
+
+
 def topic_tags(text: str, title: str = "") -> list[str]:
     haystack = f"{title}\n{text}".lower()
-    tags = [topic for topic, keywords in TOPIC_KEYWORDS.items() if any(keyword in haystack for keyword in keywords)]
-    return tags
+    return [topic for topic, pattern in _TOPIC_PATTERNS.items() if pattern.search(haystack)]
 
 
 def relevance_score(*, title: str, text: str, question: str | None, topics: Sequence[str] | None, matched_entity: bool) -> float:

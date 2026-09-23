@@ -135,6 +135,7 @@
             <label>Exclusions (other places/namesakes) <input id="profile-exclusions" type="text" placeholder="Chennai, Hyderabad"></label>
             <label>Monitoring <select id="profile-monitoring"><option value="false">Off</option><option value="true">On</option></select></label>
             <label>Alert recipients (user ids) <input id="profile-alerts" type="text"></label>
+            <label>Security contacts (site owner emails, alerted at once) <input id="profile-security" type="text" placeholder="webmaster@college.edu.in"></label>
             <button id="profile-save" class="btn" type="button">Save profile</button>
           </div>
           <div id="profile-result" class="result-meta"></div>
@@ -148,6 +149,14 @@
             <button id="intel-digest" class="btn secondary" type="button">Daily digest</button>
           </div>
           <div id="intel-result" class="result-box" hidden></div>
+        </div>
+        <div class="card">
+          <h3>Internet map</h3>
+          <p class="muted">The institution's official sites and accounts, each graded from evidence: O confirmed by the institution, A linked from a healthy official page, B one step from those or confirmed by a reviewer. Lower grades, incidents and the review queue are shown to intelligence managers only, with each engine run: whether it re-found more of the hidden ground truth without letting a known look-alike through, and what it cost.</p>
+          <div class="field-row">
+            <button id="map-load" class="btn" type="button">Load map</button>
+          </div>
+          <div id="map-result" class="stack" hidden></div>
         </div>
       </section>
 

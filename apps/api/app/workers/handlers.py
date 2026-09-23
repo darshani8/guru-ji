@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+import logging
+from collections.abc import Callable, Mapping
 from typing import Any
 
 from ..actions.notifications import NotificationService
@@ -20,7 +21,12 @@ def principal_from_snapshot(snapshot: Mapping[str, Any]) -> Principal:
     return Principal(str(snapshot["principal_id"]), PrincipalType(str(snapshot.get("principal_type", "student"))), capabilities, scopes, authenticated=True, consent_verified=bool(snapshot.get("consent_verified", False)))
 
 
-def register_handlers(queue: JobQueue, *, ingestion: IngestionService | None = None, agent: MasterAgent | None = None, monitor: ContinuousMonitor | None = None, notifications: NotificationService | None = None) -> None:
+def register_handlers(
+    queue: JobQueue, *, ingestion: IngestionService | None = None, agent: MasterAgent | None = None, monitor: ContinuousMonitor | None = None, notifications: NotificationService | None = None, map_engine: Any | None = None,
+    map_desk: Any | None = None, retention: Callable[..., Mapping[str, Any]] | None = None,
+) -> None:
+    """Register every job this process can run; ``retention(institution_id=...)`` applies the intelligence retention period."""
+
     if ingestion is not None:
         async def process_ingestion(payload: dict[str, Any]) -> dict[str, Any]:
             # A re-dispatched attempt means the queue established that the previous
@@ -68,6 +74,35 @@ def register_handlers(queue: JobQueue, *, ingestion: IngestionService | None = N
             return {"runs": await monitor.run_all()}
 
         queue.register("intelligence.monitor", run_monitor)
+
+    if map_engine is not None:
+        async def run_map_tick(payload: dict[str, Any]) -> dict[str, Any]:
+            # A re-dispatched attempt resumes from the sources' own schedule and
+            # leases; the per-institution run lock keeps two ticks from overlapping.
+            # The job row keeps counts only: review items and incidents live in
+            # their own manager-only stores, where a redaction reaches them.
+            result = await map_engine.tick(str(payload["institution_id"]))
+            return {key: result.get(key) for key in ("institution_id", "run_id", "skipped", "stop_reason", "counts", "spend", "metrics") if key in result}
+
+        queue.register("intelligence.map_tick", run_map_tick)
+
+    if map_desk is not None:
+        async def send_map_digest(payload: dict[str, Any]) -> dict[str, Any]:
+            institution_id = str(payload["institution_id"])
+            digest = map_desk.send_digest(institution_id)
+            map_desk.store.cache_prune()  # the shared public-web cache: drop what expired, once a day
+            result: dict[str, Any] = {"sent": digest["sent"], "incidents": len(digest["incidents"]), "found": digest["found"]}
+            if retention is not None:
+                # The digest is the map's once-a-day job, so the retention period is applied with
+                # it. A failure is reported, not raised: a retried job would send the digest twice.
+                try:
+                    result["pruned"] = retention(institution_id=institution_id)
+                except Exception as exc:  # noqa: BLE001 - housekeeping must not fail a digest already sent
+                    logging.getLogger(__name__).warning("intelligence retention pruning failed for %s: %s", institution_id, exc)
+                    result["pruned"] = {"error": str(exc)[:300]}
+            return result
+
+        queue.register("intelligence.map_digest", send_map_digest)
 
 
 __all__ = ["principal_from_snapshot", "register_handlers"]

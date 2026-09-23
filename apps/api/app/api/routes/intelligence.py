@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from ...domain.principals import Capability
 from ...internet_intelligence.search import IntelligenceSearchUnavailable
+from ...internet_intelligence.service import InvestigationQuotaExceeded
 from ..dependencies import platform_from_request
 from ._platform_common import require_principal, resolve_institution, translate
 
@@ -26,6 +27,7 @@ class ProfileBody(BaseModel):
     exclusions: list[str] = Field(default_factory=list, max_length=20)
     monitoring_enabled: bool = False
     alert_recipients: list[str] = Field(default_factory=list, max_length=20)
+    security_contacts: list[str] = Field(default_factory=list, max_length=10, description="Email addresses of whoever runs the institution's sites; high-severity incidents are emailed to them at once")
     institution_id: str | None = Field(default=None, max_length=128)
 
 
@@ -75,6 +77,8 @@ async def investigate(body: InvestigateBody, request: Request) -> dict[str, Any]
     target = resolve_institution(principal, body.institution_id)
     try:
         return await platform.intelligence.investigate(principal, target, question=body.question, window_days=body.window_days, topics=body.topics, max_results=body.max_results)  # type: ignore[union-attr]
+    except InvestigationQuotaExceeded as exc:
+        raise HTTPException(status_code=429, detail=str(exc)) from exc
     except IntelligenceSearchUnavailable as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     except (ValueError, PermissionError) as exc:
@@ -86,7 +90,13 @@ async def mentions(request: Request, institution_id: str | None = None, days: in
     platform = platform_from_request(request)
     principal = require_principal(request, Capability.INTELLIGENCE_READ)
     target = resolve_institution(principal, institution_id)
-    return {"mentions": platform.intelligence_store.list_documents(target, days=days, status=status or None, source_type=source_type, limit=min(max(limit, 1), 500)), "untrusted_content": True}
+    manager = principal.has_capability(Capability.INTELLIGENCE_MANAGE)
+    if not manager and status != "kept":
+        # Items held for review or excluded (low-confidence matches, other
+        # institutions, people) are working material for managers.
+        raise HTTPException(status_code=403, detail="only kept mentions are available without intelligence:manage")
+    rows = platform.intelligence_store.list_documents(target, days=days, status=status or None, source_type=source_type, limit=min(max(limit, 1), 500), exclude_sensitive=not manager)
+    return {"mentions": rows, "untrusted_content": True, "sensitive_hidden": not manager}
 
 
 @router.get("/digest", summary="Daily intelligence digest from continuous monitoring")
@@ -105,7 +115,7 @@ async def run_monitor(request: Request, institution_id: str | None = None, backg
     if platform.monitor is None:
         raise HTTPException(status_code=503, detail="monitoring is not configured")
     if background:
-        job_id = platform.jobs.enqueue(target, "intelligence.monitor", {"institution_id": target})
+        job_id = platform.jobs.enqueue(target, "intelligence.monitor", {"institution_id": target, "requested_by": principal.principal_id})
         return {"accepted": True, "job_id": job_id}
     try:
         return await platform.monitor.run_for(target)
@@ -118,7 +128,7 @@ async def reports(request: Request, institution_id: str | None = None, limit: in
     platform = platform_from_request(request)
     principal = require_principal(request, Capability.INTELLIGENCE_READ)
     target = resolve_institution(principal, institution_id)
-    return {"reports": platform.intelligence_store.list_reports(target, limit=min(max(limit, 1), 100))}
+    return {"reports": platform.intelligence_store.list_reports(target, limit=min(max(limit, 1), 100), include_sensitive=principal.has_capability(Capability.INTELLIGENCE_MANAGE))}
 
 
 __all__ = ["router"]

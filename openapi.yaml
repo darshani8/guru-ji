@@ -2077,6 +2077,957 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/entities:
+    get:
+      tags:
+      - intelligence-map
+      summary: Entities in the map (institutions, branches, units, look-alikes)
+      operationId: entities_v1_intelligence_map_entities_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: kind
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Kind
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Entities V1 Intelligence Map Entities Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/assets:
+    get:
+      tags:
+      - intelligence-map
+      summary: Accounts, sites and pages in the map with their grades
+      operationId: assets_v1_intelligence_map_assets_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: platform
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Platform
+      - name: grade
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Grade
+      - name: relation
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Relation
+      - name: entity_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Entity Id
+      - name: status
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Status
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 200
+          title: Limit
+      - name: offset
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 0
+          title: Offset
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Assets V1 Intelligence Map Assets Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/assets/{asset_id}/evidence:
+    get:
+      tags:
+      - intelligence-map
+      summary: The evidence behind one asset's grade
+      operationId: asset_evidence_v1_intelligence_map_assets__asset_id__evidence_get
+      parameters:
+      - name: asset_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Asset Id
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Asset Evidence V1 Intelligence Map Assets  Asset Id  Evidence
+                  Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/metrics:
+    get:
+      tags:
+      - intelligence-map
+      summary: Coverage and accuracy against the hidden ground truth (the ground truth
+        and runs for managers only)
+      operationId: metrics_v1_intelligence_map_metrics_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: kind
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Kind
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 10
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Metrics V1 Intelligence Map Metrics Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/seed:
+    post:
+      tags:
+      - intelligence-map
+      summary: Import a sweep as unverified claims and set aside hidden ground truth
+      operationId: seed_v1_intelligence_map_seed_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SeedBody'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Seed V1 Intelligence Map Seed Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/sync-profile:
+    post:
+      tags:
+      - intelligence-map
+      summary: Bring the intelligence profile's configured official domains into the
+        map
+      operationId: sync_profile_v1_intelligence_map_sync_profile_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MapInstitutionBody'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Sync Profile V1 Intelligence Map Sync Profile Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/harvest:
+    post:
+      tags:
+      - intelligence-map
+      summary: Read official sites for the accounts they declare
+      operationId: harvest_v1_intelligence_map_harvest_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HarvestBody'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Harvest V1 Intelligence Map Harvest Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/regrade:
+    post:
+      tags:
+      - intelligence-map
+      summary: Recompute every grade from the evidence log
+      operationId: regrade_v1_intelligence_map_regrade_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MapInstitutionBody'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Regrade V1 Intelligence Map Regrade Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/export:
+    get:
+      tags:
+      - intelligence-map
+      summary: The map as a tab-separated table in the manual sweep's format
+      operationId: export_v1_intelligence_map_export_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            text/plain:
+              schema:
+                type: string
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/tick:
+    post:
+      tags:
+      - intelligence-map
+      summary: Run one map engine tick now (normally scheduled)
+      operationId: tick_v1_intelligence_map_tick_post
+      parameters:
+      - name: background
+        in: query
+        required: false
+        schema:
+          type: boolean
+          default: true
+          title: Background
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MapInstitutionBody'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Tick V1 Intelligence Map Tick Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/sources:
+    get:
+      tags:
+      - intelligence-map
+      summary: What the map watches and which leads it follows
+      operationId: sources_v1_intelligence_map_sources_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: status
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Status
+      - name: connector
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Connector
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 200
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Sources V1 Intelligence Map Sources Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    post:
+      tags:
+      - intelligence-map
+      summary: Point a page-reading connector at a URL (a directory or regulator listing)
+      operationId: add_source_v1_intelligence_map_sources_post
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SourceBody'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Add Source V1 Intelligence Map Sources Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/review:
+    get:
+      tags:
+      - intelligence-map
+      summary: 'What a person must decide (managers only): suspected impersonators,
+        disputes, court records, held runs'
+      operationId: review_queue_v1_intelligence_map_review_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: status
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: open
+          title: Status
+      - name: kind
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Kind
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 100
+          title: Limit
+      - name: offset
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 0
+          title: Offset
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Review Queue V1 Intelligence Map Review Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/review/{review_id}/decision:
+    post:
+      tags:
+      - intelligence-map
+      summary: Decide a review item; the decision becomes evidence and is audited
+      operationId: decide_v1_intelligence_map_review__review_id__decision_post
+      parameters:
+      - name: review_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Review Id
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DecisionBody'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Decide V1 Intelligence Map Review  Review Id  Decision
+                  Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/rescore:
+    post:
+      tags:
+      - intelligence-map
+      summary: Recompute every grade; published only if the map's ground truth does
+        not get worse
+      operationId: rescore_v1_intelligence_map_rescore_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MapInstitutionBody'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Rescore V1 Intelligence Map Rescore Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/incidents:
+    get:
+      tags:
+      - intelligence-map
+      summary: What went wrong with the institution's own presence, with what to do
+        about it (managers only)
+      operationId: incidents_v1_intelligence_map_incidents_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: status
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Status
+      - name: severity
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Severity
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 100
+          title: Limit
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Incidents V1 Intelligence Map Incidents Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/incidents/{incident_id}/{action}:
+    post:
+      tags:
+      - intelligence-map
+      summary: Acknowledge or resolve an incident
+      operationId: incident_action_v1_intelligence_map_incidents__incident_id___action__post
+      parameters:
+      - name: incident_id
+        in: path
+        required: true
+        schema:
+          type: string
+          title: Incident Id
+      - name: action
+        in: path
+        required: true
+        schema:
+          enum:
+          - acknowledge
+          - resolve
+          type: string
+          title: Action
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IncidentBody'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Incident Action V1 Intelligence Map Incidents  Incident
+                  Id   Action  Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/digest:
+    get:
+      tags:
+      - intelligence-map
+      summary: Preview the map's daily digest (managers only)
+      operationId: map_digest_v1_intelligence_map_digest_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Map Digest V1 Intelligence Map Digest Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+    post:
+      tags:
+      - intelligence-map
+      summary: Send the map's daily digest to the alert recipients now (normally scheduled)
+      operationId: send_map_digest_v1_intelligence_map_digest_post
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MapInstitutionBody'
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Send Map Digest V1 Intelligence Map Digest Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/suppress:
+    post:
+      tags:
+      - intelligence-map
+      summary: Keep an account or address out of the map for good (only a keyed fingerprint
+        is stored)
+      operationId: suppress_v1_intelligence_map_suppress_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SuppressBody'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Suppress V1 Intelligence Map Suppress Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/ownership:
+    get:
+      tags:
+      - intelligence-map
+      summary: The institution's ownership token, how to publish it, and what the
+        owner has confirmed (managers only)
+      operationId: ownership_v1_intelligence_map_ownership_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Ownership V1 Intelligence Map Ownership Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/ownership/verify:
+    post:
+      tags:
+      - intelligence-map
+      summary: Check the official domains (all, or asset_ids) for the ownership token
+        now; at most ten per call, the rest reported as skipped
+      operationId: verify_ownership_v1_intelligence_map_ownership_verify_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HarvestBody'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Verify Ownership V1 Intelligence Map Ownership Verify
+                  Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/ownership/rotate:
+    post:
+      tags:
+      - intelligence-map
+      summary: Issue new ownership tokens; every earlier token stops proving anything
+        (managers only)
+      operationId: rotate_ownership_v1_intelligence_map_ownership_rotate_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MapInstitutionBody'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Rotate Ownership V1 Intelligence Map Ownership Rotate
+                  Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/summary:
+    get:
+      tags:
+      - intelligence-map
+      summary: 'The map at a glance: grades, the coverage grid, an estimate of how
+        complete it is (more for managers)'
+      operationId: summary_v1_intelligence_map_summary_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Summary V1 Intelligence Map Summary Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/connectors:
+    get:
+      tags:
+      - intelligence-map
+      summary: The connectors the engine may use and how each reaches the web
+      operationId: connectors_v1_intelligence_map_connectors_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Connectors V1 Intelligence Map Connectors Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/spend:
+    get:
+      tags:
+      - intelligence-map
+      summary: Today's spend against the platform caps and this institution's quota
+      operationId: spend_v1_intelligence_map_spend_get
+      parameters:
+      - name: institution_id
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Institution Id
+      - name: day
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Day
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: true
+                title: Response Spend V1 Intelligence Map Spend Get
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /v1/institutions:
     get:
       tags:
@@ -2512,6 +3463,38 @@ components:
       required:
       - command
       title: CommandBody
+    DecisionBody:
+      properties:
+        decision:
+          type: string
+          maxLength: 20
+          minLength: 1
+          title: Decision
+        note:
+          type: string
+          maxLength: 500
+          title: Note
+          default: ''
+        relation:
+          anyOf:
+          - type: string
+            enum:
+            - official
+            - affiliated
+            - community
+            - third_party
+          - type: 'null'
+          title: Relation
+        institution_id:
+          anyOf:
+          - type: string
+            maxLength: 128
+          - type: 'null'
+          title: Institution Id
+      type: object
+      required:
+      - decision
+      title: DecisionBody
     DocumentSearchBody:
       properties:
         question:
@@ -2550,6 +3533,39 @@ components:
           title: Detail
       type: object
       title: HTTPValidationError
+    HarvestBody:
+      properties:
+        asset_ids:
+          anyOf:
+          - items:
+              type: string
+            type: array
+            maxItems: 10
+          - type: 'null'
+          title: Asset Ids
+        institution_id:
+          anyOf:
+          - type: string
+            maxLength: 128
+          - type: 'null'
+          title: Institution Id
+      type: object
+      title: HarvestBody
+    IncidentBody:
+      properties:
+        note:
+          type: string
+          maxLength: 500
+          title: Note
+          default: ''
+        institution_id:
+          anyOf:
+          - type: string
+            maxLength: 128
+          - type: 'null'
+          title: Institution Id
+      type: object
+      title: IncidentBody
     InstitutionBody:
       properties:
         name:
@@ -2617,6 +3633,16 @@ components:
           title: Institution Id
       type: object
       title: InvestigateBody
+    MapInstitutionBody:
+      properties:
+        institution_id:
+          anyOf:
+          - type: string
+            maxLength: 128
+          - type: 'null'
+          title: Institution Id
+      type: object
+      title: MapInstitutionBody
     MappingDecisionBody:
       properties:
         mapping:
@@ -2697,6 +3723,14 @@ components:
           type: array
           maxItems: 20
           title: Alert Recipients
+        security_contacts:
+          items:
+            type: string
+          type: array
+          maxItems: 10
+          title: Security Contacts
+          description: Email addresses of whoever runs the institution's sites; high-severity
+            incidents are emailed to them at once
         institution_id:
           anyOf:
           - type: string
@@ -2740,6 +3774,53 @@ components:
           title: Batch Id
       type: object
       title: ScopeBody
+    SeedBody:
+      properties:
+        sweep_tsv:
+          anyOf:
+          - type: string
+            maxLength: 2000000
+          - type: 'null'
+          title: Sweep Tsv
+          description: Sweep rows; omit to import the bundled 22 September 2026 sweep
+        lookalikes_tsv:
+          anyOf:
+          - type: string
+            maxLength: 200000
+          - type: 'null'
+          title: Lookalikes Tsv
+        groups:
+          anyOf:
+          - items:
+              type: string
+            type: array
+            maxItems: 50
+          - type: 'null'
+          title: Groups
+        all_groups:
+          type: boolean
+          title: All Groups
+          default: false
+        approved_by:
+          anyOf:
+          - type: string
+            maxLength: 200
+          - type: 'null'
+          title: Approved By
+        holdout_percent:
+          type: integer
+          maximum: 50.0
+          minimum: 0.0
+          title: Holdout Percent
+          default: 20
+        institution_id:
+          anyOf:
+          - type: string
+            maxLength: 128
+          - type: 'null'
+          title: Institution Id
+      type: object
+      title: SeedBody
     SheetImportBody:
       properties:
         sheet_url:
@@ -2774,6 +3855,53 @@ components:
       required:
       - sheet_url
       title: SheetImportBody
+    SourceBody:
+      properties:
+        connector:
+          type: string
+          maxLength: 40
+          minLength: 1
+          title: Connector
+        target:
+          type: string
+          maxLength: 1000
+          minLength: 1
+          title: Target
+        institution_id:
+          anyOf:
+          - type: string
+            maxLength: 128
+          - type: 'null'
+          title: Institution Id
+      type: object
+      required:
+      - connector
+      - target
+      title: SourceBody
+    SuppressBody:
+      properties:
+        identifier:
+          type: string
+          maxLength: 1000
+          minLength: 1
+          title: Identifier
+          description: An account URL or web address to keep out of the map
+        reason:
+          type: string
+          maxLength: 200
+          minLength: 1
+          title: Reason
+        institution_id:
+          anyOf:
+          - type: string
+            maxLength: 128
+          - type: 'null'
+          title: Institution Id
+      type: object
+      required:
+      - identifier
+      - reason
+      title: SuppressBody
     ValidationError:
       properties:
         loc:

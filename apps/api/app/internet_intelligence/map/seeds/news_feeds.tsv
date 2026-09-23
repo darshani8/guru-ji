@@ -1,0 +1,12 @@
+# Public RSS feeds of news publishers the news_feed connector reads once a day (when enabled), in English
+# and Kannada, for items that name a mapped institution. Each feed was fetched and its robots.txt checked
+# on 23 September 2026; the robots-aware fetcher still checks robots.txt on every run. Columns are
+# tab-separated: publisher, language (ISO 639-1), feed URL.
+publisher	language	url
+The Hindu (Karnataka)	en	https://www.thehindu.com/news/national/karnataka/feeder/default.rss
+The Hindu (Bengaluru)	en	https://www.thehindu.com/news/cities/bangalore/feeder/default.rss
+Deccan Herald (Karnataka)	en	https://www.deccanherald.com/stories.rss?section=karnataka
+The Times of India (Bengaluru)	en	https://timesofindia.indiatimes.com/rssfeeds/-2128833038.cms
+Prajavani (Karnataka)	kn	https://www.prajavani.net/stories.rss?section=karnataka-news
+Prajavani (districts)	kn	https://www.prajavani.net/stories.rss?section=district
+Kannada Prabha	kn	https://www.kannadaprabha.com/stories.rss

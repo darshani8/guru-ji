@@ -263,7 +263,8 @@ class DeterministicPlanner:
             intent = "internet_intelligence"
             if (plan := missing("internet_investigate")):
                 return plan
-            topics = [word for word in ("admission", "placement", "event", "ranking", "accreditation", "result", "faculty", "campus", "fees") if word in lowered]
+            # "result" matches both spellings in the command; the topic itself is "results".
+            topics = [("results" if word == "result" else word) for word in ("admission", "placement", "event", "ranking", "accreditation", "result", "faculty", "campus", "fees") if word in lowered]
             add("internet_investigate", {"question": text[:300], "window_days": entities.window_days or 7, "topics": topics or None}, "search public sources about the institution")
             if overview or re.search(r"\b(complete|both|internal and external|inside and outside)\b", lowered):
                 if "get_institution_summary" in available:

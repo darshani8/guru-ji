@@ -17,7 +17,7 @@ from uuid import uuid4
 from ..normalization.canonical import CANONICAL_ENTITIES, CanonicalEntity, CanonicalField, FieldType, entity as canonical_entity
 from ..persistence.sql_backend import SqlBackend, open_backend
 from .models import CanonicalRecord, ImportSummary
-from ..persistence.schema_tools import apply_schema, begin_migration, existing_policies, row_level_security_state, tenant_isolation_statements
+from ..persistence.schema_tools import add_missing_columns, apply_schema, begin_migration, existing_policies, row_level_security_state, tenant_isolation_statements
 from .schema import ADDED_COLUMNS, SCHEMA_VERSION, TENANT_TABLES, portable_statements, postgres_numeric_columns
 
 MAX_QUERY_ROWS = 5_000
@@ -111,7 +111,7 @@ class InstitutionDataStore:
         with self.backend.transaction():
             begin_migration(self.backend)
             apply_schema(self.backend, portable_statements())
-            self._add_missing_columns()
+            add_missing_columns(self.backend, ADDED_COLUMNS)
             if self.backend.dialect == "postgresql":
                 for statement in tenant_isolation_statements(TENANT_TABLES, state=row_level_security_state(self.backend), policies=existing_policies(self.backend)):
                     self.backend.execute(statement)
@@ -120,27 +120,6 @@ class InstitutionDataStore:
                 "INSERT INTO schema_migrations(version, applied_at) VALUES (?, ?) ON CONFLICT (version) DO NOTHING",
                 (SCHEMA_VERSION, now_iso()),
             )
-
-    def _add_missing_columns(self) -> None:
-        """Add columns introduced after a table first shipped to databases that predate them.
-
-        ``ADD COLUMN IF NOT EXISTS`` locks the table even when the column is
-        there, so PostgreSQL is asked first and the statement runs only for a
-        column the catalog does not list.
-        """
-
-        for table, column, column_type in ADDED_COLUMNS:
-            if self.backend.dialect == "postgresql":
-                present = self.backend.fetchone(
-                    "SELECT 1 AS present FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?",
-                    (table, column),
-                )
-                if present is None:
-                    self.backend.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {column_type}")
-                continue
-            present_columns = {row["name"] for row in self.backend.fetchall(f"PRAGMA table_info({table})")}
-            if column not in present_columns:
-                self.backend.execute(f"ALTER TABLE {table} ADD COLUMN {column} {column_type}")
 
     def _upgrade_postgres_numeric_columns(self) -> None:
         """Widen NUMBER/PERCENT columns created as REAL (float4) to DOUBLE PRECISION.

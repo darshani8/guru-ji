@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from urllib.parse import urlparse
 
@@ -45,6 +46,37 @@ def _bool_env(name: str, default: bool) -> bool:
     if raw is None:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+_EMAIL_ADDRESS = re.compile(r"[^@\s]+@[^@\s]+\.[A-Za-z]{2,}")
+
+
+def _group_lists(raw: str, name: str, what: str) -> dict[str, tuple[str, ...]]:
+    """A JSON object of sweep group label to a list of non-blank strings (approvers, contacts)."""
+
+    if not raw:
+        return {}
+    import json
+
+    message = f"{name} must be a JSON object of sweep group label to a list of {what}"
+    try:
+        parsed = json.loads(raw)
+    except ValueError as exc:
+        raise ValueError(message) from exc
+    if not isinstance(parsed, dict) or not all(
+        isinstance(key, str) and key.strip() and isinstance(value, list) and all(isinstance(item, str) and item.strip() for item in value) for key, value in parsed.items()
+    ):
+        raise ValueError(message)
+    return {key.strip(): tuple(item.strip() for item in value) for key, value in parsed.items()}
+
+
+# Connectors the internet map may use beyond the always-on public-page ones
+# (official_site, lead_page, recheck); each stays off until named in
+# GURU_INTELLIGENCE_CONNECTORS.
+OPTIONAL_CONNECTORS: tuple[str, ...] = (
+    "search", "spam_probe", "feed", "youtube", "wikidata", "court_records", "certificates", "rdap", "dns", "wayback", "link_hub", "directory", "openstreetmap", "google_play",
+    "news_feed", "lookalike_domains", "google_play_search",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +189,22 @@ class AppSettings:
     intelligence_fetch_pages: bool = True
     intelligence_max_queries: int = 8
     intelligence_results_per_query: int = 5
+    intelligence_crawler_contact: str = ""
+    intelligence_map_enabled: bool = False
+    intelligence_suppression_key: str | None = field(default=None, repr=False)
+    intelligence_budgets: str = ""
+    intelligence_tenant_share: float = 0.5
+    intelligence_sources_per_tick: int = 25
+    intelligence_connectors: tuple[str, ...] = ()
+    intelligence_seed_groups: str = ""
+    intelligence_entity_approvers: str = ""
+    intelligence_authority_contacts: str = ""
+    intelligence_investigations_per_day: int = 20
+    # How long monitoring evidence and the internet map's closed work are kept (India's DPDP Act).
+    intelligence_retention_days: int = 365
+    intelligence_youtube_api_key: str | None = field(default=None, repr=False)
+    intelligence_indiankanoon_token: str | None = field(default=None, repr=False)
+    intelligence_certspotter_token: str | None = field(default=None, repr=False)
     agent_planner: str = "deterministic"
     approval_ttl_seconds: int = 900
     voice_agent_mode: str = "assistant"
@@ -279,6 +327,21 @@ class AppSettings:
             intelligence_fetch_pages=_bool_env("GURU_INTELLIGENCE_FETCH_PAGES", True),
             intelligence_max_queries=int(os.getenv("GURU_INTELLIGENCE_MAX_QUERIES", "8")),
             intelligence_results_per_query=int(os.getenv("GURU_INTELLIGENCE_RESULTS_PER_QUERY", "5")),
+            intelligence_crawler_contact=os.getenv("GURU_INTELLIGENCE_CRAWLER_CONTACT", "").strip(),
+            intelligence_map_enabled=_bool_env("GURU_INTELLIGENCE_MAP_ENABLED", False),
+            intelligence_suppression_key=os.getenv("GURU_INTELLIGENCE_SUPPRESSION_KEY") or None,
+            intelligence_budgets=os.getenv("GURU_INTELLIGENCE_BUDGETS", "").strip(),
+            intelligence_tenant_share=float(os.getenv("GURU_INTELLIGENCE_TENANT_SHARE", "0.5")),
+            intelligence_sources_per_tick=int(os.getenv("GURU_INTELLIGENCE_SOURCES_PER_TICK", "25")),
+            intelligence_seed_groups=os.getenv("GURU_INTELLIGENCE_SEED_GROUPS", "").strip(),
+            intelligence_entity_approvers=os.getenv("GURU_INTELLIGENCE_ENTITY_APPROVERS", "").strip(),
+            intelligence_authority_contacts=os.getenv("GURU_INTELLIGENCE_AUTHORITY_CONTACTS", "").strip(),
+            intelligence_investigations_per_day=int(os.getenv("GURU_INTELLIGENCE_INVESTIGATIONS_PER_DAY", "20")),
+            intelligence_retention_days=int(os.getenv("GURU_INTELLIGENCE_RETENTION_DAYS", "365")),
+            intelligence_connectors=tuple(item.strip().lower() for item in os.getenv("GURU_INTELLIGENCE_CONNECTORS", "").split(",") if item.strip()),
+            intelligence_youtube_api_key=os.getenv("GURU_INTELLIGENCE_YOUTUBE_API_KEY") or None,
+            intelligence_indiankanoon_token=os.getenv("GURU_INTELLIGENCE_INDIANKANOON_TOKEN") or None,
+            intelligence_certspotter_token=os.getenv("GURU_INTELLIGENCE_CERTSPOTTER_TOKEN") or None,
             agent_planner=os.getenv("GURU_AGENT_PLANNER", "deterministic").strip().lower(),
             approval_ttl_seconds=int(os.getenv("GURU_APPROVAL_TTL_SECONDS", "900")),
             voice_agent_mode=os.getenv("GURU_VOICE_AGENT_MODE", "assistant").strip().lower(),
@@ -328,6 +391,58 @@ class AppSettings:
             definitions.append(legacy)
         return tuple(definitions)
 
+    def intelligence_seed_group_map(self) -> dict[str, tuple[str, ...]]:
+        """Which sweep groups are each institution's own (GURU_INTELLIGENCE_SEED_GROUPS, JSON)."""
+
+        if not self.intelligence_seed_groups:
+            return {}
+        import json
+
+        try:
+            parsed = json.loads(self.intelligence_seed_groups)
+        except ValueError as exc:
+            raise ValueError("GURU_INTELLIGENCE_SEED_GROUPS must be a JSON object of institution ID to a list of sweep group labels") from exc
+        if not isinstance(parsed, dict) or not all(isinstance(key, str) and isinstance(value, list) and all(isinstance(item, str) for item in value) for key, value in parsed.items()):
+            raise ValueError("GURU_INTELLIGENCE_SEED_GROUPS must be a JSON object of institution ID to a list of sweep group labels")
+        return {key: tuple(value) for key, value in parsed.items()}
+
+    def intelligence_entity_approver_map(self) -> dict[str, tuple[str, ...]]:
+        """Who may decide for another group's entities (GURU_INTELLIGENCE_ENTITY_APPROVERS, JSON of sweep group to principal IDs).
+
+        Without an entry, the institution's managers can only dismiss review
+        items about that group's entities: which of the Swamiji's accounts is
+        real is for the Math or trust IT office to say.
+        """
+
+        return _group_lists(self.intelligence_entity_approvers, "GURU_INTELLIGENCE_ENTITY_APPROVERS", "principal IDs")
+
+    def intelligence_authority_contact_map(self) -> dict[str, tuple[str, ...]]:
+        """Where another group's security incidents are emailed (GURU_INTELLIGENCE_AUTHORITY_CONTACTS, JSON of sweep group to addresses)."""
+
+        contacts = _group_lists(self.intelligence_authority_contacts, "GURU_INTELLIGENCE_AUTHORITY_CONTACTS", "email addresses")
+        invalid = [address for addresses in contacts.values() for address in addresses if not _EMAIL_ADDRESS.fullmatch(address)]
+        if invalid:
+            raise ValueError(f"GURU_INTELLIGENCE_AUTHORITY_CONTACTS lists something that is not an email address: {invalid[0]}")
+        return contacts
+
+    def intelligence_budget_caps(self) -> dict[str, float]:
+        """Daily platform-wide caps per connector budget, defaults overridden by GURU_INTELLIGENCE_BUDGETS (JSON)."""
+
+        from ..internet_intelligence.map.engine import DEFAULT_BUDGETS
+
+        caps = dict(DEFAULT_BUDGETS)
+        if self.intelligence_budgets:
+            import json
+
+            try:
+                overrides = json.loads(self.intelligence_budgets)
+            except ValueError as exc:
+                raise ValueError("GURU_INTELLIGENCE_BUDGETS must be a JSON object of budget name to daily units") from exc
+            if not isinstance(overrides, dict) or not all(isinstance(key, str) and isinstance(value, (int, float)) and value >= 0 for key, value in overrides.items()):
+                raise ValueError("GURU_INTELLIGENCE_BUDGETS must be a JSON object of budget name to daily units")
+            caps.update({key: float(value) for key, value in overrides.items()})
+        return caps
+
     def ensure_safe_for_production(self) -> None:
         if self.max_request_bytes <= 0:
             raise ValueError("GURU_MAX_REQUEST_BYTES must be positive")
@@ -370,6 +485,8 @@ class AppSettings:
             raise ValueError("connector limits must be positive")
         if not 1 <= self.audit_retention_days <= 3650:
             raise ValueError("GURU_AUDIT_RETENTION_DAYS must be between 1 and 3650")
+        if not 30 <= self.intelligence_retention_days <= 3650:
+            raise ValueError("GURU_INTELLIGENCE_RETENTION_DAYS must be between 30 and 3650")
         if self.otel_exporter_timeout_seconds <= 0:
             raise ValueError("GURU_OTEL_EXPORTER_TIMEOUT_SECONDS must be positive")
         if self.otel_exporter_endpoint:
@@ -508,6 +625,40 @@ class AppSettings:
             raise ValueError("GURU_WEB_SEARCH_API_KEY is required when GURU_INTELLIGENCE_SEARCH_PROVIDER=tavily")
         if not 1 <= self.intelligence_max_queries <= 20 or not 1 <= self.intelligence_results_per_query <= 20:
             raise ValueError("intelligence query limits must be between 1 and 20")
+        self.intelligence_budget_caps()
+        self.intelligence_seed_group_map()
+        self.intelligence_entity_approver_map()
+        self.intelligence_authority_contact_map()
+        if not 0 <= self.intelligence_investigations_per_day <= 1000:
+            raise ValueError("GURU_INTELLIGENCE_INVESTIGATIONS_PER_DAY must be between 0 and 1000")
+        if not 0 < self.intelligence_tenant_share <= 1:
+            raise ValueError("GURU_INTELLIGENCE_TENANT_SHARE must be greater than 0 and at most 1")
+        if not 1 <= self.intelligence_sources_per_tick <= 500:
+            raise ValueError("GURU_INTELLIGENCE_SOURCES_PER_TICK must be between 1 and 500")
+        unknown = sorted(set(self.intelligence_connectors) - set(OPTIONAL_CONNECTORS))
+        if unknown:
+            raise ValueError(f"GURU_INTELLIGENCE_CONNECTORS names unknown connectors: {', '.join(unknown)} (known: {', '.join(OPTIONAL_CONNECTORS)})")
+        if {"search", "spam_probe", "google_play_search"} & set(self.intelligence_connectors) and self.intelligence_search_provider == "disabled":
+            raise ValueError("the search, spam_probe and google_play_search connectors need GURU_INTELLIGENCE_SEARCH_PROVIDER")
+        if "openstreetmap" in self.intelligence_connectors and not self.intelligence_crawler_contact:
+            # Nominatim's usage policy asks every application to identify itself with a way to reach its operator.
+            raise ValueError("the openstreetmap connector needs GURU_INTELLIGENCE_CRAWLER_CONTACT (Nominatim's usage policy requires a contact)")
+        if "youtube" in self.intelligence_connectors and not self.intelligence_youtube_api_key:
+            raise ValueError("the youtube connector needs GURU_INTELLIGENCE_YOUTUBE_API_KEY")
+        if "court_records" in self.intelligence_connectors and not self.intelligence_indiankanoon_token:
+            raise ValueError("the court_records connector needs GURU_INTELLIGENCE_INDIANKANOON_TOKEN")
+        if self.intelligence_map_enabled and self.environment == "production" and len(self.intelligence_suppression_key or "") < 32:
+            raise ValueError("GURU_INTELLIGENCE_SUPPRESSION_KEY (32+ characters) is required when the internet map is enabled in production")
+        if self.environment == "production" and (self.intelligence_map_enabled or self.intelligence_search_provider != "disabled") and not self.intelligence_crawler_contact:
+            # Without it every request says "+https://example.invalid/...": a site owner cannot reach whoever runs the crawler.
+            raise ValueError("GURU_INTELLIGENCE_CRAWLER_CONTACT (an https URL or an email address) is required in production when the crawler is on")
+        if self.intelligence_crawler_contact:
+            from ..internet_intelligence.fetch import crawler_user_agent
+
+            try:
+                crawler_user_agent(self.intelligence_crawler_contact)
+            except ValueError as exc:
+                raise ValueError("GURU_INTELLIGENCE_CRAWLER_CONTACT must be an https URL or an email address") from exc
         if self.agent_planner not in {"deterministic", "model"}:
             raise ValueError("GURU_AGENT_PLANNER must be deterministic or model")
         if self.agent_planner == "model" and self.model_provider == "deterministic":

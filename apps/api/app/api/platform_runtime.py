@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import partial
 from typing import Any
 
 from ..actions.email import EmailSender, EmailService, OutboxEmailSender, SesEmailSender, SmtpEmailSender
@@ -21,7 +22,23 @@ from ..ingestion.parsers.ocr import DisabledOcrEngine, OcrEngine, TesseractCliOc
 from ..ingestion.registry import ParserRegistry
 from ..ingestion.service import IngestionService
 from ..institution_data.store import InstitutionDataStore
-from ..internet_intelligence.fetch import PublicPageFetcher
+from ..internet_intelligence.fetch import PublicPageFetcher, crawler_user_agent
+from ..internet_intelligence.map.connectors.apis import CourtRecordsConnector, WikidataConnector, YouTubeConnector
+from ..internet_intelligence.map.connectors.archive import WaybackConnector
+from ..internet_intelligence.map.connectors.base import ConnectorRegistry
+from ..internet_intelligence.map.connectors.common import ApiClient
+from ..internet_intelligence.map.connectors.feeds import FeedConnector, NewsFeedConnector
+from ..internet_intelligence.map.connectors.hubs import DirectoryConnector, LinkHubConnector
+from ..internet_intelligence.map.connectors.infrastructure import CertificateConnector, DnsConnector, RdapConnector
+from ..internet_intelligence.map.connectors.lookalikes import LookalikeDomainConnector
+from ..internet_intelligence.map.connectors.places import GooglePlayConnector, GooglePlaySearchConnector, OpenStreetMapConnector
+from ..internet_intelligence.map.connectors.search import SearchConnector, SpamProbeConnector
+from ..internet_intelligence.map.connectors.web import LeadPageConnector, OfficialSiteConnector, RecheckConnector
+from ..internet_intelligence.map.engine import EngineConfig, MapEngine
+from ..internet_intelligence.map.incidents import IncidentDesk
+from ..internet_intelligence.map.ownership import OwnerClaimsConnector
+from ..internet_intelligence.map.service import MapService
+from ..internet_intelligence.map.store import MapStore
 from ..internet_intelligence.monitoring import ContinuousMonitor
 from ..internet_intelligence.search import TavilyIntelligenceSearchProvider
 from ..internet_intelligence.service import InternetIntelligenceService
@@ -60,6 +77,7 @@ class PlatformRuntime:
     monitor: ContinuousMonitor | None = None
     sheets: GoogleSheetsCsvConnector | None = None
     worker_store: InstitutionDataStore | None = None
+    intelligence_map: MapService | None = None
 
     def close(self, *, worker_timeout: float = 30.0) -> None:
         stop = getattr(self.jobs, "stop", None)
@@ -71,6 +89,24 @@ class PlatformRuntime:
         self.store.close()
         if self.intelligence_store.backend is not self.store.backend:
             self.intelligence_store.close()
+
+    def prune_intelligence(self, days: int, *, institution_id: str | None = None) -> dict[str, dict[str, int]]:
+        """Apply the intelligence retention period to the monitoring store and, when it is on, the internet map."""
+
+        return prune_intelligence(self.intelligence_store, self.intelligence_map.store if self.intelligence_map else None, days, institution_id=institution_id)
+
+
+def prune_intelligence(intelligence_store: IntelligenceStore, map_store: MapStore | None, days: int, *, institution_id: str | None = None) -> dict[str, dict[str, int]]:
+    """GURU_INTELLIGENCE_RETENTION_DAYS for one institution or (with none named) every one: counts per store.
+
+    Runs at start-up and with the daily map digest. The map's tables are
+    pruned only while the map is on, because the map store is not opened otherwise.
+    """
+
+    return {
+        "monitoring": intelligence_store.prune_retention(days, institution_id=institution_id),
+        "map": map_store.prune_retention(days=days, institution_id=institution_id) if map_store is not None else {},
+    }
 
 
 def _object_store(settings: AppSettings) -> ObjectStore:
@@ -143,8 +179,11 @@ def _services(settings: AppSettings, store: InstitutionDataStore, intelligence_s
     intelligence: InternetIntelligenceService | None = None
     monitor: ContinuousMonitor | None = None
     if provider is not None:
-        fetcher = PublicPageFetcher(timeout_seconds=settings.web_extract_timeout_seconds, max_response_bytes=settings.web_extract_max_bytes) if settings.intelligence_fetch_pages else None
-        intelligence = InternetIntelligenceService(intelligence_store, provider, fetcher=fetcher, institution_store=store, model=model, max_queries=settings.intelligence_max_queries, results_per_query=settings.intelligence_results_per_query)
+        fetcher = PublicPageFetcher(timeout_seconds=settings.web_extract_timeout_seconds, max_response_bytes=settings.web_extract_max_bytes, user_agent=crawler_user_agent(settings.intelligence_crawler_contact)) if settings.intelligence_fetch_pages else None
+        intelligence = InternetIntelligenceService(
+            intelligence_store, provider, fetcher=fetcher, institution_store=store, model=model, max_queries=settings.intelligence_max_queries, results_per_query=settings.intelligence_results_per_query,
+            investigations_per_day=settings.intelligence_investigations_per_day,
+        )
 
         def alert_sink(institution_id: str, recipients: Any, title: str, body: str) -> None:
             notifications.system_notify(institution_id, recipient_ids=list(recipients), title=title, body=body, reference_type="monitoring")
@@ -157,6 +196,79 @@ def _services(settings: AppSettings, store: InstitutionDataStore, intelligence_s
 
 
 _SHARED_ONLY_URLS = frozenset({":memory:", "sqlite:///:memory:", ""})
+
+
+def _share_host_slots(fetcher: PublicPageFetcher | None, store: MapStore) -> None:
+    """Investigations fetch pages too: they lease sites through the map's table, so no site ever has two workers' requests at once."""
+
+    if fetcher is not None:
+        fetcher.host_slots, fetcher.host_release = store.claim_host_slot, store.release_host_slot
+
+
+def _map_service(
+    settings: AppSettings, backend: Any, intelligence_store: IntelligenceStore, provider: Any | None, notifications: NotificationService | None = None, email: EmailService | None = None,
+) -> MapService:
+    store = MapStore(backend=backend, suppression_key=_suppression_key(settings))
+    # host_slots: the shared table leases each site to one request at a time across every worker process.
+    fetcher = PublicPageFetcher(timeout_seconds=settings.web_extract_timeout_seconds, max_response_bytes=settings.web_extract_max_bytes, user_agent=crawler_user_agent(settings.intelligence_crawler_contact), host_slots=store.claim_host_slot, host_release=store.release_host_slot) if settings.intelligence_fetch_pages else None
+
+    def recipients(institution_id: str) -> tuple[str, ...]:
+        profile = intelligence_store.get_profile(institution_id)
+        return profile.alert_recipients if profile else ()
+
+    def contacts(institution_id: str) -> tuple[str, ...]:
+        profile = intelligence_store.get_profile(institution_id)
+        return profile.security_contacts if profile else ()
+
+    def notify(institution_id: str, recipient_ids: Any, title: str, body: str, incident_id: str) -> list[str]:
+        # What was created is returned: the desk marks an incident notified only once something was delivered.
+        if notifications is None:
+            return []
+        return notifications.system_notify(institution_id, recipient_ids=list(recipient_ids), title=title, body=body, reference_type="internet_map", reference_id=incident_id or None)
+
+    desk = IncidentDesk(
+        store, recipients=recipients, notify=notify, contacts=contacts, email=email.system_send if email is not None else None, authority_contacts=settings.intelligence_authority_contact_map(),
+    )
+    engine = MapEngine(
+        store, map_connectors(settings, cache=store), EngineConfig(sources_per_tick=settings.intelligence_sources_per_tick, budgets=settings.intelligence_budget_caps(), tenant_share=settings.intelligence_tenant_share),
+        fetcher=fetcher, search=provider, profile_loader=intelligence_store.get_profile, incidents=desk,
+    )
+    return MapService(store, fetcher=fetcher, engine=engine, seed_groups=settings.intelligence_seed_group_map(), desk=desk, approvers=settings.intelligence_entity_approver_map())
+
+
+def _suppression_key(settings: AppSettings) -> bytes:
+    return (settings.intelligence_suppression_key or "guru-ji-development-only").encode("utf-8")
+
+
+def map_connectors(settings: AppSettings, *, transport: Any | None = None, cache: Any | None = None) -> ConnectorRegistry:
+    """The connectors the map engine may use.
+
+    The public-page connectors (and the owner check, which reads only the
+    institution's own domains) are always on; every other one stays off
+    until GURU_INTELLIGENCE_CONNECTORS names it (and its key is configured).
+    ``cache`` (the map store) shares open-API answers across institutions for
+    Wikidata, OpenStreetMap, RDAP and the certificate log; never for YouTube
+    (quota is per key) or court records (sensitive).
+    """
+
+    on = set(settings.intelligence_connectors)
+    client = ApiClient(user_agent=crawler_user_agent(settings.intelligence_crawler_contact), timeout_seconds=settings.web_extract_timeout_seconds, transport=transport)
+    shared = replace(client, cache=cache) if cache is not None else client
+    return ConnectorRegistry([
+        OfficialSiteConnector(), LeadPageConnector(), RecheckConnector(),
+        SearchConnector(active="search" in on), SpamProbeConnector(active="spam_probe" in on), FeedConnector(active="feed" in on),
+        YouTubeConnector(api_key=settings.intelligence_youtube_api_key or "", active="youtube" in on, client=client),
+        WikidataConnector(active="wikidata" in on, client=shared),
+        CourtRecordsConnector(api_token=settings.intelligence_indiankanoon_token or "", active="court_records" in on, client=client),
+        CertificateConnector(active="certificates" in on, client=shared, token=settings.intelligence_certspotter_token or ""), RdapConnector(active="rdap" in on, client=shared), DnsConnector(active="dns" in on, client=client),
+        WaybackConnector(active="wayback" in on, client=client), LinkHubConnector(active="link_hub" in on), DirectoryConnector(active="directory" in on),
+        OpenStreetMapConnector(active="openstreetmap" in on, client=shared), GooglePlayConnector(active="google_play" in on),
+        NewsFeedConnector(active="news_feed" in on), LookalikeDomainConnector(active="lookalike_domains" in on, client=client, token=settings.intelligence_certspotter_token or ""),
+        GooglePlaySearchConnector(active="google_play_search" in on),
+        # Reads only the institution's own domains; its DNS TXT method is always offered, so it always has the DNS-over-HTTPS
+        # client (one public lookup of a domain the institution named, whether or not the dns connector explores).
+        OwnerClaimsConnector(key=_suppression_key(settings), dns=client),
+    ])
 
 
 def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: PolicyDecisionPoint, tracer: TraceRecorder, model: TextModel | None, planner_model: TextModel | None = None, institution_store: InstitutionDataStore | None = None, objects: ObjectStore | None = None, search_provider: Any | None = None, start_workers: bool = False) -> PlatformRuntime:
@@ -179,6 +291,10 @@ def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: P
         provider = TavilyIntelligenceSearchProvider(api_key=settings.web_search_api_key or "", endpoint=settings.web_search_endpoint, timeout_seconds=settings.web_search_timeout_seconds)
     build = dict(objects=objects, parsers=parsers, mapping=mapping, control_store=control_store, pdp=pdp, tracer=tracer, model=model, provider=provider)
     request = _services(settings, store, intelligence_store, **build)
+    intelligence_map = _map_service(settings, store.backend, intelligence_store, provider, request.notifications, request.email) if settings.intelligence_map_enabled else None
+    if intelligence_map is not None and request.intelligence is not None:
+        request.intelligence.map_store = intelligence_map.store  # the map's look-alikes screen investigations too
+        _share_host_slots(request.intelligence.fetcher, intelligence_map.store)
     # The in-process worker works on its own connection when the database can
     # open one, so its transactions never hold the request path's lock.
     worker_store: InstitutionDataStore | None = None
@@ -189,11 +305,22 @@ def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: P
     model_planner = ModelPlanner(planner_model) if (settings.agent_planner == "model" and planner_model is not None) else None
     agent = MasterAgent(request.gateway, request.registry, request.data, store, control_store, planner=DeterministicPlanner(), model_planner=model_planner, model=model, model_max_tokens=settings.model_max_tokens, tracer=tracer, background=jobs)
     if worker_store is not None:
-        worker = _services(settings, worker_store, IntelligenceStore(backend=worker_store.backend), **build)
+        worker_intelligence_store = IntelligenceStore(backend=worker_store.backend)
+        worker = _services(settings, worker_store, worker_intelligence_store, **build)
+        worker_map = _map_service(settings, worker_store.backend, worker_intelligence_store, provider, worker.notifications, worker.email) if settings.intelligence_map_enabled else None
+        if worker_map is not None and worker.intelligence is not None:
+            worker.intelligence.map_store = worker_map.store  # and the scheduled monitor's runs
+            _share_host_slots(worker.intelligence.fetcher, worker_map.store)
         worker_agent = MasterAgent(worker.gateway, worker.registry, worker.data, worker_store, control_store, planner=DeterministicPlanner(), model_planner=model_planner, model=model, model_max_tokens=settings.model_max_tokens, tracer=tracer, background=jobs)
-        register_handlers(jobs, ingestion=worker.ingestion, agent=worker_agent, monitor=worker.monitor, notifications=worker.notifications)
+        register_handlers(
+            jobs, ingestion=worker.ingestion, agent=worker_agent, monitor=worker.monitor, notifications=worker.notifications, map_engine=worker_map.engine if worker_map else None, map_desk=worker_map.desk if worker_map else None,
+            retention=partial(prune_intelligence, worker_intelligence_store, worker_map.store if worker_map else None, settings.intelligence_retention_days),
+        )
     else:
-        register_handlers(jobs, ingestion=request.ingestion, agent=agent, monitor=request.monitor, notifications=request.notifications)
+        register_handlers(
+            jobs, ingestion=request.ingestion, agent=agent, monitor=request.monitor, notifications=request.notifications, map_engine=intelligence_map.engine if intelligence_map else None, map_desk=intelligence_map.desk if intelligence_map else None,
+            retention=partial(prune_intelligence, intelligence_store, intelligence_map.store if intelligence_map else None, settings.intelligence_retention_days),
+        )
     if start_workers:
         # The thread queue only wakes on enqueue, so start it at boot rather than
         # on the first upload, then hand back jobs whose worker stopped reporting.
@@ -204,8 +331,8 @@ def build_platform(settings: AppSettings, *, control_store: ControlStore, pdp: P
     return PlatformRuntime(
         store=store, intelligence_store=intelligence_store, objects=objects, parsers=parsers, ingestion=request.ingestion, data=request.data, reports=request.reports, email=request.email,
         notifications=request.notifications, documents=request.documents, registry=request.registry, gateway=request.gateway, agent=agent, jobs=jobs, intelligence=request.intelligence, monitor=request.monitor,
-        sheets=GoogleSheetsCsvConnector(max_bytes=settings.max_upload_bytes), worker_store=worker_store,
+        sheets=GoogleSheetsCsvConnector(max_bytes=settings.max_upload_bytes), worker_store=worker_store, intelligence_map=intelligence_map,
     )
 
 
-__all__ = ["PlatformRuntime", "build_platform"]
+__all__ = ["PlatformRuntime", "build_platform", "map_connectors", "prune_intelligence"]

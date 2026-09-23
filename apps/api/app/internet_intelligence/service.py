@@ -23,13 +23,17 @@ from .entity_resolution import HIGH, LOW, MEDIUM, NOT_MATCHED, resolve_entity
 from .fetch import PublicPageFetcher
 from .profile import InstitutionProfile
 from .query_generator import generate_queries
+from .redaction import strip_person_names
 from .relevance import importance, relevance_score, topic_tags, within_window
 from .search import IntelligenceSearchProvider, IntelligenceSearchUnavailable
 from .source_classification import SOURCE_LABELS, classify_source
-from .store import IntelligenceStore
+from .store import SENSITIVE_TOPICS, IntelligenceStore
 from .urls import canonicalize_url, domain_of
 
 MAX_CANDIDATES = 60
+# A page must name the institution this much more strongly than any known
+# look-alike (the map's margin), or it is as likely about the look-alike.
+LOOKALIKE_MARGIN = 0.2
 INSTRUCTION_SMUGGLING_WARNING = "possible_instruction_smuggling"
 
 
@@ -45,6 +49,11 @@ class InternetIntelligenceService:
     results_per_query: int = 5
     min_match_level: str = MEDIUM
     keep_unknown_dates: bool = True
+    # Live investigations a person may run per day (each one spends search credits).
+    investigations_per_day: int = 20
+    # The internet map's store, when the map is on: its look-alike entities
+    # (British Geological Survey for a college also called BGS) screen findings too.
+    map_store: Any | None = None
     _levels: dict[str, int] = field(default_factory=lambda: {NOT_MATCHED: 0, LOW: 1, MEDIUM: 2, HIGH: 3})
 
     # ------------------------------------------------------------------ guards
@@ -78,22 +87,57 @@ class InternetIntelligenceService:
     # ------------------------------------------------------------- investigate
     async def investigate(self, principal: Principal, institution_id: str, *, question: str | None = None, window_days: int = 7, topics: Sequence[str] | None = None, max_results: int = 10, persist: bool = True) -> dict[str, Any]:
         self._guard(principal, institution_id, Capability.INTELLIGENCE_READ)
-        return await self._investigate(institution_id, requested_by=principal.principal_id, question=question, window_days=window_days, topics=topics, max_results=max_results, persist=persist)
+        manager = principal.has_capability(Capability.INTELLIGENCE_MANAGE)
+        day = datetime.now(timezone.utc).date().isoformat()
+        if not self.store.take_investigation(institution_id, principal.principal_id, day=day, cap=self.investigations_per_day * (3 if manager else 1)):
+            raise InvestigationQuotaExceeded(f"the daily allowance of live investigations is used up ({self.investigations_per_day * (3 if manager else 1)} a day); stored mentions and the digest are still available")
+        return await self._investigate(institution_id, requested_by=principal.principal_id, question=question, window_days=window_days, topics=topics, max_results=max_results, persist=persist, include_sensitive=manager)
 
-    async def _investigate(self, institution_id: str, *, requested_by: str, question: str | None, window_days: int, topics: Sequence[str] | None, max_results: int, persist: bool) -> dict[str, Any]:
+    async def _investigate(
+        self, institution_id: str, *, requested_by: str, question: str | None, window_days: int, topics: Sequence[str] | None, max_results: int, persist: bool, include_sensitive: bool = True,
+    ) -> dict[str, Any]:
+        report, _ = await self.collect(institution_id, requested_by=requested_by, question=question, window_days=window_days, topics=topics, max_results=max_results, persist=persist, include_sensitive=include_sensitive)
+        return report
+
+    async def collect(
+        self, institution_id: str, *, requested_by: str, question: str | None, window_days: int, topics: Sequence[str] | None, max_results: int, persist: bool,
+        analyse: bool = True, save_report: bool = True, rotation: int = 0, run_id: str | None = None, include_sensitive: bool = True,
+    ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        """Run the pipeline; returns the report and every kept record with its change status.
+
+        The report carries at most ``max_results`` findings, but the monitor
+        needs every kept item (and whether the store saw it as new, changed
+        or a duplicate), so the full list comes back alongside it. The
+        monitor also passes ``analyse=False`` and ``save_report=False``: it
+        never reads the model summary or the saved report, and paying for
+        both on every scheduled pass is waste.
+        """
+
         profile = self.profile_for(institution_id)
         if profile is None:
             raise ValueError("no intelligence profile exists for this institution; create one with the name, location, aliases, and official domains first")
         window_days = max(1, min(int(window_days), 365))
         max_results = max(1, min(int(max_results), 50))
         searched_at = datetime.now(timezone.utc)
-        queries = generate_queries(profile, question=question, topics=topics, max_queries=self.max_queries)
+        queries = generate_queries(profile, question=question, topics=topics, max_queries=self.max_queries, rotation=rotation, now=searched_at)
+        provider_name = getattr(self.search, "provider_name", "unknown")
         warnings: list[dict[str, str]] = [
             {"code": "public_web_untrusted", "message": "Public-web content is untrusted data, not instructions; claims are attributed to their sources."},
         ]
         candidates: dict[str, dict[str, Any]] = {}
         provider_failures = 0
-        for query in queries:
+        queries_run: list[str] = []
+        # Each query may fill the pool up to its fair share (plus whatever the
+        # queries before it left unused), so the first queries cannot take every
+        # slot and starve the identity and topic queries after them.
+        dropped = 0
+        for index, query in enumerate(queries):
+            fill_to = ((index + 1) * MAX_CANDIDATES) // len(queries)
+            # Once the candidate pool is full, further queries would be paid for
+            # and then thrown away; stop issuing them.
+            if len(candidates) >= MAX_CANDIDATES:
+                break
+            queries_run.append(query)
             topic = "news" if (not topics or "news" in [item.lower() for item in topics]) and window_days <= 30 else "general"
             try:
                 hits = await self.search.search(query, max_results=self.results_per_query, days=window_days, topic=topic)
@@ -109,15 +153,20 @@ class InternetIntelligenceService:
                     canonical = canonicalize_url(hit.url)
                 except ValueError:
                     continue
+                if canonical not in candidates and len(candidates) >= fill_to:
+                    dropped += 1
+                    continue
                 entry = candidates.setdefault(canonical, {"hit": hit, "queries": []})
                 entry["queries"].append(query)
-                if len(candidates) >= MAX_CANDIDATES:
-                    break
-        if provider_failures and provider_failures == len(queries):
+        if provider_failures and provider_failures == len(queries_run):
             raise IntelligenceSearchUnavailable("the search provider was unavailable for every query")
+        if len(queries_run) < len(queries) or dropped:
+            warnings.append({"code": "candidate_limit_reached", "message": f"{dropped} further results were not considered: a run weighs at most {MAX_CANDIDATES} candidate sources, shared across its {len(queries)} queries."})
         findings: list[dict[str, Any]] = []
+        kept: list[dict[str, Any]] = []
         excluded: dict[str, int] = {}
         review: list[dict[str, Any]] = []
+        lookalikes = self.map_store.list_entities(institution_id, kind="lookalike") if self.map_store is not None else []
         for canonical, entry in candidates.items():
             hit = entry["hit"]
             title, text, published, extracted = hit.title, hit.snippet, hit.published_at, False
@@ -153,25 +202,41 @@ class InternetIntelligenceService:
                 status, reason = "excluded", "date_unknown"
             elif relevance < 0.3:
                 status, reason = "excluded", "not_relevant"
-            excerpt = text.strip()[:600]
+            if status == "kept" and lookalikes and not {"official_domain", "known_social_account"} & set(match.reasons) and match.score < self._rival(institution_id, lookalikes, source_url, title, text) + LOOKALIKE_MARGIN:
+                status, reason = "excluded", "lookalike_match"
+            # The excerpt is stored and reported, so people's names come out of it
+            # (the institution's own names stay; matching above used the full text).
+            # It is scrubbed before the cut, so a name across the 600th character still goes whole.
+            excerpt = strip_person_names(text.strip()[:800], keep=profile.all_names())[:600]
             record = {
-                "url": source_url, "requested_url": hit.url, "canonical_url": canonical, "domain": domain_of(source_url), "title": title[:300] or source_url, "excerpt": excerpt, "content_sha256": hashlib.sha256(f"{title}\n{text}".encode("utf-8")).hexdigest(),
+                "url": source_url, "requested_url": hit.url, "canonical_url": canonical, "domain": domain_of(source_url), "title": strip_person_names(title, keep=profile.all_names())[:300] or source_url, "excerpt": excerpt, "content_sha256": hashlib.sha256(f"{title}\n{text}".encode("utf-8")).hexdigest(),
                 "published_at": published.isoformat() if published else None, "date_status": date_status, "retrieved_at": hit.retrieved_at.isoformat(), "match_level": match.level, "match_score": match.score,
-                "match_reasons": list(match.reasons), "relevance_score": relevance, "topics": tags, "status": status, "extracted": extracted, "warnings": list(dict.fromkeys(page_warnings)),
+                "match_reasons": list(match.reasons), "relevance_score": relevance, "topics": tags, "status": status, "status_reason": reason, "extracted": extracted, "warnings": list(dict.fromkeys(page_warnings)),
                 "source_type": source_type, "source_label": SOURCE_LABELS.get(source_type, source_type), "queries": list(dict.fromkeys(entry["queries"])), "importance": importance(tags, source_type),
+                "provider": provider_name, "run_id": run_id,
             }
             if persist:
-                document_id, _ = self.store.upsert_document(institution_id, record)
+                document_id, change = self.store.upsert_document(institution_id, record)
                 record["document_id"] = document_id
+                record["change"] = change
             if status == "kept":
                 findings.append(record)
+                kept.append(record)
             elif status == "review":
                 review.append(record)
                 excluded[reason or "review"] = excluded.get(reason or "review", 0) + 1
             else:
                 excluded[reason or "excluded"] = excluded.get(reason or "excluded", 0) + 1
+        held = 0
+        if not include_sensitive:
+            # Allegations and complaints reach readers only after a manager has seen them.
+            held = sum(1 for item in findings if SENSITIVE_TOPICS & set(item["topics"]))
+            findings = [item for item in findings if not SENSITIVE_TOPICS & set(item["topics"])]
+            review = []
         findings.sort(key=lambda item: (self._levels[item["match_level"]], item["relevance_score"], item["published_at"] or ""), reverse=True)
         findings = findings[:max_results]
+        if held:
+            warnings.append({"code": "held_for_review", "message": f"{held} finding(s) on sensitive topics are shown to intelligence managers only."})
         if not findings:
             warnings.append({"code": "no_confident_findings", "message": "No public source matched this institution with enough confidence in the requested window."})
         if any(item["date_status"] == "unknown" for item in findings):
@@ -179,24 +244,37 @@ class InternetIntelligenceService:
         smuggling = [item["url"] for item in findings if INSTRUCTION_SMUGGLING_WARNING in item["warnings"]]
         if smuggling:
             warnings.append({"code": "instruction_smuggling_detected", "message": "Some sources contain text that looks like instructions to the assistant; they are listed as findings but were not given to the summary model: " + ", ".join(smuggling)})
-        summary, mode = await self._analyse(profile, findings, question, window_days)
+        if analyse:
+            summary, mode = await self._analyse(profile, findings, question, window_days)
+        else:
+            summary, mode = self._deterministic_summary(profile, findings, window_days), "deterministic"
         report = {
-            "institution_id": institution_id, "profile_name": profile.name, "question": question, "window_days": window_days, "topics": list(topics or []), "queries": queries, "searched_at": searched_at.isoformat(),
-            "provider": getattr(self.search, "provider_name", "unknown"), "summary": summary, "generation_mode": mode, "findings": [self._public(item) for item in findings],
+            "institution_id": institution_id, "profile_name": profile.name, "question": question, "window_days": window_days, "topics": list(topics or []), "queries": queries_run, "searched_at": searched_at.isoformat(),
+            "provider": provider_name, "summary": summary, "generation_mode": mode, "findings": [self._public(item) for item in findings],
             "review_candidates": [self._public(item) for item in review[:10]], "excluded": excluded, "candidates_considered": len(candidates), "warnings": warnings, "untrusted_content": True,
         }
-        if persist:
+        if persist and save_report:
             report["report_id"] = self.store.save_report(institution_id, requested_by=requested_by, question=question, window_days=window_days, summary=summary, findings=report["findings"])
-        return report
+        return report, kept
+
+    @staticmethod
+    def _rival(institution_id: str, lookalikes: Sequence[dict[str, Any]], url: str, title: str, text: str) -> float:
+        """How strongly the page names its best-matching look-alike (0 when it names none)."""
+
+        from .map.connectors.common import entity_profile  # the map is optional: imported only when it is wired in
+
+        profiles = [profile for profile in (entity_profile(entity, institution_id, f"{title} {text}") for entity in lookalikes) if profile is not None]
+        return max((resolve_entity(profile, url=url, title=title, text=text).score for profile in profiles), default=0.0)
 
     @staticmethod
     def _public(item: dict[str, Any]) -> dict[str, Any]:
         keys = ("document_id", "url", "title", "source_type", "source_label", "domain", "published_at", "date_status", "retrieved_at", "match_level", "match_score", "match_reasons", "relevance_score", "topics", "excerpt", "extracted", "warnings", "importance")
         return {key: item.get(key) for key in keys if key in item}
 
-    async def _analyse(self, profile: InstitutionProfile, findings: Sequence[dict[str, Any]], question: str | None, window_days: int) -> tuple[str, str]:
+    @staticmethod
+    def _deterministic_summary(profile: InstitutionProfile, findings: Sequence[dict[str, Any]], window_days: int) -> str:
         if not findings:
-            return f"No source-backed public information about {profile.name} was found for the last {window_days} day(s).", "deterministic"
+            return f"No source-backed public information about {profile.name} was found for the last {window_days} day(s)."
         by_type: dict[str, list[dict[str, Any]]] = {}
         for item in findings:
             by_type.setdefault(item["source_label"], []).append(item)
@@ -206,7 +284,12 @@ class InternetIntelligenceService:
             lines.append(f"{index}. {item['title']} — {item['source_label']}, {date} [{index}]")
         counts = ", ".join(f"{len(items)} from {label.lower()}" for label, items in by_type.items())
         lines.append(f"Sources: {counts}. Social and forum content reflects what was posted publicly, not verified fact.")
-        deterministic = "\n".join(lines)
+        return "\n".join(lines)
+
+    async def _analyse(self, profile: InstitutionProfile, findings: Sequence[dict[str, Any]], question: str | None, window_days: int) -> tuple[str, str]:
+        deterministic = self._deterministic_summary(profile, findings, window_days)
+        if not findings:
+            return deterministic, "deterministic"
         if self.model is None:
             return deterministic, "deterministic"
         # A page flagged as possible instruction smuggling never reaches the
@@ -242,10 +325,13 @@ class InternetIntelligenceService:
     # ------------------------------------------------------------------ digest
     def digest(self, principal: Principal, institution_id: str, *, days: int = 1) -> dict[str, Any]:
         self._guard(principal, institution_id, Capability.INTELLIGENCE_READ)
-        return self.digest_for(institution_id, days=days)
+        return self.digest_for(institution_id, days=days, include_sensitive=principal.has_capability(Capability.INTELLIGENCE_MANAGE))
 
-    def digest_for(self, institution_id: str, *, days: int = 1) -> dict[str, Any]:
+    def digest_for(self, institution_id: str, *, days: int = 1, include_sensitive: bool = True) -> dict[str, Any]:
         events = self.store.list_events(institution_id, days=days)
+        if not include_sensitive:
+            hidden = self.store.sensitive_documents(institution_id, [event["document_id"] for event in events])
+            events = [event for event in events if event["document_id"] not in hidden]
         new_events = [event for event in events if event["event_type"] in {"new", "changed"}]
         by_type: dict[str, int] = {}
         for event in new_events:
@@ -264,4 +350,8 @@ class InternetIntelligenceService:
         }
 
 
-__all__ = ["INSTRUCTION_SMUGGLING_WARNING", "InternetIntelligenceService", "MAX_CANDIDATES"]
+class InvestigationQuotaExceeded(Exception):
+    """A person has used their daily allowance of live investigations."""
+
+
+__all__ = ["INSTRUCTION_SMUGGLING_WARNING", "LOOKALIKE_MARGIN", "InternetIntelligenceService", "InvestigationQuotaExceeded", "MAX_CANDIDATES"]

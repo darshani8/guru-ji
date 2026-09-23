@@ -23,6 +23,7 @@ from .api.routes.documents import router as documents_router
 from .api.routes.health import router as health_router
 from .api.routes.ingestion import router as ingestion_router
 from .api.routes.intelligence import router as intelligence_router
+from .api.routes.intelligence_map import router as intelligence_map_router
 from .api.routes.platform import router as platform_router
 from .api.routes.research import router as research_router
 from .api.routes.sources import router as sources_router
@@ -68,6 +69,7 @@ app.include_router(data_router)
 app.include_router(agent_router)
 app.include_router(documents_router)
 app.include_router(intelligence_router)
+app.include_router(intelligence_map_router)
 app.include_router(platform_router)
 
 # Two separate browser apps: the client assistant at `/` and the developer
