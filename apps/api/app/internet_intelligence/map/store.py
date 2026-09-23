@@ -23,6 +23,7 @@ from uuid import uuid4
 
 from ...persistence.schema_tools import add_missing_columns, apply_schema, begin_migration, existing_policies, idempotent_tenant_isolation_sql, row_level_security_state, tenant_isolation_statements
 from ...persistence.sql_backend import SqlBackend, open_backend
+from ..redaction import names_of, strip_person_names
 from .assets import AssetRef, asset_ref
 
 SCHEMA_VERSION = "004_intelligence_map"
@@ -318,6 +319,12 @@ MAX_OPEN_REVIEW = 500
 URGENT_REVIEW_KINDS = frozenset({"run_gate", "canary_leak", "impersonation_candidate", "court_record"})
 REVIEW_TTL_DAYS = 90
 SOURCE_ORIGINS = frozenset({"seed", "recurring", "lead", "gap", "profile"})
+# Evidence whose detail is free text for people to read. Only these are
+# scrubbed of names on the way in: the grader parses the details of the other
+# kinds ("A:footer", "authority:nirf", "parked:...", "not_found:api").
+FREE_TEXT_EVIDENCE = frozenset({
+    "search_snippet", "imported_claim", "reviewer_confirm", "reviewer_reject", "impersonation", "lookalike", "spam_indexed", "community_record", "backlink", "api_identity",
+})
 
 
 def _json(value: Any) -> str:
@@ -648,6 +655,19 @@ class MapStoreReview:
     def _tenant(self, institution_id: str):  # pragma: no cover - provided by MapStore
         raise NotImplementedError
 
+    def _without_names(self, institution_id: str, text: str) -> str:
+        """The backstop for text a connector forgot to scrub: people's names out, the institution's entities' names kept.
+
+        Most text has no name-shaped phrase at all, so the entity names are
+        read only when a first pass would change something.
+        """
+
+        if not text or strip_person_names(text) == text:
+            return text
+        with self._tenant(institution_id):
+            rows = self.backend.fetchall("SELECT name, names_json FROM intel_entities WHERE institution_id = ?", (institution_id,))
+        return strip_person_names(text, keep=names_of({"name": row["name"], "names": _loads(row["names_json"], [])} for row in rows))
+
     def add_review_item(
         self, institution_id: str, *, kind: str, title: str, fingerprint: str | None = None, detail: str = "", url: str = "", asset_id: str | None = None, entity_id: str | None = None,
         severity: str = "normal", connector: str = "", source_id: str | None = None, run_id: str | None = None, now: str | None = None,
@@ -675,6 +695,8 @@ class MapStoreReview:
         # Items queued before the fingerprint named the asset are still found under their old one.
         legacy = fingerprint or hashlib.sha256(f"{kind}|{asset_id or ''}|{url}|{'' if asset_id or url else title}".encode("utf-8")).hexdigest()
         expires = (datetime.fromisoformat(stamp) + timedelta(days=REVIEW_TTL_DAYS)).isoformat()
+        # The fingerprint above stays on the title as found, so items queued before names were scrubbed still match.
+        title, detail = self._without_names(institution_id, title), self._without_names(institution_id, detail)
         with self._tenant(institution_id):
             existing = self.backend.fetchone(
                 "SELECT review_id, status FROM intel_review_items WHERE institution_id = ? AND fingerprint IN (?, ?) ORDER BY CASE WHEN fingerprint = ? THEN 0 ELSE 1 END LIMIT 1", (institution_id, key, legacy, key),
@@ -1191,6 +1213,8 @@ class MapStore(MapStoreScheduling, MapStoreReview, MapStoreIncidents):
             raise ValueError("polarity must be supports or refutes")
         if observed_via not in {"live", "index", "archive", "owner", "reviewer", "import"}:
             raise ValueError(f"unknown observation channel {observed_via!r}")
+        if kind in FREE_TEXT_EVIDENCE:
+            detail = self._without_names(institution_id, detail)
         evidence_id = f"ievd-{uuid4().hex}"
         with self._tenant(institution_id):
             self.backend.execute(
@@ -1345,6 +1369,6 @@ def iter_chunks(items: Sequence[Any], size: int) -> Iterable[Sequence[Any]]:
 
 
 __all__ = [
-    "ADDED_COLUMNS", "ASSET_STATUSES", "ENTITY_KINDS", "GLOBAL_TABLES", "GRADES", "GRADE_RANK", "RELATIONS", "SCHEMA_VERSION", "SOURCE_CLASSES", "SOURCE_ORIGINS", "SPLITS", "TENANT_TABLES", "MapStore", "grade_at_least", "iter_chunks",
+    "ADDED_COLUMNS", "ASSET_STATUSES", "ENTITY_KINDS", "FREE_TEXT_EVIDENCE", "GLOBAL_TABLES", "GRADES", "GRADE_RANK", "RELATIONS", "SCHEMA_VERSION", "SOURCE_CLASSES", "SOURCE_ORIGINS", "SPLITS", "TENANT_TABLES", "MapStore", "grade_at_least", "iter_chunks",
     "render_sql_migration", "suppression_fingerprint",
 ]

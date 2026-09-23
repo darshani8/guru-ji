@@ -10,6 +10,8 @@ canaries the map must never grade as official. A sweep subject becomes an
 entity with every name it goes by ("X (ABBR)" is X, also called ABBR, plus
 the names and places in the bundled entities.tsv), and nothing personal (a
 LinkedIn /in/ profile, a phone number) is imported for it.
+A row's label and note are stored with people's names taken out; the
+entities' own names stay.
 """
 
 from __future__ import annotations
@@ -22,6 +24,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from ..redaction import names_of, strip_person_names
 from .assets import DOMAIN, asset_ref
 from .connectors.common import names_entity, person_shaped
 from .pipeline import entity_key
@@ -192,6 +195,12 @@ def import_seed(
     for existing in store.list_entities(institution_id, limit=5000):
         if existing["kind"] != "lookalike":
             mapped.update({key: (existing["kind"], existing["name"]) for key in map(entity_key, (existing["name"], *existing["names"])) if key and key not in mapped})
+    lookalikes = list(lookalikes)
+    # The sweep names its subjects (the Math, its colleges, the Swamiji); those stay in the notes, people's names do not.
+    keep = [
+        *names_of(store.list_entities(institution_id)), *(name for row in rows for name in (row.subject, row.parent) if name),
+        *(name for lookalike in lookalikes for name in (lookalike.name, *lookalike.names)),
+    ]
 
     def describe(subject: str, kind: str) -> EntitySeed:
         """The entity a subject names: its bundled names and places, under the name it already has on the map."""
@@ -276,10 +285,11 @@ def import_seed(
         entity_id = entity(row.subject, kind, row.group, row.parent)
         store.add_gold(institution_id, asset_key=ref.key, platform=ref.platform, split="seed", entity_name=row.subject, relation=row.relation, expected_min_grade=expected, source=source)
         label = row.label if row.label != row.subject else ""
-        asset_id, created = store.upsert_asset(institution_id, ref, entity_id=entity_id, relation=row.relation, note=" · ".join(part for part in (label, row.note) if part))
+        note = strip_person_names(row.note, keep=keep)
+        asset_id, created = store.upsert_asset(institution_id, ref, entity_id=entity_id, relation=row.relation, note=" · ".join(part for part in (strip_person_names(label, keep=keep), note) if part))
         summary.assets_created += int(created)
         summary.assets_existing += int(not created)
-        store.add_evidence(institution_id, asset_id=asset_id, kind="imported_claim", detail=f"claimed {row.claimed_grade}: {row.note}", channel=source, observed_via="import", source_url="")
+        store.add_evidence(institution_id, asset_id=asset_id, kind="imported_claim", detail=f"claimed {row.claimed_grade}: {note}", channel=source, observed_via="import", source_url="")
         summary.evidence += 1
         if ref.platform == "website" and ref.kind == DOMAIN:
             # A seeded site is fetched, not just believed: lead_page reads it (a

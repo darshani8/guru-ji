@@ -2,7 +2,9 @@
 
 Search results are snippets, never fetched pages: an account found this way
 is a C-grade candidate from one channel until something stronger (an
-official link, a second independent channel, a reviewer) agrees.
+official link, a second independent channel, a reviewer) agrees. A result's
+title is kept only with people's names taken out (the mapped entities' own
+names stay): the map records where an account was seen, not who posted.
 """
 
 from __future__ import annotations
@@ -12,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
+from ...redaction import names_of, strip_person_names
 from ...search import IntelligenceSearchUnavailable
 from ..assets import ACCOUNT, DOMAIN, GROUP, asset_ref
 from ..cache import calls_made, calls_so_far
@@ -88,6 +91,7 @@ class SearchConnector:
         # The cost is the provider calls really made: an answer from the shared cache costs 0.
         result = ConnectorResult(outcome="ok", cost=calls_made(context.search, before))
         anchored = self._anchored_accounts(context)
+        keep = names_of(context.entities())
         for hit in hits:
             try:
                 ref = asset_ref(hit.url)
@@ -109,8 +113,9 @@ class SearchConnector:
                 # when its own handle is the institution's, not just its display name.
                 continue
             asset_id, created = context.store.upsert_asset(context.institution_id, ref, entity_id=found.entity["entity_id"], relation="unknown", note=f"found by searching {domain}")
+            title = strip_person_names(hit.title, keep=keep)[:120]
             context.store.add_evidence(
-                context.institution_id, asset_id=asset_id, kind="search_snippet", detail=f"{provider}: {hit.title[:120]}", source_url=hit.url, channel=f"search:{provider}", observed_via="index", run_id=context.run_id,
+                context.institution_id, asset_id=asset_id, kind="search_snippet", detail=f"{provider}: {title}", source_url=hit.url, channel=f"search:{provider}", observed_via="index", run_id=context.run_id,
             )
             result.touched.add(asset_id)
             if created:
@@ -121,7 +126,7 @@ class SearchConnector:
             if claimed_official and rival and ref.key not in rival:
                 result.review.append({
                     "kind": "impersonation_candidate", "asset_id": asset_id, "title": f"{ref.handle} calls itself official on {ref.platform}",
-                    "detail": f"{found.entity['name']} already has an anchored {ref.platform} account ({', '.join(sorted(rival))[:120]}); this one says '{hit.title[:120]}'", "url": hit.url,
+                    "detail": f"{found.entity['name']} already has an anchored {ref.platform} account ({', '.join(sorted(rival))[:120]}); this one says '{title}'", "url": hit.url,
                 })
         return result
 
