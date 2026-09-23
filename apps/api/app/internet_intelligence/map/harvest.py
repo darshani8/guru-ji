@@ -226,8 +226,10 @@ class OfficialSiteHarvester:
     async def _retrieve(self, institution_id: str, url: str, result: HarvestResult, *, conditional: bool | None = None) -> Retrieval:
         use_cache = self.conditional if conditional is None else conditional
         state = self.store.fetch_state(institution_id, url) if use_cache else None
-        result.requests += 1
-        return await self.fetcher.retrieve(url, etag=(state or {}).get("etag"), last_modified=(state or {}).get("last_modified"))
+        retrieval = await self.fetcher.retrieve(url, etag=(state or {}).get("etag"), last_modified=(state or {}).get("last_modified"))
+        # A host another worker kept busy was never asked: that costs nothing.
+        result.requests += int(retrieval.outcome != "busy")
+        return retrieval
 
     def _reconfirm(self, institution_id: str, domain_asset_id: str, page_url: str, run_id: str | None, result: HarvestResult, *, home_id: str | None = None) -> set[str]:
         """Repeat the latest official-link observation from an unchanged page (a 304 answer).
@@ -326,8 +328,8 @@ class OfficialSiteHarvester:
         while queue and len(done) < MAX_SITEMAP_READS and room - len(done) > 1:
             url = queue.pop(0)
             done.add(url)
-            result.requests += 1
             retrieval = await self.fetcher.retrieve(url, accept=frozenset({"xml"}), max_bytes=MAX_SITEMAP_BYTES)
+            result.requests += int(retrieval.outcome != "busy")
             if not retrieval.ok or _host(retrieval.url) != host:
                 continue
             listed, nested = parse_sitemap(retrieval.body)

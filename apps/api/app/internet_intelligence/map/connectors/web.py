@@ -255,6 +255,9 @@ class RecheckConnector:
             return ConnectorResult(outcome="snippet_only")
         state = context.store.fetch_state(context.institution_id, asset["url"])
         retrieval = await context.fetcher.retrieve(asset["url"], etag=(state or {}).get("etag"), last_modified=(state or {}).get("last_modified"))
+        if retrieval.outcome == "busy":
+            # Nothing was asked of the site: its validators and grade stand, and the engine tries again soon.
+            return ConnectorResult(outcome="busy", cost=0.0)
         keep = retrieval.outcome in {"ok", "not_modified"}
         digest = hashlib.sha256(retrieval.body).hexdigest() if retrieval.ok else None
         context.store.record_fetch(context.institution_id, asset["url"], outcome=retrieval.outcome, etag=retrieval.etag if keep else None, last_modified=retrieval.last_modified if keep else None, content_sha256=digest)

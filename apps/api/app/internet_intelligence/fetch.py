@@ -50,7 +50,7 @@ _ROBOTS_AGENT_VERSION = re.compile(r"^(\s*user-agent\s*:\s*[^/\s#]+)/[^\s#]*", r
 # since a redirect from any page can land on one. Link hubs (linktr.ee, bio.link) stay fetchable on
 # purpose: the link-hub connector reads them.
 DEFAULT_SNIPPET_ONLY_DOMAINS = (
-    "facebook.com", "fb.com", "fb.me", "instagram.com", "twitter.com", "x.com", "linkedin.com", "youtube.com", "youtu.be", "threads.net", "threads.com", "t.me", "telegram.me", "wa.me",
+    "facebook.com", "fb.com", "fb.me", "instagram.com", "twitter.com", "x.com", "linkedin.com", "youtube.com", "youtu.be", "threads.net", "threads.com", "t.me", "telegram.me", "wa.me", "wa.link",
     "whatsapp.com", "pinterest.com", "snapchat.com", "sharechat.com", "reddit.com", "redd.it", "quora.com", "justdial.com", "glassdoor.com",
 )
 # Sites whose pages are never fetched under any country domain (glassdoor.co.in,

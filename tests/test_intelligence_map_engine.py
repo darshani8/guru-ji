@@ -346,6 +346,34 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item.get("stop_reason") for item in results], ["completed", "idle"], "the second tick follows the leads the first one found")
 
 
+class BusyHostTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.store = MapStore(":memory:", suppression_key=b"test-key")
+        self.clock = Clock()
+        self.site = Site({"https://bgscet.ac.in/": (200, HOME), "https://bgscet.ac.in/events/fest": (200, CONTACT)})
+
+    async def test_a_busy_host_is_tried_again_soon_and_counts_for_nothing(self):
+        from app.internet_intelligence.map.assets import asset_ref
+
+        async def no_wait(seconds):
+            return None
+
+        # Another worker keeps every host past the wait: no request is made at all.
+        busy = PublicPageFetcher(transport=httpx.MockTransport(self.site.handler), resolver=lambda host: (PUBLIC_IP,), min_host_interval=0, host_slots=lambda host, lease: 30.0, sleep=no_wait)
+        page_id, _ = self.store.upsert_asset("bgscet", asset_ref("https://bgscet.ac.in/events/fest"), entity_id=None)
+        self.store.record_fetch("bgscet", "https://bgscet.ac.in/events/fest", outcome="ok", etag='"v1"', last_modified=None, content_sha256=None)
+        self.store.upsert_source("bgscet", connector="recheck", target=page_id, due_at=NOW.isoformat())
+        engine = MapEngine(self.store, ConnectorRegistry((OfficialSiteConnector(), RecheckConnector())), EngineConfig(), fetcher=busy, profile_loader=lambda institution_id: PROFILE, clock=self.clock)
+        result = await engine.tick("bgscet")
+        self.assertEqual(self.site.seen, [], "no request reached the site")
+        self.assertEqual((result["counts"]["busy"], result["counts"]["sources"], result["counts"]["failed"]), (2, 0, 0))
+        for source in self.store.list_sources("bgscet"):
+            self.assertEqual((source["runs"], source["failure_streak"], source["lease_owner"], source["due_at"]), (0, 0, None, (NOW + timedelta(hours=1)).isoformat()), "no back-off, no failure, no step towards expiry")
+        self.assertEqual(self.store.list_evidence("bgscet", asset_id=page_id), [], "a busy host says nothing about the site")
+        self.assertEqual(self.store.fetch_state("bgscet", "https://bgscet.ac.in/events/fest")["etag"], '"v1"', "its validators stand")
+        self.assertEqual(self.store.tenant_spend("bgscet", day=DAY).get("fetch", {}).get("units", 0.0), 0.0, "nothing is charged")
+
+
 class RecheckTests(unittest.IsolatedAsyncioTestCase):
     async def test_recheck_records_liveness_and_leaves_social_platforms_alone(self):
         store = MapStore(":memory:", suppression_key=b"test-key")

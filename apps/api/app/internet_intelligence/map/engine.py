@@ -288,14 +288,21 @@ class MapEngine:
             result = await connector.run(source, self._context(institution_id, run_id, profile))
         except Exception as exc:  # noqa: BLE001 - one broken source must not end the tick
             result = ConnectorResult(outcome=f"error:{type(exc).__name__}", failed=True)
+        # Another worker held the host past the wait: nothing was learned about the site, so this is not a run.
+        busy = result.outcome == "busy"
         # Charged what the run actually spent: a 304 or a cache hit hands the rest of the reservation back.
-        actual = max(0.0, float(result.cost)) if result.cost is not None else estimate
+        actual = max(0.0, float(result.cost)) if result.cost is not None else (0.0 if busy else estimate)
         if day is not None and actual < estimate:
             self.store.refund_budget(institution_id, connector=connector.budget_key, units=estimate - actual, day=day)
             split = self._class_budget(connector.budget_key, source.get("work_class"))
             if split is not None:
                 self.store.refund_budget(institution_id, connector=split[0], units=estimate - actual, day=day)
         spend[connector.budget_key] = spend.get(connector.budget_key, 0.0) + actual
+        if busy:
+            # Tried again next hour with no back-off, no failure streak and no step towards a lead's expiry.
+            counts["busy"] = counts.get("busy", 0) + 1
+            self.store.defer_source(institution_id, source["source_id"], due_at=(self.clock() + timedelta(seconds=self.config.min_interval)).isoformat())
+            return
         counts["sources"] += 1
         counts["new_assets"] += len(result.new_assets)
         counts["raised"] += max(0, result.yield_count - len(result.new_assets))

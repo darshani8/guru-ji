@@ -475,6 +475,11 @@ class MapStoreScheduling:
         with self._tenant(institution_id):
             self.backend.execute("UPDATE intel_sources SET lease_owner = NULL, lease_until = NULL WHERE institution_id = ? AND source_id = ?", (institution_id, source_id))
 
+    def defer_source(self, institution_id: str, source_id: str, *, due_at: str) -> None:
+        """Hand a source back unrun (its host was busy): not a run, not a failure, due again at ``due_at``."""
+        with self._tenant(institution_id):
+            self.backend.execute("UPDATE intel_sources SET lease_owner = NULL, lease_until = NULL, due_at = ? WHERE institution_id = ? AND source_id = ?", (due_at, institution_id, source_id))
+
     def complete_source(
         self, institution_id: str, source_id: str, *, outcome: str, next_due: str, interval_seconds: int, yield_count: int, cost: float, failed: bool,
         etag: str | None = None, last_modified: str | None = None, status: str | None = None, origin: str | None = None, clear_expiry: bool = False, work_class: str | None = None,
