@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from urllib.parse import parse_qs, unquote, urlparse
+from urllib.parse import parse_qs, quote, unquote, urlparse
 
 from ..urls import canonicalize_url
 
@@ -25,7 +25,7 @@ PLATFORM_HOSTS: tuple[tuple[str, str], ...] = (
     ("wa.me", "whatsapp"), ("wa.link", "whatsapp"), ("whatsapp.com", "whatsapp"), ("t.me", "telegram"), ("telegram.me", "telegram"), ("github.com", "github"),
     ("reddit.com", "reddit"), ("snapchat.com", "snapchat"), ("pinterest.com", "pinterest"), ("sharechat.com", "sharechat"), ("spotify.com", "spotify"),
     ("linktr.ee", "linktree"), ("bio.link", "linktree"), ("unstop.com", "unstop"), ("devpost.com", "devpost"), ("gdg.community.dev", "gdg"), ("quora.com", "quora"),
-    ("wikipedia.org", "wikipedia"), ("wikidata.org", "wikidata"),
+    ("wikipedia.org", "wikipedia"), ("wikidata.org", "wikidata"), ("play.google.com", "google_play"),
 )
 SOCIAL_PLATFORMS = frozenset({"facebook", "instagram", "x", "youtube", "linkedin", "threads", "whatsapp", "telegram", "github", "reddit", "snapchat", "pinterest", "sharechat", "spotify", "linktree", "quora"})
 _RESERVED = {
@@ -36,6 +36,8 @@ _RESERVED = {
     "github": {"orgs", "sponsors", "topics", "search", "login"},
 }
 _FB_ID_TAIL = re.compile(r"(?:^|-)(\d{6,})$")
+# An Android application ID ("in.ac.bgscet.app"): case-sensitive, so kept exact.
+_PLAY_PACKAGE = re.compile(r"^[A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z0-9_]+)+$")
 # "mailto:", "javascript:", "tel:" ... but not "host:8080/path".
 _SCHEME = re.compile(r"^[a-zA-Z][a-zA-Z0-9+.-]*:(?!\d)")
 
@@ -97,6 +99,17 @@ def asset_ref(url: str) -> AssetRef:
     if platform == "website":
         if not segments and not parsed.query:
             return AssetRef("website", DOMAIN, f"web:{host}", f"https://{host}/", host)
+        return page()
+    if platform == "google_play":
+        # An app listing, or a developer's page; any other store page is just a page.
+        if [segment.lower() for segment in segments[:3]] == ["store", "apps", "details"] and query.get("id") and _PLAY_PACKAGE.match(query["id"][0]):
+            package = query["id"][0]
+            return AssetRef(platform, ACCOUNT, f"google_play:app:{package}", f"https://play.google.com/store/apps/details?id={package}", package)
+        if [segment.lower() for segment in segments[:3]] in (["store", "apps", "dev"], ["store", "apps", "developer"]) and query.get("id"):
+            developer = query["id"][0].strip()[:120]
+            if developer:
+                path = "dev" if segments[2].lower() == "dev" else "developer"
+                return AssetRef(platform, ACCOUNT, f"google_play:{path}:{developer}", f"https://play.google.com/store/apps/{path}?id={quote(developer)}", f"developer {developer}")
         return page()
     if platform in {"instagram", "threads"}:
         handle = lowered.removeprefix("@")

@@ -50,7 +50,7 @@ def _bool_env(name: str, default: bool) -> bool:
 # Connectors the internet map may use beyond the always-on public-page ones
 # (official_site, lead_page, recheck); each stays off until named in
 # GURU_INTELLIGENCE_CONNECTORS.
-OPTIONAL_CONNECTORS: tuple[str, ...] = ("search", "spam_probe", "feed", "youtube", "wikidata", "court_records", "certificates", "rdap", "dns", "wayback", "link_hub", "directory")
+OPTIONAL_CONNECTORS: tuple[str, ...] = ("search", "spam_probe", "feed", "youtube", "wikidata", "court_records", "certificates", "rdap", "dns", "wayback", "link_hub", "directory", "openstreetmap", "google_play")
 
 
 @dataclass(frozen=True, slots=True)

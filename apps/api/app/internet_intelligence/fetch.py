@@ -42,7 +42,10 @@ _CONTENT_FAMILIES = {
 _LOGIN_PATH = re.compile(r"/(?:accounts/)?log[-_]?in\b|/authwall|/signin\b|/checkpoint\b", re.IGNORECASE)
 
 
-DEFAULT_SNIPPET_ONLY_DOMAINS = ("facebook.com", "instagram.com", "twitter.com", "x.com", "linkedin.com", "youtube.com", "threads.net", "reddit.com", "quora.com")
+DEFAULT_SNIPPET_ONLY_DOMAINS = ("facebook.com", "instagram.com", "twitter.com", "x.com", "linkedin.com", "youtube.com", "threads.net", "reddit.com", "quora.com", "justdial.com", "glassdoor.com")
+# Sites whose pages are never fetched under any country domain (glassdoor.co.in,
+# justdial.co.in ...): search snippets about them are all the platform uses.
+NEVER_FETCHED_SITES = ("glassdoor", "justdial", "quora", "reddit")
 MAX_REDIRECTS = 3
 ROBOTS_MAX_BYTES = 200_000
 _REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
@@ -55,6 +58,17 @@ _NON_PUBLIC_NETWORKS = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_netw
 _NAT64 = ipaddress.ip_network("64:ff9b::/96")
 
 HostResolver = Callable[[str], Sequence[str]]
+
+
+def _never_fetched(domain: str) -> bool:
+    """Whether ``domain`` is one of NEVER_FETCHED_SITES under any country domain ("www.glassdoor.co.in")."""
+
+    labels = domain.lower().rstrip(".").split(".")
+    for index, label in enumerate(labels[:-1]):
+        # The site's name followed only by a public suffix ("com", "co.in", "com.au").
+        if label in NEVER_FETCHED_SITES and all(len(rest) <= 3 for rest in labels[index + 1 :]):
+            return True
+    return False
 
 
 def crawler_user_agent(contact: str | None) -> str:
@@ -152,7 +166,9 @@ class PublicPageFetcher:
 
     def allowed_domain(self, url: str) -> bool:
         domain = domain_of(url)
-        return not any(domain == item or domain.endswith("." + item) for item in self.snippet_only_domains)
+        if any(domain == item or domain.endswith("." + item) for item in self.snippet_only_domains):
+            return False
+        return not _never_fetched(domain)
 
     async def _public_address(self, hostname: str | None) -> str | None:
         """The address to connect to, or None unless every address the host resolves to is public."""
@@ -388,4 +404,4 @@ class Retrieval:
         return self.body.decode("utf-8", errors="replace")
 
 
-__all__ = ["HTML_TYPES", "Retrieval", "published_from_html", "DEFAULT_SNIPPET_ONLY_DOMAINS", "MAX_REDIRECTS", "ROBOTS_FAILURE_TTL_SECONDS", "ROBOTS_MAX_BYTES", "ROBOTS_TTL_SECONDS", "FetchedPage", "PublicPageFetcher", "USER_AGENT", "crawler_user_agent", "is_public_address", "resolve_host"]
+__all__ = ["HTML_TYPES", "NEVER_FETCHED_SITES", "Retrieval", "published_from_html", "DEFAULT_SNIPPET_ONLY_DOMAINS", "MAX_REDIRECTS", "ROBOTS_FAILURE_TTL_SECONDS", "ROBOTS_MAX_BYTES", "ROBOTS_TTL_SECONDS", "FetchedPage", "PublicPageFetcher", "USER_AGENT", "crawler_user_agent", "is_public_address", "resolve_host"]

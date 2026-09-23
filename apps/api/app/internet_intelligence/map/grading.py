@@ -257,7 +257,8 @@ def apply_disputes(assets: Iterable[Mapping[str, Any]], grades: Mapping[str, str
         # A refuted account (an impostor a reviewer rejected) disputes nothing.
         if grades.get(str(asset.get("asset_id")), asset.get("grade")) == "D":
             continue
-        if asset.get("relation") == "official" and asset.get("entity_id") and asset.get("kind") == "account":
+        # An institution may publish several apps, so app listings never dispute each other.
+        if asset.get("relation") == "official" and asset.get("entity_id") and asset.get("kind") == "account" and asset.get("platform") != "google_play":
             groups.setdefault((str(asset["entity_id"]), str(asset["platform"])), []).append(str(asset["asset_id"]))
     capped: dict[str, str] = {}
     for members in groups.values():

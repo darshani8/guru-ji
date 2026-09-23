@@ -138,6 +138,9 @@ class RetrieveTests(unittest.IsolatedAsyncioTestCase):
         again = await fetcher.retrieve("https://site.example/cached", etag=first.etag)
         self.assertEqual(again.outcome, "not_modified", "the validator from the last fetch still holds")
         self.assertEqual((await fetcher.retrieve("https://www.instagram.com/bgscet_engg_coll/")).outcome, "snippet_only")
+        for never in ("https://www.justdial.com/Bangalore/BGS-College", "https://www.glassdoor.co.in/Reviews/BGS.htm", "https://www.reddit.com/r/bangalore/", "https://in.quora.com/q"):
+            self.assertEqual((await fetcher.retrieve(never)).outcome, "snippet_only", f"{never} is never fetched, under any country domain")
+        self.assertTrue(fetcher.allowed_domain("https://glassdoor-alumni.example.org/"), "only the sites themselves are refused")
         self.assertEqual((await PublicPageFetcher(transport=httpx.MockTransport(handler), resolver=lambda host: ("10.0.0.1",)).retrieve("https://intranet.example/")).outcome, "not_public")
 
 

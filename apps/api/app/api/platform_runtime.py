@@ -29,6 +29,7 @@ from ..internet_intelligence.map.connectors.common import ApiClient
 from ..internet_intelligence.map.connectors.feeds import FeedConnector
 from ..internet_intelligence.map.connectors.hubs import DirectoryConnector, LinkHubConnector
 from ..internet_intelligence.map.connectors.infrastructure import CertificateConnector, DnsConnector, RdapConnector
+from ..internet_intelligence.map.connectors.places import GooglePlayConnector, OpenStreetMapConnector
 from ..internet_intelligence.map.connectors.search import SearchConnector, SpamProbeConnector
 from ..internet_intelligence.map.connectors.web import LeadPageConnector, OfficialSiteConnector, RecheckConnector
 from ..internet_intelligence.map.engine import EngineConfig, MapEngine
@@ -219,6 +220,7 @@ def map_connectors(settings: AppSettings, *, transport: Any | None = None) -> Co
         CourtRecordsConnector(api_token=settings.intelligence_indiankanoon_token or "", active="court_records" in on, client=client),
         CertificateConnector(active="certificates" in on, client=client), RdapConnector(active="rdap" in on, client=client), DnsConnector(active="dns" in on, client=client),
         WaybackConnector(active="wayback" in on, client=client), LinkHubConnector(active="link_hub" in on), DirectoryConnector(active="directory" in on),
+        OpenStreetMapConnector(active="openstreetmap" in on, client=client), GooglePlayConnector(active="google_play" in on),
         # Reads only the institution's own domains; the DNS TXT check uses DNS over HTTPS only when the dns connector is allowed.
         OwnerClaimsConnector(key=_suppression_key(settings), dns=client if "dns" in on else None),
     ])

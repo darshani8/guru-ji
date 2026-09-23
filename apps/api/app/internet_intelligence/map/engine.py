@@ -40,7 +40,7 @@ from .pipeline import nominated, regrade, sync_profile
 from .store import MapStore
 
 DEFAULT_BUDGETS: dict[str, float] = {
-    "fetch": 3000, "search": 100, "feed": 2000, "youtube_api": 5000, "wikidata": 300, "crtsh": 100, "rdap": 200, "wayback": 300, "dns": 200, "indiankanoon": 20,
+    "fetch": 3000, "search": 100, "feed": 2000, "youtube_api": 5000, "wikidata": 300, "crtsh": 100, "rdap": 200, "wayback": 300, "dns": 200, "indiankanoon": 20, "openstreetmap": 100,
 }
 
 
