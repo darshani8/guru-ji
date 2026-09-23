@@ -38,6 +38,7 @@ const state = {
   echoText: '',
   echoTimer: null,
   thinking: new Map(),
+  liveText: new Map(),
   audioContext: null,
   playback: { queue: [], source: null, generation: 0, busy: false },
   tts: null,
@@ -196,6 +197,7 @@ function addMessage(kind, text, options = {}) {
   }
 
   const copy = document.createElement('div');
+  copy.className = 'message-text';
   copy.textContent = text;
   bubble.append(copy);
 
@@ -708,6 +710,26 @@ function removeThinking(clientMessageId) {
   const bubble = state.thinking.get(clientMessageId);
   if (bubble) bubble.remove();
   state.thinking.delete(clientMessageId);
+  state.liveText.delete(clientMessageId);
+}
+
+// A streamed reply is shown as it is spoken; the full answer replaces it.
+function showLiveText(clientMessageId, sentence) {
+  const bubble = state.thinking.get(clientMessageId);
+  if (!bubble) return;
+  const text = `${state.liveText.get(clientMessageId) || ''} ${sentence}`.trim();
+  state.liveText.set(clientMessageId, text);
+  bubble.classList.remove('loading-message');
+  bubble.querySelector('.message-text').textContent = text;
+  scrollHistory();
+}
+
+function resetLiveText(clientMessageId) {
+  const bubble = state.thinking.get(clientMessageId);
+  state.liveText.delete(clientMessageId);
+  if (!bubble) return;
+  bubble.classList.add('loading-message');
+  bubble.querySelector('.message-text').textContent = 'Thinking…';
 }
 
 function handleVoiceMessage(event) {
@@ -750,6 +772,7 @@ function handleVoiceMessage(event) {
   if (message.type === 'speech') {
     // Sentences of a reply the person has already talked over are dropped.
     if (message.client_message_id !== state.activeReplyId) return;
+    if (!message.filler) showLiveText(message.client_message_id, message.text);
     enqueueSpeech({
       text: message.text,
       language: message.language || state.language,
@@ -759,9 +782,18 @@ function handleVoiceMessage(event) {
     return;
   }
   if (message.type === 'cancelled') {
+    if (message.reason === 'retracted') {
+      // What was said came from a reply that then failed: stop it; the
+      // replacement answer and its speech follow.
+      if (message.client_message_id === state.activeReplyId) stopSpeaking();
+      resetLiveText(message.client_message_id);
+      return;
+    }
     removeThinking(message.client_message_id);
     return;
   }
+  // Marks the end of a reply's speech; playback ends when its queue drains.
+  if (message.type === 'speech_end') return;
   if (message.type === 'pong') return;
   if (message.type === 'expired') {
     const reason = message.reason === 'idle'

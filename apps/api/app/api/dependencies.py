@@ -154,11 +154,11 @@ def _build_conversation_model(settings: AppSettings, model):
         if settings.conversation_model_id:
             provider = AnthropicProvider(
                 model_id=settings.conversation_model_id, api_key=settings.anthropic_api_key, effort=settings.anthropic_effort,
-                system=LATENCY_SENSITIVE_SYSTEM, timeout_seconds=settings.conversation_timeout_seconds, platform=settings.model_provider,
+                system=LATENCY_SENSITIVE_SYSTEM, timeout_seconds=settings.conversation_stream_seconds, platform=settings.model_provider,
                 aws_region=settings.bedrock_region,
             )
         else:
-            provider.timeout_seconds = settings.conversation_timeout_seconds
+            provider.timeout_seconds = settings.conversation_stream_seconds
         return provider
     return model
 
@@ -329,6 +329,9 @@ def build_runtime(settings: AppSettings | None = None, *, start_workers: bool = 
         enabled=settings.conversation_enabled,
         voice_agent_mode=settings.voice_agent_mode,
         timeout_seconds=settings.conversation_timeout_seconds,
+        first_text_seconds=settings.conversation_first_text_seconds,
+        stream_seconds=settings.conversation_stream_seconds,
+        speech_max_chars=settings.voice_tts_max_chars_per_reply,
         institution_names=_institution_names(platform),
     )
     return Runtime(

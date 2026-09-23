@@ -7,7 +7,7 @@ import io
 import unittest
 
 from app.config.settings import AppSettings
-from app.voice.speech_text import ON_SCREEN, speech_chunks, split_sentences, to_speech
+from app.voice.speech_text import ON_SCREEN, SentenceStreamer, speech_chunks, split_sentences, to_speech
 from app.voice.tts import NullSynthesizer, PollySynthesizer, build_synthesizer
 
 
@@ -53,6 +53,43 @@ class SpeechTextTests(unittest.TestCase):
         self.assertLessEqual(sum(len(chunk) for chunk in chunks[:-1]), 460)
         self.assertEqual(speech_chunks("नमस्ते। आप कैसे हैं?", language="hi-IN"), ["नमस्ते। आप कैसे हैं?"])
         self.assertEqual(speech_chunks(""), [])
+
+
+def _stream(chunks, **options):
+    streamer = SentenceStreamer(**options)
+    steps = [streamer.feed(chunk) for chunk in chunks]
+    steps.append(streamer.flush())
+    return steps
+
+
+class SentenceStreamerTests(unittest.TestCase):
+    def test_sentences_are_released_as_soon_as_they_end(self) -> None:
+        steps = _stream(["Attendance is 75.", "5 percent today. Dr. Rao teaches B.Tech", " students [1]. Sure. ", "OK then.", " Bye."])
+        self.assertEqual(steps[0], [], "75. may still become 75.5")
+        self.assertEqual(steps[1], ["Attendance is 75.5 percent today."])
+        self.assertEqual(steps[2], ["Dr. Rao teaches B.Tech students."], "titles and degrees stay whole; citation markers are not spoken")
+        self.assertEqual(steps[-1], ["Sure. OK then. Bye."], "short sentences join the next")
+
+    def test_hindi_danda_ends_a_sentence(self) -> None:
+        steps = _stream(["मैं आपकी मदद कर सकती हूँ, बताइए। ", "आज क्या जानना है?"], language="hi-IN")
+        self.assertEqual(steps[0], ["मैं आपकी मदद कर सकती हूँ, बताइए।"])
+        self.assertEqual(steps[-1], ["आज क्या जानना है?"])
+
+    def test_a_long_opening_clause_is_spoken_at_a_comma(self) -> None:
+        opening = "This is a long opening clause that keeps going, and going, with plenty of words in it, and it does not stop yet because"
+        steps = _stream([opening, " the model is still writing."], first_chars=60)
+        self.assertTrue(steps[0], "speech starts before the first full stop")
+        self.assertLessEqual(len(steps[0][0]), 100)
+        self.assertEqual(" ".join(steps[0] + steps[-1]).replace("  ", " "), opening + " the model is still writing.")
+
+    def test_speech_stops_at_the_limit(self) -> None:
+        steps = _stream(["One two three four five six. " * 10], max_chars=80)
+        spoken = [piece for step in steps for piece in step]
+        self.assertEqual(spoken[-1], ON_SCREEN["en-IN"])
+        self.assertLessEqual(sum(len(piece) for piece in spoken[:-1]), 80)
+        streamer = SentenceStreamer()
+        self.assertEqual(streamer.feed(""), [])
+        self.assertEqual(streamer.flush(), [])
 
 
 class PollyTests(unittest.IsolatedAsyncioTestCase):

@@ -26,17 +26,21 @@ from ..domain.principals import Capability
 from ..domain.requests import ChatRequest, InteractionChannel
 from ..observability.tracing import TraceRecorder
 from ..orchestration.answer_synthesizer import AssistantAnswer, _validated_model_text
-from ..voice.speech_text import to_speech
+from ..voice.speech_text import SentenceStreamer, to_speech
 from .contracts import Reply, Turn
 from .language import DetectedLanguage, detect_language
 from .phrases import phrase
 from .prompts import conversation_prompt, split_search_request, web_answer_prompt
 from .router import classify, looks_institutional
+from .streaming import StreamOutcome, stream_reply
 from .web_search import OpenWebSearchService, WebFindings, WebSearchRefused
 
 logger = logging.getLogger("guru.conversation")
 
 Progress = Callable[[str, str, DetectedLanguage], Awaitable[None]]
+# Called with each finished sentence of a reply that is still being written,
+# so a voice client can speak it at once.
+Speech = Callable[[str, DetectedLanguage], Awaitable[None]]
 MAX_REPLY_CHARS = 2_000
 _CITE = re.compile(r"\[(\d{1,2})\]")
 _WEB_REFUSAL_PHRASE = {"forbidden": "web_forbidden", "personal_data": "web_personal", "quota": "web_quota", "unavailable": "web_unavailable", "invalid": "not_understood"}
@@ -55,11 +59,18 @@ class DialogueManager:
     enabled: bool = True
     voice_agent_mode: str = "assistant"
     timeout_seconds: float = 8.0
+    # Streamed (spoken) replies: the first text must come within
+    # first_text_seconds and the whole reply within stream_seconds.
+    first_text_seconds: float = 6.0
+    stream_seconds: float = 20.0
+    speech_max_chars: int = 1500
     max_tokens: int = 700
     institution_names: Callable[[str], tuple[str, ...]] | None = None
 
     # ------------------------------------------------------------ entry point
-    async def respond(self, turn: Turn, *, on_progress: Progress | None = None) -> Reply:
+    async def respond(self, turn: Turn, *, on_progress: Progress | None = None, on_speech: Speech | None = None) -> Reply:
+        """Answer one turn. With ``on_speech``, model replies are streamed and spoken sentence by sentence."""
+
         started = monotonic()
         language = detect_language(turn.text, turn.language_hint)
         if turn.approval_id or turn.run_in_background or not self.enabled:
@@ -72,9 +83,9 @@ class DialogueManager:
             if classification.intent == "small_talk":
                 reply = self._small_talk(turn, language, classification.small_talk or "greeting")
             elif classification.intent == "web":
-                reply = await self._web(turn, language, classification.query or turn.text, news=classification.news, on_progress=on_progress)
+                reply = await self._web(turn, language, classification.query or turn.text, news=classification.news, on_progress=on_progress, on_speech=on_speech)
             else:
-                reply = await self._task(turn, language, converse_on_unknown=True, on_progress=on_progress)
+                reply = await self._task(turn, language, converse_on_unknown=True, on_progress=on_progress, on_speech=on_speech)
         if reply.route != "task":
             self._audit(turn, reply, started)
         self.tracer.record("conversation.turn", trace_id=turn.request_id, attributes={
@@ -118,6 +129,26 @@ class DialogueManager:
         text = text.strip()
         return text[:MAX_REPLY_CHARS] if text else None
 
+    async def _stream_spoken(self, prompt: str, language: DetectedLanguage, on_speech: Speech) -> tuple[StreamOutcome, SentenceStreamer]:
+        """Stream a model reply, handing each finished sentence to ``on_speech`` as it is written."""
+
+        streamer = SentenceStreamer(language.code, max_chars=self.speech_max_chars)
+
+        async def on_text(delta: str) -> None:
+            for sentence in streamer.feed(delta):
+                await on_speech(sentence, language)
+
+        outcome = await stream_reply(
+            self.model, prompt, max_tokens=self.max_tokens, first_text_seconds=self.first_text_seconds,
+            total_seconds=self.stream_seconds, on_text=on_text,
+        )
+        if outcome.ok and outcome.search is None:
+            for sentence in streamer.flush():
+                await on_speech(sentence, language)
+        elif outcome.error:
+            logger.warning("conversation stream ended early: %s (speech already sent: %s)", outcome.error, outcome.emitted_any)
+        return outcome, streamer
+
     def _institution(self, turn: Turn) -> str | None:
         names = self._names(turn.scope.college_id)
         return names[0] if names else None
@@ -127,30 +158,41 @@ class DialogueManager:
         return self._reply(turn, "small_talk", language, phrase(kind, language), intent=f"small_talk.{kind}")
 
     # ------------------------------------------------------------ conversation
-    async def _converse(self, turn: Turn, language: DetectedLanguage, *, fallback: str | None = None, on_progress: Progress | None = None) -> Reply:
+    async def _converse(self, turn: Turn, language: DetectedLanguage, *, fallback: str | None = None, on_progress: Progress | None = None, on_speech: Speech | None = None) -> Reply:
         started = monotonic()
         can_search = self.web is not None
-        text = await self._model_text(self.model, conversation_prompt(
-            turn.text, turn.history, language, channel=turn.channel, institution=self._institution(turn), can_search=can_search,
-        ))
-        if text is None:
-            warnings = [{"code": "model_unavailable", "message": "The conversation model is unavailable; a standard reply was given."}] if self.model is not None else []
-            return self._reply(turn, "conversation", language, fallback or phrase("not_understood", language), status="needs_input", intent="conversation", warnings=warnings, started=started)
-        query, rest = split_search_request(text)
+        prompt = conversation_prompt(turn.text, turn.history, language, channel=turn.channel, institution=self._institution(turn), can_search=can_search)
+        spoken_live = 0
+        retract = False
+        if on_speech is not None and self.model is not None:
+            outcome, streamer = await self._stream_spoken(prompt, language, on_speech)
+            query = outcome.search
+            # A search request carries no reply of its own; a failed stream has none.
+            text = None if not outcome.ok else ("" if query else outcome.text.strip()[:MAX_REPLY_CHARS])
+            spoken_live, retract = streamer.emitted, outcome.emitted_any and not outcome.ok
+        else:
+            text = await self._model_text(self.model, prompt)
+            query, text = split_search_request(text) if text is not None else (None, None)
         if query and can_search:
-            return await self._web(turn, language, query, news=False, on_progress=on_progress)
-        answer = rest or phrase("not_understood", language)
-        return self._reply(
-            turn, "conversation", language, answer, intent="conversation", warnings=[GENERAL_KNOWLEDGE_WARNING],
+            return await self._web(turn, language, query, news=False, on_progress=on_progress, on_speech=on_speech)
+        if text is None or (not text and query is None):
+            warnings = [{"code": "model_unavailable", "message": "The conversation model is unavailable; a standard reply was given."}] if self.model is not None else []
+            reply = self._reply(turn, "conversation", language, fallback or phrase("not_understood", language), status="needs_input", intent="conversation", warnings=warnings, started=started)
+            reply.extras["retract_speech"] = retract
+            return reply
+        reply = self._reply(
+            turn, "conversation", language, text or phrase("not_understood", language), intent="conversation", warnings=[GENERAL_KNOWLEDGE_WARNING],
             generation_mode=getattr(self.model, "provider_id", "model"), started=started,
         )
+        reply.extras["spoken_live"] = spoken_live
+        return reply
 
     # ------------------------------------------------------------ web
-    async def _web(self, turn: Turn, language: DetectedLanguage, query: str, *, news: bool, on_progress: Progress | None) -> Reply:
+    async def _web(self, turn: Turn, language: DetectedLanguage, query: str, *, news: bool, on_progress: Progress | None, on_speech: Speech | None = None) -> Reply:
         started = monotonic()
         if self.web is None:
             if self.model is not None:
-                return await self._converse(turn, language)
+                return await self._converse(turn, language, on_speech=on_speech)
             return self._reply(turn, "web", language, phrase("web_off", language), status="refused", intent="web_search", refusal_reason="internet search is not configured", started=started)
         if on_progress is not None:
             await on_progress("web_search", phrase("web_filler", language), language)
@@ -161,16 +203,23 @@ class DialogueManager:
             return self._reply(turn, "web", language, text, status="refused", intent="web_search", refusal_reason=refused.code, started=started)
         if not findings.findings:
             return self._reply(turn, "web", language, phrase("web_nothing", language), status="partial", intent="web_search", warnings=list(findings.warnings), started=started)
-        return await self._web_answer(turn, language, findings, started)
+        return await self._web_answer(turn, language, findings, started, on_speech=on_speech)
 
-    async def _web_answer(self, turn: Turn, language: DetectedLanguage, findings: WebFindings, started: float) -> Reply:
+    async def _web_answer(self, turn: Turn, language: DetectedLanguage, findings: WebFindings, started: float, *, on_speech: Speech | None = None) -> Reply:
         items = [{"title": item.title, "source": item.source, "published": item.published or "", "snippet": item.snippet} for item in findings.findings]
         sources = [item.as_source(index) for index, item in enumerate(findings.findings, start=1)]
-        text = await self._model_text(self.model, web_answer_prompt(
-            turn.text, items, turn.history, language, channel=turn.channel, institution=self._institution(turn),
-        ))
+        prompt = web_answer_prompt(turn.text, items, turn.history, language, channel=turn.channel, institution=self._institution(turn))
+        spoken_live = 0
+        retract = False
+        if on_speech is not None and self.model is not None:
+            outcome, streamer = await self._stream_spoken(prompt, language, on_speech)
+            text = outcome.text.strip()[:MAX_REPLY_CHARS] if outcome.ok and outcome.search is None and outcome.text.strip() else None
+            spoken_live, retract = streamer.emitted, outcome.emitted_any and text is None
+        else:
+            text = await self._model_text(self.model, prompt)
         generation_mode = getattr(self.model, "provider_id", "model")
         if text is None or text.startswith("[[search"):
+            spoken_live = 0
             # Without a model the top results are read out as they are, attributed.
             count = 2 if turn.channel == "voice" else 3
             parts = [phrase("here_is_what_i_found", language)]
@@ -181,7 +230,9 @@ class DialogueManager:
             generation_mode = "deterministic"
         cited = sorted({int(number) for number in _CITE.findall(text) if 1 <= int(number) <= len(sources)})
         used = [sources[number - 1] for number in cited] or sources
-        return self._reply(turn, "web", language, text, intent="web_search", sources=used, warnings=list(findings.warnings), generation_mode=generation_mode, started=started)
+        reply = self._reply(turn, "web", language, text, intent="web_search", sources=used, warnings=list(findings.warnings), generation_mode=generation_mode, started=started)
+        reply.extras.update(spoken_live=spoken_live, retract_speech=retract)
+        return reply
 
     # ------------------------------------------------------------ institutional tasks
     def _use_agent(self, turn: Turn) -> bool:
@@ -190,7 +241,7 @@ class DialogueManager:
         mode = turn.mode or ("agent" if turn.channel == "text" else self.voice_agent_mode)
         return mode == "agent"
 
-    async def _task(self, turn: Turn, language: DetectedLanguage, *, converse_on_unknown: bool, on_progress: Progress | None = None) -> Reply:
+    async def _task(self, turn: Turn, language: DetectedLanguage, *, converse_on_unknown: bool, on_progress: Progress | None = None, on_speech: Speech | None = None) -> Reply:
         if self._use_agent(turn):
             if on_progress is not None:
                 # From here the turn may change records: a voice interrupt
@@ -201,10 +252,13 @@ class DialogueManager:
             )
             response: AgentResponse = await self.agent.handle(command)  # type: ignore[union-attr]
             if converse_on_unknown and self._unmapped(response):
-                return await self._converse(turn, language, fallback=response.answer if language.code == "en-IN" and not language.hinglish else None, on_progress=on_progress)
+                if on_progress is not None:
+                    # The agent changed nothing: the conversation that follows may be cut short.
+                    await on_progress("conversation", "", language)
+                return await self._converse(turn, language, fallback=response.answer if language.code == "en-IN" and not language.hinglish else None, on_progress=on_progress, on_speech=on_speech)
             return await self._institutional_reply(turn, language, response)
         if converse_on_unknown and not looks_institutional(turn.text):
-            return await self._converse(turn, language, on_progress=on_progress)
+            return await self._converse(turn, language, on_progress=on_progress, on_speech=on_speech)
         request = ChatRequest(
             request_id=turn.request_id, principal_id=turn.principal.principal_id, prompt=turn.text, institution_scope=turn.scope,
             conversation_id=turn.conversation_id, channel=InteractionChannel.VOICE if turn.channel == "voice" else InteractionChannel.TEXT,

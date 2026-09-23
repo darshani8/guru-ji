@@ -69,6 +69,12 @@ _PHRASES: dict[str, dict[str, tuple[str, ...]]] = {
         "hi-Latn": ("Ek second, main internet par dekhti hoon.",),
         "kn-IN": ("ಒಂದು ನಿಮಿಷ, ಇಂಟರ್ನೆಟ್‌ನಲ್ಲಿ ನೋಡುತ್ತೇನೆ.",),
     },
+    "thinking_filler": {
+        "en-IN": ("One moment.", "Just a moment."),
+        "hi-IN": ("एक सेकंड।",),
+        "hi-Latn": ("Ek second.",),
+        "kn-IN": ("ಒಂದು ನಿಮಿಷ.",),
+    },
     "web_nothing": {
         "en-IN": ("I couldn't find anything reliable on the internet for that. Could you say it another way?",),
         "hi-IN": ("मुझे इंटरनेट पर इसके बारे में भरोसेमंद जानकारी नहीं मिली। क्या आप दूसरे शब्दों में पूछेंगे?",),

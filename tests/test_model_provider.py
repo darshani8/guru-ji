@@ -268,6 +268,24 @@ class ClaudeProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(events[-1].is_final)
         self.assertEqual(events[-1].usage["output_tokens"], 12)
 
+    async def test_a_refusal_after_streamed_text_is_reported_as_a_failed_spoken_reply(self):
+        from app.conversation.streaming import stream_reply
+
+        heard: list[str] = []
+
+        async def on_text(text):
+            heard.append(text)
+
+        declined = _claude(_FakeMessages(_message(("text", "Partial answer. "), ("text", "More"), stop_reason="refusal")))
+        with self.assertLogs("app.providers.anthropic", "WARNING"):
+            outcome = await stream_reply(declined, "prompt", max_tokens=100, first_text_seconds=2, total_seconds=5, on_text=on_text)
+        self.assertEqual((outcome.error, outcome.emitted_any), ("provider", True))
+        self.assertEqual("".join(heard), "Partial answer. More", "the caller retracts what was already heard")
+        heard.clear()
+        fine = _claude(_FakeMessages(_message(("fallback", ""), ("text", "All good."))))
+        outcome = await stream_reply(fine, "prompt", max_tokens=100, first_text_seconds=2, total_seconds=5, on_text=on_text)
+        self.assertEqual((outcome.error, outcome.text, "".join(heard)), (None, "All good.", "All good."))
+
     def test_effort_and_model_are_validated(self):
         with self.assertRaises(ValueError):
             AnthropicProvider(effort="fast")

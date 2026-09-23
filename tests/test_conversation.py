@@ -48,6 +48,41 @@ class _SlowModel(_Model):
         return "too late"
 
 
+class _StreamingModel(_Model):
+    """Writes its reply in pieces, a little apart, and records when each piece left."""
+
+    def __init__(self, pieces, *, delay=0.02, fail_after=None, first_delay=0.0):
+        super().__init__("".join(piece for piece in pieces if isinstance(piece, str)))
+        self.pieces = pieces
+        self.delay = delay
+        self.first_delay = first_delay
+        self.fail_after = fail_after
+        self.log: list[str] = []
+        self.completed = 0
+
+    async def complete(self, prompt, *, max_tokens=800):
+        self.completed += 1
+        return await super().complete(prompt, max_tokens=max_tokens)
+
+    def stream(self, prompt, *, max_tokens=800):
+        self.prompts.append(prompt)
+        return self._stream()
+
+    async def _stream(self):
+        from app.domain.errors import ErrorCode, GuruJiError, PublicError
+        from app.providers.model_base import ModelEvent
+
+        await asyncio.sleep(self.first_delay)
+        for index, piece in enumerate(self.pieces):
+            if self.fail_after is not None and index == self.fail_after:
+                raise GuruJiError(PublicError(ErrorCode.SERVICE_UNAVAILABLE, "declined", "provider"))
+            await asyncio.sleep(self.delay)
+            self.log.append(f"model:{piece}")
+            yield ModelEvent(type="delta", text=piece)
+        self.log.append("model:end")
+        yield ModelEvent(type="delta", is_final=True)
+
+
 class _Assistant:
     """Stands in for the read-only assistant: records what it was asked."""
 
@@ -213,6 +248,18 @@ class DialogueTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("general_knowledge", [item["code"] for item in reply.response.warnings])
         self.assertIn("Never state or guess figures", model.prompts[0])
 
+    async def test_an_unmapped_command_tells_the_voice_socket_it_may_be_interrupted(self) -> None:
+        stages: list[str] = []
+
+        async def on_progress(stage, text, language):
+            stages.append(stage)
+
+        await self._dialogue(model=_Model("A joke!")).respond(_turn("tell me a joke", who=principal(PrincipalType.FACULTY), channel="voice", mode="agent"), on_progress=on_progress)
+        self.assertEqual(stages, ["agent", "conversation"])
+        stages.clear()
+        await self._dialogue(model=_Model("unused")).respond(_turn("How many MBA students have attendance below 75%?", who=principal(PrincipalType.FACULTY), channel="voice", mode="agent"), on_progress=on_progress)
+        self.assertEqual(stages, ["agent"], "a mapped command stays protected")
+
     async def test_without_a_model_an_unmapped_command_still_gets_help(self) -> None:
         reply = await self._dialogue().respond(_turn("please do the thing", who=principal(PrincipalType.FACULTY)))
         self.assertEqual((reply.route, reply.status), ("conversation", "needs_input"))
@@ -290,6 +337,75 @@ class DialogueTests(unittest.IsolatedAsyncioTestCase):
         chat = await dialogue.respond(_turn("what is a black hole"))
         self.assertEqual(chat.route, "conversation")
         self.assertEqual(self.assistant.asked, ["What is the attendance summary?"], "general questions no longer get the institution overview")
+
+    async def test_a_spoken_reply_is_heard_while_it_is_still_being_written(self) -> None:
+        model = _StreamingModel(["Why did the student bring a ladder to class? ", "To reach higher grades! ", "Want another one?"])
+        spoken: list[str] = []
+
+        async def on_speech(sentence, language):
+            model.log.append(f"speak:{sentence}")
+            spoken.append(sentence)
+
+        reply = await self._dialogue(model=model).respond(_turn("tell me a joke", who=principal(PrincipalType.FACULTY), channel="voice"), on_speech=on_speech)
+        self.assertEqual((reply.route, reply.status), ("conversation", "complete"))
+        self.assertLess(model.log.index("speak:Why did the student bring a ladder to class?"), model.log.index("model:end"), "the first sentence is spoken before the model finishes")
+        self.assertEqual(" ".join(spoken), "Why did the student bring a ladder to class? To reach higher grades! Want another one?")
+        self.assertEqual(reply.extras["spoken_live"], len(spoken))
+        self.assertEqual(reply.response.answer, "Why did the student bring a ladder to class? To reach higher grades! Want another one?")
+        self.assertEqual(model.completed, 0)
+
+    async def test_typed_chat_still_waits_for_the_whole_reply(self) -> None:
+        model = _StreamingModel(["A black hole is a region of space. ", "Nothing escapes it."])
+        reply = await self._dialogue(model=model).respond(_turn("what is a black hole", who=principal(PrincipalType.FACULTY)))
+        self.assertEqual((reply.route, model.completed), ("conversation", 1))
+        self.assertNotIn("spoken_live", {key for key, value in reply.extras.items() if value})
+
+    async def test_a_streamed_search_request_is_never_spoken(self) -> None:
+        answers = _StreamingModel(["ISRO launched PSLV-C62 on Monday [1]. ", "It carried a satellite [2]."])
+        model = _StreamingModel(["[[sea", "rch: ISRO latest launch]]\n", "ignored"])
+        spoken: list[str] = []
+
+        async def on_speech(sentence, language):
+            spoken.append(sentence)
+
+        dialogue = self._dialogue(model=model)
+        original_stream = model.stream
+        calls = iter([original_stream, answers.stream])
+        model.stream = lambda prompt, **kwargs: next(calls)(prompt, **kwargs)
+        reply = await dialogue.respond(_turn("what did ISRO do this week", who=principal(PrincipalType.FACULTY), channel="voice"), on_speech=on_speech)
+        self.assertEqual((reply.route, reply.status), ("web", "complete"))
+        self.assertTrue(spoken)
+        self.assertFalse(any("[[" in sentence or "search:" in sentence for sentence in spoken))
+        self.assertFalse(any("[1]" in sentence for sentence in spoken), "citation markers are not read aloud")
+        self.assertEqual([item["url"] for item in reply.response.sources], ["https://www.isro.gov.in/launch", "https://www.thehindu.com/sci-tech/isro"])
+        self.assertEqual(reply.extras["spoken_live"], len(spoken))
+
+    async def test_a_reply_that_fails_after_speaking_is_retracted(self) -> None:
+        model = _StreamingModel(["Here is the first part of my answer. ", "And here is"], fail_after=1)
+        spoken: list[str] = []
+
+        async def on_speech(sentence, language):
+            spoken.append(sentence)
+
+        with self.assertLogs("guru.conversation", "WARNING"):
+            reply = await self._dialogue(model=model).respond(_turn("tell me a joke", who=principal(PrincipalType.FACULTY), channel="voice"), on_speech=on_speech)
+        self.assertEqual(spoken, ["Here is the first part of my answer."])
+        self.assertEqual((reply.route, reply.status), ("conversation", "needs_input"))
+        self.assertTrue(reply.extras["retract_speech"])
+        self.assertNotIn("first part", reply.response.answer, "the partial answer is discarded")
+
+    async def test_a_model_that_says_nothing_in_time_falls_back_silently(self) -> None:
+        model = _StreamingModel(["Too late."], first_delay=1.0)
+        spoken: list[str] = []
+
+        async def on_speech(sentence, language):
+            spoken.append(sentence)
+
+        with self.assertLogs("guru.conversation", "WARNING"):
+            reply = await self._dialogue(model=model, first_text_seconds=0.05).respond(_turn("tell me a joke", who=principal(PrincipalType.FACULTY), channel="voice"), on_speech=on_speech)
+        self.assertEqual((spoken, reply.status), ([], "needs_input"))
+        self.assertFalse(reply.extras["retract_speech"])
+        self.assertIn("model_unavailable", [item["code"] for item in reply.response.warnings])
 
     async def test_approval_required_asks_for_the_on_screen_confirmation(self) -> None:
         reply = await self._dialogue().respond(_turn("Update the email of student MBA002 to new@abc.edu.in", who=principal(PrincipalType.PRINCIPAL)))

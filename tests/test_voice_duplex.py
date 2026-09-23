@@ -33,12 +33,31 @@ class _FakeDialogue:
         self.finished: list[str] = []
         self.turns = []
 
-    async def respond(self, turn, *, on_progress=None):
+    async def respond(self, turn, *, on_progress=None, on_speech=None):
         self.turns.append(turn)
         text = turn.text
         try:
             if text == "slow chat":
                 await asyncio.sleep(5)
+            if text == "slow reply":
+                await asyncio.sleep(0.3)
+            if text == "stream chat":
+                # A model reply being written: two sentences, a little apart.
+                await on_speech("First, the short answer.", _Lang())
+                await asyncio.sleep(0.15)
+                await on_speech("Then a little more detail.", _Lang())
+                await asyncio.sleep(0.05)
+                answer = "First, the short answer. Then a little more detail."
+                reply = Reply("conversation", AgentResponse(turn.request_id, "complete", answer, intent="conversation"), "en-IN", answer)
+                reply.extras["spoken_live"] = 2
+                return reply
+            if text == "stream then fail":
+                await on_speech("This part was already said.", _Lang())
+                await asyncio.sleep(0.1)
+                fallback = "Sorry, I can't help with that one."
+                reply = Reply("conversation", AgentResponse(turn.request_id, "needs_input", fallback, intent="conversation"), "en-IN", fallback)
+                reply.extras.update(retract_speech=True, spoken_live=0)
+                return reply
             if text == "agent action":
                 await on_progress("agent", "", _Lang())
                 await asyncio.sleep(0.3)
@@ -118,8 +137,11 @@ class FullDuplexVoiceTests(unittest.TestCase):
         answer = websocket.receive_json()
         self.assertEqual((answer["type"], answer["answer"]["route"], answer["answer"]["spoken"]), ("answer", "small_talk", True))
         speech = [websocket.receive_json()]
-        while not speech[-1]["final"]:
+        while speech[-1]["type"] != "speech_end":
             speech.append(websocket.receive_json())
+        end = speech.pop()
+        self.assertEqual(end, {"type": "speech_end", "client_message_id": "t1", "count": len(speech)})
+        self.assertTrue(speech[-1]["final"])
         self.assertTrue(all(item["type"] == "speech" and item["client_message_id"] == "t1" for item in speech))
         self.assertEqual([item["seq"] for item in speech], list(range(len(speech))))
         self.assertEqual(base64.b64decode(speech[0]["audio_base64"])[:3], b"ID3")
@@ -135,6 +157,55 @@ class FullDuplexVoiceTests(unittest.TestCase):
         self.assertEqual((filler["type"], filler["filler"], filler["final"]), ("speech", True, False))
         self.assertIn("internet", filler["text"])
         self.assertEqual(websocket.receive_json()["type"], "answer")
+
+    def _until(self, websocket, kind):
+        events = []
+        while not events or events[-1]["type"] != kind:
+            events.append(websocket.receive_json())
+        return events
+
+    def test_a_streamed_reply_is_spoken_before_the_answer_arrives(self) -> None:
+        websocket = self._open()
+        websocket.send_json({"type": "utterance", "client_message_id": "s1", "text": "stream chat"})
+        events = self._until(websocket, "speech_end")
+        kinds = [event["type"] for event in events]
+        self.assertEqual(kinds, ["thinking", "speech", "speech", "answer", "speech_end"])
+        self.assertEqual([event["text"] for event in events if event["type"] == "speech"], ["First, the short answer.", "Then a little more detail."])
+        self.assertEqual([event["seq"] for event in events if event["type"] == "speech"], [0, 1])
+        self.assertEqual(events[-1]["count"], 2, "the streamed sentences are not spoken a second time")
+        self.assertEqual(self.tts.spoken, ["First, the short answer.", "Then a little more detail."])
+
+    def test_talking_over_a_streamed_reply_stops_the_rest(self) -> None:
+        websocket = self._open()
+        websocket.send_json({"type": "utterance", "client_message_id": "s2", "text": "stream chat"})
+        self.assertEqual(websocket.receive_json()["type"], "thinking")
+        self.assertEqual(websocket.receive_json()["text"], "First, the short answer.")
+        websocket.send_json({"type": "interrupt", "client_message_id": "s2"})
+        self.assertEqual(websocket.receive_json(), {"type": "cancelled", "client_message_id": "s2", "reason": "interrupted"})
+        websocket.send_json({"type": "ping"})
+        self.assertEqual(websocket.receive_json()["type"], "pong", "no further sentence of the interrupted reply is sent")
+        self.assertEqual(self.dialogue.cancelled, ["stream chat"])
+
+    def test_a_reply_that_fails_after_speaking_is_retracted(self) -> None:
+        websocket = self._open()
+        websocket.send_json({"type": "utterance", "client_message_id": "r1", "text": "stream then fail"})
+        events = self._until(websocket, "speech_end")
+        kinds = [event["type"] for event in events]
+        self.assertEqual(kinds, ["thinking", "speech", "cancelled", "answer", "speech", "speech_end"])
+        self.assertEqual(events[2], {"type": "cancelled", "client_message_id": "r1", "reason": "retracted"})
+        self.assertEqual(events[4]["text"], "Sorry, I can't help with that one.")
+
+    def test_a_slow_turn_says_one_moment_and_a_quick_one_does_not(self) -> None:
+        self.runtime.settings = dataclasses.replace(self.runtime.settings, voice_filler_after_ms=50)
+        websocket = self._open()
+        websocket.send_json({"type": "utterance", "client_message_id": "f1", "text": "slow reply"})
+        events = self._until(websocket, "speech_end")
+        self.assertEqual([event["type"] for event in events][:3], ["thinking", "speech", "answer"])
+        self.assertTrue(events[1]["filler"])
+        self.assertIn(events[1]["text"], ("One moment.", "Just a moment."))
+        websocket.send_json({"type": "utterance", "client_message_id": "f2", "text": "hello"})
+        quick = self._until(websocket, "speech_end")
+        self.assertFalse(any(event.get("filler") for event in quick))
 
     def test_talking_over_a_reply_cancels_it(self) -> None:
         websocket = self._open()
@@ -177,10 +248,10 @@ class FullDuplexVoiceTests(unittest.TestCase):
 
     def test_a_failing_turn_reports_an_error_and_keeps_the_conversation(self) -> None:
         class _Broken(_FakeDialogue):
-            async def respond(self, turn, *, on_progress=None):
+            async def respond(self, turn, *, on_progress=None, on_speech=None):
                 if turn.text == "boom":
                     raise RuntimeError("database gone")
-                return await super().respond(turn, on_progress=on_progress)
+                return await super().respond(turn, on_progress=on_progress, on_speech=on_speech)
 
         self.runtime.dialogue = _Broken()
         websocket = self._open(features=())

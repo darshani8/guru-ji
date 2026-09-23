@@ -97,6 +97,12 @@ class WebAssetTests(unittest.TestCase):
             self.assertIn(f'<option value="{language}">', page)
         self.assertIn('id="interrupt-button"', page)
 
+    def test_streamed_replies_show_as_they_are_spoken_and_can_be_retracted(self):
+        js = (ASSISTANT / "app.js").read_text(encoding="utf-8")
+        self.assertIn("if (!message.filler) showLiveText(message.client_message_id, message.text);", js)
+        self.assertIn("message.reason === 'retracted'", js)
+        self.assertIn("if (message.type === 'speech_end') return;", js)
+
     def test_web_sources_open_safely(self):
         js = (ASSISTANT / "app.js").read_text(encoding="utf-8")
         self.assertIn("anchor.rel = 'noopener noreferrer';", js)

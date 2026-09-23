@@ -21,6 +21,7 @@ class RealtimeEvent(StrEnum):
     INTERRUPT = "interrupt"
     THINKING = "thinking"
     SPEECH = "speech"
+    SPEECH_END = "speech_end"
     CANCELLED = "cancelled"
 
 

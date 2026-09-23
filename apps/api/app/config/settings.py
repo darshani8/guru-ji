@@ -235,6 +235,15 @@ class AppSettings:
     conversation_enabled: bool = True
     conversation_timeout_seconds: float = 8.0
     conversation_model_id: str = ""
+    # Spoken replies are streamed: the first sentence is spoken while the rest
+    # is still being written. The first text must arrive within
+    # conversation_first_text_seconds and the whole reply within
+    # conversation_stream_seconds (typed chat keeps conversation_timeout_seconds).
+    conversation_first_text_seconds: float = 6.0
+    conversation_stream_seconds: float = 20.0
+    # A short spoken "one moment" when nothing has been said this long after
+    # the person finished speaking; 0 turns it off.
+    voice_filler_after_ms: int = 1800
     # Open-web search by voice or text ("search the internet for ..."), through
     # the GURU_WEB_SEARCH_* Tavily settings, limited per person per day.
     assistant_web_search: bool = True
@@ -393,6 +402,9 @@ class AppSettings:
             conversation_enabled=_bool_env("GURU_CONVERSATION_ENABLED", True),
             conversation_timeout_seconds=float(os.getenv("GURU_CONVERSATION_TIMEOUT_SECONDS", "8")),
             conversation_model_id=os.getenv("GURU_CONVERSATION_MODEL_ID", "").strip(),
+            conversation_first_text_seconds=float(os.getenv("GURU_CONVERSATION_FIRST_TEXT_SECONDS", "6")),
+            conversation_stream_seconds=float(os.getenv("GURU_CONVERSATION_STREAM_SECONDS", "20")),
+            voice_filler_after_ms=int(os.getenv("GURU_VOICE_FILLER_AFTER_MS", "1800")),
             assistant_web_search=_bool_env("GURU_ASSISTANT_WEB_SEARCH", True),
             web_searches_per_person_per_day=int(os.getenv("GURU_WEB_SEARCHES_PER_PERSON_PER_DAY", "25")),
             assistant_web_exclude_domains=tuple(item.strip().lower().rstrip(".") for item in os.getenv("GURU_ASSISTANT_WEB_EXCLUDE_DOMAINS", "").split(",") if item.strip()),
@@ -750,6 +762,10 @@ class AppSettings:
             raise ValueError("GURU_VOICE_TTS_MAX_CHARS_PER_REPLY must be between 100 and 6000")
         if not 0 < self.conversation_timeout_seconds <= 60:
             raise ValueError("GURU_CONVERSATION_TIMEOUT_SECONDS must be greater than 0 and at most 60")
+        if not 0 < self.conversation_first_text_seconds <= self.conversation_stream_seconds <= 120:
+            raise ValueError("GURU_CONVERSATION_FIRST_TEXT_SECONDS must be positive and at most GURU_CONVERSATION_STREAM_SECONDS, which is at most 120")
+        if not 0 <= self.voice_filler_after_ms <= 10_000:
+            raise ValueError("GURU_VOICE_FILLER_AFTER_MS must be between 0 and 10000")
         if self.conversation_model_id and not re.fullmatch(r"[A-Za-z0-9._:/@-]{1,200}", self.conversation_model_id):
             raise ValueError("GURU_CONVERSATION_MODEL_ID must be a model identifier")
         if not 0 <= self.web_searches_per_person_per_day <= 1000:
