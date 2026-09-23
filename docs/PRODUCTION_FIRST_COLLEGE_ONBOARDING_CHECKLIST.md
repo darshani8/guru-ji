@@ -280,6 +280,7 @@ For each gate, attach only redacted evidence and a link or ticket ID.
 - [ ] The institution has approved, in its privacy notice, that the browser vendor (Google for Chrome, Microsoft for Edge, Apple for Safari) turns microphone audio into text, and that only the text reaches Guru Ji.
 - [ ] The institution has approved that open-web search queries (never personal data; the assistant refuses those) are sent to Tavily, and has recorded `GURU_WEB_SEARCHES_PER_PERSON_PER_DAY`.
 - [ ] If spoken replies use Amazon Polly (`GURU_VOICE_TTS_PROVIDER=polly`): the ECS task role has `polly:SynthesizeSpeech` in ap-south-1, and one spoken reply with Kajal was checked in English and in Hindi. Kannada replies are spoken by the device's own voice or shown as text.
+- [ ] `PYTHONPATH=apps/api python scripts/voice_preflight.py`, run in the deployed task, ends with `VOICE_PREFLIGHT_OK` and shows OK (not WARN) for every service the institution expects: Polly voice, conversation model, web search.
 - [ ] The identity provider either sends no explicit `guru_capabilities` claim, or its claim includes `web:search` for the roles that may search the internet.
 - [ ] A staging check on Chrome (desktop and Android) and Safari (iPhone): talk over a reply, say "stop", ask in Hindi, ask for an internet search, and confirm a record change still waits for the on-screen Confirm.
 - [ ] `GURU_VOICE_MAX_ACTIVE_SESSIONS`, `GURU_VOICE_IDLE_TIMEOUT_SECONDS` and the conversation model timeout are sized for the canary's expected concurrent users.
