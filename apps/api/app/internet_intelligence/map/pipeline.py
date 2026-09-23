@@ -106,16 +106,37 @@ def sync_profile(store: MapStore, profile: InstitutionProfile, *, run_id: str | 
     name, kind = (str(existing["name"]), str(existing["kind"])) if existing else (profile.name, "institution")
     entity_id = store.upsert_entity(profile.institution_id, name=name, kind=kind, names=[item for item in names if item != name], locations=[profile.location] if profile.location else [])
     created: list[str] = []
+    configured: set[str] = set()
     for domain in profile.official_domains:
         ref = asset_ref(f"https://{domain}/")
         asset_id, is_new = store.upsert_asset(profile.institution_id, ref, entity_id=entity_id, relation="official", note="configured in the intelligence profile")
-        if not store.has_evidence(profile.institution_id, asset_id, "configured_domain"):
+        configured.add(asset_id)
+        if _configured_now(store, profile.institution_id, asset_id) is not True:
             store.add_evidence(profile.institution_id, asset_id=asset_id, kind="configured_domain", detail=f"profile of {profile.name}", channel="profile", observed_via="reviewer", run_id=run_id)
         if is_new:
             created.append(asset_id)
+    # A domain taken out of the profile is no longer the institution's say-so:
+    # it stops anchoring, being watched and vouching until named again.
+    removed = [
+        domain["asset_id"] for domain in store.iter_assets(profile.institution_id, kind="domain")
+        if domain["asset_id"] not in configured and _configured_now(store, profile.institution_id, domain["asset_id"]) is True
+    ]
+    for asset_id in removed:
+        store.add_evidence(profile.institution_id, asset_id=asset_id, kind="configured_domain", polarity="refutes", detail=f"removed from the profile of {profile.name}", channel="profile", observed_via="reviewer", run_id=run_id)
+    if removed:
+        regrade(store, profile.institution_id, removed)
     # Profile social handles are bare ("@bgscet") and cannot be placed on a
     # platform without guessing; they stay in the profile for entity resolution.
-    return {"entity_id": entity_id, "domains_added": created}
+    return {"entity_id": entity_id, "domains_added": created, "domains_removed": removed}
+
+
+def _configured_now(store: MapStore, institution_id: str, asset_id: str) -> bool | None:
+    """True while the profile names the domain, False once it was taken out, None if it never did."""
+
+    rows = [row for row in store.evidence_for(institution_id, [asset_id])[asset_id] if row["kind"] == "configured_domain"]
+    if not rows:
+        return None
+    return max(rows, key=lambda row: (str(row["observed_at"]), str(row.get("evidence_id", ""))))["polarity"] == "supports"
 
 
 # Evidence that the institution itself (or a person acting for it, or a
@@ -142,7 +163,9 @@ def nominated(store: MapStore, institution_id: str, asset_id: str) -> bool:
 
     rows = store.evidence_for(institution_id, [asset_id])[asset_id]
     named = max((str(row["observed_at"]) for row in rows if row["polarity"] == "supports" and (row["kind"] in _NOMINATING or (row["kind"] == "directory_record" and str(row["detail"]).startswith("authority:")))), default="")
-    return bool(named) and named > _last(rows, REVIEWER_REFUTATIONS, "refutes")
+    # Taken out of the profile (and not named since by the owner, a reviewer or a regulator).
+    unnamed = _last(rows, {"configured_domain"}, "refutes")
+    return bool(named) and named > _last(rows, REVIEWER_REFUTATIONS, "refutes") and named > unnamed
 
 
 def reviewer_refuted(store: MapStore, institution_id: str, asset_id: str) -> bool:

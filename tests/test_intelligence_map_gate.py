@@ -259,3 +259,23 @@ class ManualHarvestTests(Base):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ProfileRemovalTests(Base):
+    def test_a_domain_taken_out_of_the_profile_stops_anchoring_until_named_again(self):
+        from app.internet_intelligence.map.ownership import nominated_by_institution
+        from app.internet_intelligence.map.pipeline import nominated
+
+        domain = self.store.find_asset(INSTITUTION, "web:bgscet.ac.in")
+        self.assertEqual(domain["grade"], "A")
+        moved = InstitutionProfile(INSTITUTION, PROFILE.name, "Bengaluru", aliases=["BGSCET"], official_domains=["bgscet.edu.in"])
+        result = sync_profile(self.store, moved)
+        self.assertEqual(result["domains_removed"], [domain["asset_id"]])
+        self.assertNotEqual(self.grade(domain["asset_id"]), "A", "no longer the institution's say-so")
+        self.assertFalse(nominated(self.store, INSTITUTION, domain["asset_id"]), "no longer watched as the institution's site")
+        self.assertFalse(nominated_by_institution(self.store, INSTITUTION, domain["asset_id"]), "and no longer owner-checked")
+        self.assertEqual(sync_profile(self.store, moved)["domains_removed"], [], "withdrawn once")
+        sync_profile(self.store, PROFILE)
+        regrade(self.store, INSTITUTION, [domain["asset_id"]])
+        self.assertEqual(self.grade(domain["asset_id"]), "A", "named again, it anchors again")
+        self.assertTrue(nominated(self.store, INSTITUTION, domain["asset_id"]))

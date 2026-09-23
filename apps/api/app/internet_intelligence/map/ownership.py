@@ -310,12 +310,16 @@ def claimable(store: Any, institution_id: str, entity_id: str | None, owner_enti
 
 
 def nominated_by_institution(store: Any, institution_id: str, asset_id: str) -> bool:
-    """A domain the institution configured or a reviewer confirmed (an earlier owner proof counts too)."""
+    """A domain the institution configured or a reviewer confirmed (an earlier owner proof counts too).
 
-    return any(
-        row["polarity"] == "supports" and row["kind"] in {"configured_domain", "reviewer_confirm", "owner_claim"}
-        for row in store.evidence_for(institution_id, [asset_id])[asset_id]
-    )
+    The latest word counts: a reviewer's rejection, or the domain being taken
+    out of the profile, ends the nomination until someone names it again.
+    """
+
+    rows = store.evidence_for(institution_id, [asset_id])[asset_id]
+    named = max((str(row["observed_at"]) for row in rows if row["polarity"] == "supports" and row["kind"] in {"configured_domain", "reviewer_confirm", "owner_claim"}), default="")
+    ended = max((str(row["observed_at"]) for row in rows if row["polarity"] == "refutes" and row["kind"] in {"configured_domain", "reviewer_reject", "lookalike", "impersonation"}), default="")
+    return bool(named) and named > ended
 
 
 def owned_domains(store: Any, institution_id: str) -> list[dict[str, Any]]:
