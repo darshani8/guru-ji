@@ -6,6 +6,9 @@ evidence always gives the same grade and any grade can be explained. The rule:
 
 * D  - refuted by a reviewer, marked a look-alike or impersonation, on a
        parked or hijacked domain, or dead on two checks at least a day apart.
+       Only a reviewer's later confirmation lifts a refutation or a takeover:
+       an owner's proof is published on the site itself, so whoever holds a
+       compromised or re-registered domain could publish it.
 * O  - the owner confirmed it (domain-verified accounts file, meta tag, DNS).
 * A  - a live identity link (header, navigation, footer, sameAs, rel=me) on a
        healthy official page, or a configured official domain that is live
@@ -84,8 +87,7 @@ def grade(asset: Mapping[str, Any], evidence: Sequence[Mapping[str, Any]], *, no
     for item in reversed(refutes):
         kind = item.get("kind")
         if kind in {"reviewer_reject", "lookalike", "impersonation"}:
-            later = [s for s in supports if s.get("kind") in {"owner_claim", "reviewer_confirm"} and _when(s.get("observed_at")) > _when(item.get("observed_at"))]
-            if not later:
+            if not _confirmed_after(ordered, _when(item.get("observed_at"))):
                 return GradeResult("D", [f"{kind}: {_detail(item)[:120]}"], status, verified_at, verified_via)
     if takeover:
         return GradeResult("D", [f"domain {takeover}"], status, verified_at, verified_via)
@@ -191,8 +193,15 @@ def _latest_integrity_by_channel(ordered: Sequence[Mapping[str, Any]]) -> dict[s
 
 
 def _confirmed_after(ordered: Sequence[Mapping[str, Any]], moment: datetime) -> bool:
+    """A reviewer confirmed the asset after ``moment``.
+
+    An owner's token never counts here: it is public and lives on the site,
+    so a hijacker or a re-registrant could republish it, and a reviewer's
+    rejection must not be undone by the very account it rejected.
+    """
+
     return any(
-        item.get("polarity") == "supports" and item.get("kind") in {"owner_claim", "reviewer_confirm"} and item.get("observed_via") in {"owner", "reviewer"} and _when(item.get("observed_at")) > moment
+        item.get("polarity") == "supports" and item.get("kind") == "reviewer_confirm" and item.get("observed_via") == "reviewer" and _when(item.get("observed_at")) > moment
         for item in ordered
     )
 
@@ -200,10 +209,11 @@ def _confirmed_after(ordered: Sequence[Mapping[str, Any]], moment: datetime) -> 
 def _takeover(ordered: Sequence[Mapping[str, Any]]) -> str | None:
     """'hijacked' or 'parked' while the domain is out of the institution's hands, else None.
 
-    A hijacker can serve a page that looks clean, so a hijack stands until
-    the owner or a reviewer confirms the domain again. A parked lander is
-    cleared as soon as each channel that saw it sees a healthy page (the
-    registration was renewed), or by the same confirmation.
+    A hijacker can serve a page that looks clean (and republish the old
+    ownership token), so a hijack stands until a reviewer confirms the
+    domain again. A parked lander is cleared as soon as each channel that
+    saw it sees a healthy page (the registration was renewed), or by the
+    same confirmation.
     """
 
     for item in ordered:

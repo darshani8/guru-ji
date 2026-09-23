@@ -286,7 +286,9 @@ class MapService:
         """Keep an account or address out of the map for good (a person's account, an opt-out request).
 
         Only a keyed fingerprint is stored; if the map already holds the
-        account it is removed with its evidence.
+        account it is removed with its evidence, and so is any ground-truth
+        item naming it (a hidden holdout item too, without saying so: the
+        holdout stays a fair test only while nobody can probe it).
         """
 
         self.guard(principal, institution_id, Capability.INTELLIGENCE_MANAGE)
@@ -303,6 +305,8 @@ class MapService:
             self.store.suppress(institution_id, key, reason=reason[:200])
         existing = self.store.find_asset(institution_id, ref.key) if ref else None
         removed = bool(existing) and forget(self.store, institution_id, existing["asset_id"])
+        if ref:
+            self.store.delete_gold(institution_id, ref.key)
         return {"suppressed": True, "removed": removed}
 
     # ----------------------------------------------------------------- summary
@@ -351,24 +355,42 @@ class MapService:
         self.guard(principal, institution_id, Capability.INTELLIGENCE_MANAGE)
         domains = [domain["asset_key"].removeprefix("web:") for domain in owned_domains(self.store, institution_id)]
         confirmed = [{key: asset[key] for key in ("asset_id", "asset_key", "url", "kind", "platform")} for asset in self.store.iter_assets(institution_id, grade="O")]
-        return {**instructions(self.store.suppression_key, institution_id, domains), "confirmed": confirmed}
+        return {**instructions(self.store.suppression_key, institution_id, domains, epoch=self.store.owner_token_epoch(institution_id)), "confirmed": confirmed}
 
-    async def verify_ownership(self, principal: Principal, institution_id: str) -> dict[str, Any]:
-        """Check every official domain for the token now (the engine also does this weekly)."""
+    def rotate_ownership(self, principal: Principal, institution_id: str) -> dict[str, Any]:
+        """Issue new tokens for every domain; the old ones stop proving anything.
+
+        For a token that may be in the wrong hands: it is public by design,
+        and a lapsed or hijacked domain keeps serving it. Only the epoch
+        moves (never the suppression key, which would let suppressed
+        accounts back in); confirmations resting on an old token are
+        withdrawn at the next check unless the new one is published by then.
+        """
+
+        self.guard(principal, institution_id, Capability.INTELLIGENCE_MANAGE)
+        self.store.rotate_owner_token(institution_id, by=principal.principal_id)
+        return self.ownership(principal, institution_id)
+
+    async def verify_ownership(self, principal: Principal, institution_id: str, *, asset_ids: Sequence[str] | None = None) -> dict[str, Any]:
+        """Check the official domains (all, or the given ones) for the token now, at most ten per call; the engine also does this weekly."""
 
         self.guard(principal, institution_id, Capability.INTELLIGENCE_MANAGE)
         if self.fetcher is None:
             raise ValueError("page fetching is disabled (GURU_INTELLIGENCE_FETCH_PAGES=false)")
         connector = self.engine.registry.get("owner_claims") if self.engine else None
         connector = connector or OwnerClaimsConnector(key=self.store.suppression_key)
+        wanted = set(asset_ids or ())
+        domains = [domain for domain in owned_domains(self.store, institution_id) if not wanted or domain["asset_id"] in wanted]
         run_id = self.store.start_map_run(institution_id, kind="ownership")
         context = ConnectorContext(self.store, institution_id, run_id, datetime.now(timezone.utc), fetcher=self.fetcher)
         results = []
-        for domain in owned_domains(self.store, institution_id)[:MAX_HARVEST_DOMAINS]:
+        for domain in domains[:MAX_HARVEST_DOMAINS]:
             outcome = await connector.run({"target": domain["asset_id"]}, context)
-            results.append({"domain": domain["asset_key"].removeprefix("web:"), "outcome": outcome.outcome, "accounts_added": outcome.new_assets})
-        self.store.finish_map_run(institution_id, run_id, status="succeeded", stop_reason="completed", counts={"domains": len(results), "verified": sum(item["outcome"] == "verified" for item in results)})
-        return {"run_id": run_id, "results": results, **self.ownership(principal, institution_id)}
+            results.append({"domain": domain["asset_key"].removeprefix("web:"), "asset_id": domain["asset_id"], "outcome": outcome.outcome, "accounts_added": outcome.new_assets})
+        # Past the limit nothing is checked: say so, and name them for a follow-up call with asset_ids.
+        skipped = [domain["asset_id"] for domain in domains[MAX_HARVEST_DOMAINS:]]
+        self.store.finish_map_run(institution_id, run_id, status="succeeded", stop_reason="domain_limit" if skipped else "completed", counts={"domains": len(results), "verified": sum(item["outcome"] == "verified" for item in results), "skipped": len(skipped)})
+        return {"run_id": run_id, "results": results, "skipped": len(skipped), "skipped_asset_ids": skipped, **self.ownership(principal, institution_id)}
 
     # --------------------------------------------------------------- incidents
     def incidents(self, principal: Principal, institution_id: str, *, status: str | None = None, severity: str | None = None, limit: int = 100) -> list[dict[str, Any]]:

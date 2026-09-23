@@ -588,6 +588,9 @@ class AppSettings:
             raise ValueError("the court_records connector needs GURU_INTELLIGENCE_INDIANKANOON_TOKEN")
         if self.intelligence_map_enabled and self.environment == "production" and len(self.intelligence_suppression_key or "") < 32:
             raise ValueError("GURU_INTELLIGENCE_SUPPRESSION_KEY (32+ characters) is required when the internet map is enabled in production")
+        if self.environment == "production" and (self.intelligence_map_enabled or self.intelligence_search_provider != "disabled") and not self.intelligence_crawler_contact:
+            # Without it every request says "+https://example.invalid/...": a site owner cannot reach whoever runs the crawler.
+            raise ValueError("GURU_INTELLIGENCE_CRAWLER_CONTACT (an https URL or an email address) is required in production when the crawler is on")
         if self.intelligence_crawler_contact:
             from ..internet_intelligence.fetch import crawler_user_agent
 

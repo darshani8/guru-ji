@@ -103,7 +103,9 @@ class AnchorLossTests(Base):
         hijacked = ev("integrity", "hijacked:gambling", NOW - timedelta(days=30))
         self.assertEqual(grade(domain, [configured, hijacked, clean]).grade, "D", "a hijacker can serve a clean page")
         owner = ev("owner_claim", "verified", NOW, polarity="supports", via="owner", channel="owner:x")
-        self.assertEqual(grade(domain, [configured, hijacked, clean, owner]).grade, "O", "the owner's proof ends it")
+        self.assertEqual(grade(domain, [configured, hijacked, clean, owner]).grade, "D", "the token is public: a re-registrant can republish it")
+        reviewer = ev("reviewer_confirm", "recovered", NOW + timedelta(hours=1), polarity="supports", via="reviewer", channel="reviewer:x")
+        self.assertEqual(grade(domain, [configured, hijacked, clean, owner, reviewer]).grade, "O", "a reviewer ends it; the owner's proof then counts again")
         dns_parked = ev("integrity", "parked:name servers", NOW - timedelta(hours=1), channel="dns")
         self.assertEqual(grade(domain, [configured, clean, dns_parked]).grade, "D", "each channel's latest word counts")
 

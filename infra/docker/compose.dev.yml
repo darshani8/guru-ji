@@ -6,6 +6,7 @@ x-internet-map: &internet-map
   GURU_INTELLIGENCE_MAP_ENABLED: "true"
   GURU_INTELLIGENCE_SEARCH_PROVIDER: ${GURU_INTELLIGENCE_SEARCH_PROVIDER:-disabled}
   GURU_WEB_SEARCH_API_KEY: ${GURU_WEB_SEARCH_API_KEY:-}
+  # https URL or email for site owners (required in production; may stay empty in development)
   GURU_INTELLIGENCE_CRAWLER_CONTACT: ${GURU_INTELLIGENCE_CRAWLER_CONTACT:-}
   GURU_INTELLIGENCE_SUPPRESSION_KEY: ${GURU_INTELLIGENCE_SUPPRESSION_KEY:-}
   GURU_INTELLIGENCE_CONNECTORS: ${GURU_INTELLIGENCE_CONNECTORS:-}
@@ -139,6 +140,7 @@ services:
       GURU_JOB_QUEUE: inline
       GURU_INTELLIGENCE_SEARCH_PROVIDER: ${GURU_INTELLIGENCE_SEARCH_PROVIDER:-disabled}
       GURU_WEB_SEARCH_API_KEY: ${GURU_WEB_SEARCH_API_KEY:-}
+      # https URL or email for site owners (required in production; may stay empty in development)
       GURU_INTELLIGENCE_CRAWLER_CONTACT: ${GURU_INTELLIGENCE_CRAWLER_CONTACT:-}
     depends_on:
       postgres:

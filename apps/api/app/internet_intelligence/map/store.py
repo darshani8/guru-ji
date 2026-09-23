@@ -263,6 +263,18 @@ _STATEMENTS: tuple[str, ...] = (
         PRIMARY KEY(institution_id, url_sha256)
     )
     """,
+    # The epoch of each institution's ownership tokens: a manager rotates it
+    # when a token may be in the wrong hands (it is public by design, so a
+    # lapsed or hijacked domain keeps serving it), and every old token stops
+    # proving anything.
+    """
+    CREATE TABLE IF NOT EXISTS intel_owner_tokens (
+        institution_id TEXT PRIMARY KEY,
+        epoch INTEGER NOT NULL DEFAULT 0,
+        rotated_by TEXT NOT NULL DEFAULT '',
+        rotated_at TEXT NOT NULL
+    )
+    """,
     # Global tables: public-web metadata and platform-wide spend, never tenant
     # data, so they stay outside row-level security and a tick can use them
     # for every institution.
@@ -306,7 +318,7 @@ ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     # The asset a lead was found on (a hub, a site), so rejecting or forgetting it takes the lead too.
     ("intel_sources", "parent_asset_id", "TEXT"),
 )
-TENANT_TABLES: tuple[str, ...] = ("intel_entities", "intel_assets", "intel_evidence", "intel_gold_items", "intel_suppression", "intel_map_runs", "intel_sources", "intel_quota", "intel_review_items", "intel_incidents", "intel_fetch_validators")
+TENANT_TABLES: tuple[str, ...] = ("intel_entities", "intel_assets", "intel_evidence", "intel_gold_items", "intel_suppression", "intel_map_runs", "intel_sources", "intel_quota", "intel_review_items", "intel_incidents", "intel_fetch_validators", "intel_owner_tokens")
 GLOBAL_TABLES: tuple[str, ...] = ("intel_budget_ledger", "intel_shared_cache")
 SOURCE_CLASSES = frozenset({"rotation", "recheck", "explore"})
 REVIEW_KINDS = frozenset({"impersonation_candidate", "court_record", "dispute", "canary_leak", "run_gate", "candidate_account"})
@@ -1305,6 +1317,12 @@ class MapStore(MapStoreScheduling, MapStoreReview, MapStoreIncidents):
         with self._tenant(institution_id):
             return self.backend.fetchall(f"SELECT * FROM intel_gold_items WHERE {' AND '.join(clauses)} ORDER BY asset_key", tuple(params))
 
+    def delete_gold(self, institution_id: str, asset_key: str) -> int:
+        """Drop a ground-truth item (a suppressed account must not stay behind in plaintext, hidden or not)."""
+
+        with self._tenant(institution_id):
+            return self.backend.execute("DELETE FROM intel_gold_items WHERE institution_id = ? AND asset_key = ?", (institution_id, asset_key))
+
     def holdout_keys(self, institution_id: str) -> frozenset[str]:
         return frozenset(item["asset_key"] for item in self.list_gold(institution_id, split="holdout"))
 
@@ -1322,6 +1340,24 @@ class MapStore(MapStoreScheduling, MapStoreReview, MapStoreIncidents):
         fingerprint = suppression_fingerprint(self.suppression_key, identifier)
         with self._tenant(institution_id):
             return self.backend.fetchone("SELECT 1 AS present FROM intel_suppression WHERE institution_id = ? AND key_hmac = ?", (institution_id, fingerprint)) is not None
+
+    # ---------------------------------------------------------- owner tokens
+    def owner_token_epoch(self, institution_id: str) -> int:
+        with self._tenant(institution_id):
+            row = self.backend.fetchone("SELECT epoch FROM intel_owner_tokens WHERE institution_id = ?", (institution_id,))
+        return int(row["epoch"]) if row else 0
+
+    def rotate_owner_token(self, institution_id: str, *, by: str) -> int:
+        """Move the institution to its next token epoch; returns the new epoch."""
+
+        with self._tenant(institution_id):
+            self.backend.execute(
+                "INSERT INTO intel_owner_tokens(institution_id, epoch, rotated_by, rotated_at) VALUES (?, 1, ?, ?) "
+                "ON CONFLICT (institution_id) DO UPDATE SET epoch = intel_owner_tokens.epoch + 1, rotated_by = excluded.rotated_by, rotated_at = excluded.rotated_at",
+                (institution_id, by[:200], now_iso()),
+            )
+            row = self.backend.fetchone("SELECT epoch FROM intel_owner_tokens WHERE institution_id = ?", (institution_id,))
+        return int(row["epoch"]) if row else 0
 
     # -------------------------------------------------------------------- runs
     def start_map_run(self, institution_id: str, *, kind: str = "tick") -> str:

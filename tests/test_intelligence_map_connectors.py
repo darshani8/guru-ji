@@ -414,6 +414,7 @@ class WiringTests(unittest.TestCase):
         self.assertEqual(map_connectors(AppSettings()).names(), ["lead_page", "official_site", "owner_claims", "recheck"], "only readers of public pages and the institution's own domains are on")
         on = AppSettings(intelligence_connectors=("wikidata", "rdap", "youtube"), intelligence_youtube_api_key="k")
         self.assertEqual(map_connectors(on).names(), ["lead_page", "official_site", "owner_claims", "rdap", "recheck", "wikidata", "youtube"])
+        self.assertIsNotNone(map_connectors(AppSettings()).get("owner_claims").dns, "the DNS TXT method is offered, so it works without the dns connector")
         for bad, message in (
             (AppSettings(intelligence_connectors=("scraper",)), "unknown connectors"),
             (AppSettings(intelligence_connectors=("youtube",)), "YOUTUBE_API_KEY"),

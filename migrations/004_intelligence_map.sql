@@ -21,6 +21,7 @@ CREATE INDEX IF NOT EXISTS idx_intel_review_items_open ON intel_review_items(ins
 CREATE TABLE IF NOT EXISTS intel_incidents ( incident_id TEXT PRIMARY KEY, institution_id TEXT NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL, fingerprint TEXT NOT NULL, severity TEXT NOT NULL, status TEXT NOT NULL DEFAULT 'open', title TEXT NOT NULL, signals_json TEXT NOT NULL DEFAULT '[]', examples_json TEXT NOT NULL DEFAULT '[]', guidance TEXT NOT NULL DEFAULT '', connector TEXT NOT NULL DEFAULT '', run_id TEXT, first_seen_at TEXT NOT NULL, last_seen_at TEXT NOT NULL, times_seen INTEGER NOT NULL DEFAULT 1, notified_at TEXT, acknowledged_by TEXT, acknowledged_at TEXT, resolved_by TEXT, resolved_at TEXT, note TEXT NOT NULL DEFAULT '', UNIQUE(institution_id, fingerprint) );
 CREATE INDEX IF NOT EXISTS idx_intel_incidents_open ON intel_incidents(institution_id, status, severity);
 CREATE TABLE IF NOT EXISTS intel_fetch_validators ( institution_id TEXT NOT NULL, url_sha256 TEXT NOT NULL, etag TEXT, last_modified TEXT, outcome TEXT NOT NULL, content_sha256 TEXT, fetched_at TEXT NOT NULL, PRIMARY KEY(institution_id, url_sha256) );
+CREATE TABLE IF NOT EXISTS intel_owner_tokens ( institution_id TEXT PRIMARY KEY, epoch INTEGER NOT NULL DEFAULT 0, rotated_by TEXT NOT NULL DEFAULT '', rotated_at TEXT NOT NULL );
 CREATE TABLE IF NOT EXISTS intel_budget_ledger ( day TEXT NOT NULL, connector TEXT NOT NULL, units REAL NOT NULL DEFAULT 0, calls INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(day, connector) );
 CREATE TABLE IF NOT EXISTS intel_shared_cache ( key_sha256 TEXT PRIMARY KEY, kind TEXT NOT NULL, payload TEXT NOT NULL, fetched_at TEXT NOT NULL, expires_at TEXT NOT NULL );
 CREATE INDEX IF NOT EXISTS idx_intel_shared_cache_expiry ON intel_shared_cache(expires_at);
@@ -66,3 +67,6 @@ DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_
 ALTER TABLE intel_fetch_validators ENABLE ROW LEVEL SECURITY;
 ALTER TABLE intel_fetch_validators FORCE ROW LEVEL SECURITY;
 DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'intel_fetch_validators' AND policyname = 'intel_fetch_validators_tenant_isolation') THEN CREATE POLICY intel_fetch_validators_tenant_isolation ON intel_fetch_validators USING (institution_id = current_setting('app.institution_id', true)) WITH CHECK (institution_id = current_setting('app.institution_id', true)); END IF; END $$;
+ALTER TABLE intel_owner_tokens ENABLE ROW LEVEL SECURITY;
+ALTER TABLE intel_owner_tokens FORCE ROW LEVEL SECURITY;
+DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = current_schema() AND tablename = 'intel_owner_tokens' AND policyname = 'intel_owner_tokens_tenant_isolation') THEN CREATE POLICY intel_owner_tokens_tenant_isolation ON intel_owner_tokens USING (institution_id = current_setting('app.institution_id', true)) WITH CHECK (institution_id = current_setting('app.institution_id', true)); END IF; END $$;
