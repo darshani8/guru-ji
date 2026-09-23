@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 from ...domain.principals import Capability, InstitutionScope, Principal
+from ..redaction import names_of, strip_person_names
 from ..fetch import PublicPageFetcher
 from ..profile import InstitutionProfile
 from .engine import MapEngine
@@ -301,7 +302,9 @@ class MapService:
                 whole_host = asset["kind"] == "domain" and asset["platform"] == "website" and not nominated(self.store, institution_id, asset["asset_id"])
                 effect["sources_pruned"] = self.store.prune_sources_for(institution_id, asset_id=asset["asset_id"], url=asset["url"], whole_host=whole_host)
                 if decision == "impersonation":
-                    effect["incident"] = {"kind": "impersonation_confirmed", "target": asset["asset_key"], "signals": [detail], "severity": "high"}
+                    # The note is a reviewer's own words: people's names come out before it travels in an alert.
+                    signal = strip_person_names(detail, keep=names_of(self.store.list_entities(institution_id)))
+                    effect["incident"] = {"kind": "impersonation_confirmed", "target": asset["asset_key"], "signals": [signal], "severity": "high"}
             elif decision == "personal":
                 # A person's account leaves the map: only a keyed fingerprint stays, so it never comes back.
                 self.store.suppress(institution_id, asset["asset_key"], reason="personal account (review decision)")

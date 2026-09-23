@@ -279,3 +279,13 @@ class ProfileRemovalTests(Base):
         regrade(self.store, INSTITUTION, [domain["asset_id"]])
         self.assertEqual(self.grade(domain["asset_id"]), "A", "named again, it anchors again")
         self.assertTrue(nominated(self.store, INSTITUTION, domain["asset_id"]))
+
+
+class ReviewerNoteTests(Base):
+    def test_a_reviewers_note_loses_peoples_names_before_it_travels_in_an_alert(self):
+        account = self.asset("https://www.instagram.com/bgscet.officiall/", relation="unknown")
+        review_id, _ = self.store.add_review_item(INSTITUTION, kind="impersonation_candidate", title="calls itself official", asset_id=account, url="https://www.instagram.com/bgscet.officiall/")
+        effect = self.service.decide(self.manager, INSTITUTION, review_id, decision="impersonation", note="Reported by Ravi Kumar, student of BGS College of Engineering and Technology")
+        [signal] = effect["incident"]["signals"]
+        self.assertNotIn("Ravi Kumar", signal)
+        self.assertIn("BGS College of Engineering and Technology", signal, "the institution's own name stays")

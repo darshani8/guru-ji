@@ -209,7 +209,7 @@ class InternetIntelligenceService:
             # It is scrubbed before the cut, so a name across the 600th character still goes whole.
             excerpt = strip_person_names(text.strip()[:800], keep=profile.all_names())[:600]
             record = {
-                "url": source_url, "requested_url": hit.url, "canonical_url": canonical, "domain": domain_of(source_url), "title": title[:300] or source_url, "excerpt": excerpt, "content_sha256": hashlib.sha256(f"{title}\n{text}".encode("utf-8")).hexdigest(),
+                "url": source_url, "requested_url": hit.url, "canonical_url": canonical, "domain": domain_of(source_url), "title": strip_person_names(title, keep=profile.all_names())[:300] or source_url, "excerpt": excerpt, "content_sha256": hashlib.sha256(f"{title}\n{text}".encode("utf-8")).hexdigest(),
                 "published_at": published.isoformat() if published else None, "date_status": date_status, "retrieved_at": hit.retrieved_at.isoformat(), "match_level": match.level, "match_score": match.score,
                 "match_reasons": list(match.reasons), "relevance_score": relevance, "topics": tags, "status": status, "status_reason": reason, "extracted": extracted, "warnings": list(dict.fromkeys(page_warnings)),
                 "source_type": source_type, "source_label": SOURCE_LABELS.get(source_type, source_type), "queries": list(dict.fromkeys(entry["queries"])), "importance": importance(tags, source_type),
