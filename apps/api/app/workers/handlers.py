@@ -52,7 +52,7 @@ def register_handlers(
             principal = principal_from_snapshot(payload["principal"])
             scope_payload = payload.get("scope") or {}
             scope = InstitutionScope(str(scope_payload.get("college_id")), scope_payload.get("department_id"), scope_payload.get("batch_id"))
-            command = AgentCommand(str(payload["request_id"]), principal, scope, str(payload["text"]), str(payload.get("channel", "text")), payload.get("conversation_id"), payload.get("approval_id"), run_in_background=False)
+            command = AgentCommand(str(payload["request_id"]), principal, scope, str(payload["text"]), str(payload.get("channel", "text")), payload.get("conversation_id"), payload.get("approval_id"), run_in_background=False, in_background=True)
             response = await agent.handle(command)
             if notifications is not None:
                 body = response.answer[:3500]

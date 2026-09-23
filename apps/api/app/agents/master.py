@@ -21,6 +21,7 @@ from ..gateway.registry import PlatformToolRegistry
 from ..gateway.spec import ToolCallContext
 from ..institution_data.store import InstitutionDataStore
 from ..observability.tracing import TraceRecorder
+from ..open_task.routing import OPEN_TASK_INTENT, route_to_open_task
 from ..orchestration.answer_synthesizer import AssistantAnswer, apply_model_wording
 from ..persistence.database import InMemoryControlStore, PostgresControlStore, SqliteControlStore
 from ..policy.query_limits import QueryLimits
@@ -49,6 +50,7 @@ class MasterAgent:
     limits: QueryLimits = field(default_factory=QueryLimits)
     specialists: dict[str, SpecializedAgent] = field(default_factory=dict)
     background: Any | None = None  # JobQueue; set by the runtime when background execution is enabled
+    open_task: Any | None = None  # OpenTaskAgent, when GURU_OPEN_TASK_ENABLED
 
     def __post_init__(self) -> None:
         if not self.specialists:
@@ -185,16 +187,16 @@ class MasterAgent:
             return self._refuse(command, "the requested institution is outside your authorised scope", started)
         self.tracer.record("agent.command", trace_id=command.request_id, attributes={"request_id": command.request_id, "principal_id": principal.principal_id, "scope_college_id": command.scope.college_id})
         plan = await self.plan(command)
+        if self.open_task is not None:
+            route = route_to_open_task(command.text, plan)
+            if route is not None:
+                return await self._open_task(command, route, started)
         if plan.clarification:
             response = AgentResponse(command.request_id, "needs_input", plan.clarification, intent=plan.intent, plan=plan.as_dict(), clarification=plan.clarification, duration_ms=int((monotonic() - started) * 1000), conversation_id=command.conversation_id)
             self._record(command, plan, response, started)
             return response
-        if command.run_in_background and self.background is not None:
-            job_id = self.background.enqueue(command.scope.college_id, "agent.command", {
-                "request_id": command.request_id, "text": command.text, "channel": command.channel, "conversation_id": command.conversation_id,
-                "principal": {"principal_id": principal.principal_id, "principal_type": principal.principal_type.value, "capabilities": sorted(item.value for item in principal.capabilities), "scopes": [scope.as_dict() for scope in principal.scopes], "consent_verified": principal.consent_verified},
-                "scope": command.scope.as_dict(), "approval_id": command.approval_id,
-            })
+        if command.run_in_background and not command.in_background and self.background is not None:
+            job_id = self._enqueue(command)
             response = AgentResponse(command.request_id, "accepted", "Understood. I am working on it in the background and will notify you when it is done.", intent=plan.intent, plan=plan.as_dict(), job_id=job_id, duration_ms=int((monotonic() - started) * 1000), conversation_id=command.conversation_id)
             self._record(command, plan, response, started)
             return response
@@ -223,6 +225,40 @@ class MasterAgent:
             duration_ms=int((monotonic() - started) * 1000), conversation_id=command.conversation_id,
             refusal_reason=(results[0].denial_reason if status == "refused" and results else None),
         )
+        self._record(command, plan, response, started)
+        return response
+
+    def _enqueue(self, command: AgentCommand) -> str:
+        principal = command.principal
+        return self.background.enqueue(command.scope.college_id, "agent.command", {  # type: ignore[union-attr]
+            "request_id": command.request_id, "text": command.text, "channel": command.channel, "conversation_id": command.conversation_id,
+            "principal": {"principal_id": principal.principal_id, "principal_type": principal.principal_type.value, "capabilities": sorted(item.value for item in principal.capabilities), "scopes": [scope.as_dict() for scope in principal.scopes], "consent_verified": principal.consent_verified},
+            "scope": command.scope.as_dict(), "approval_id": command.approval_id,
+        })
+
+    async def _open_task(self, command: AgentCommand, route: str, started: float) -> AgentResponse:
+        """Hand the command to the open-task agent: at once, or as a background job when a real queue runs them."""
+
+        plan = AgentPlan(OPEN_TASK_INTENT, summary=f"open task ({route})", planner="open_task")
+        refusal = self.open_task.refusal(command.principal)  # type: ignore[union-attr]
+        unavailable = None if refusal else self.open_task.unavailable()  # type: ignore[union-attr]
+        if refusal or unavailable:
+            response = AgentResponse(
+                command.request_id, "refused" if refusal else "failed", f"I cannot do this task: {refusal or unavailable}.", intent=OPEN_TASK_INTENT, plan=plan.as_dict(),
+                refusal_reason=refusal, duration_ms=int((monotonic() - started) * 1000), conversation_id=command.conversation_id,
+            )
+            self._record(command, plan, response, started)
+            return response
+        queue_runs_later = self.background is not None and getattr(self.background, "backend_name", "inline") != "inline"
+        if not command.in_background and self.background is not None and (command.run_in_background or (self.open_task.background and queue_runs_later)):  # type: ignore[union-attr]
+            job_id = self._enqueue(command)
+            response = AgentResponse(
+                command.request_id, "accepted", "Understood. This needs the open-task agent, which is working on it in the background. You will get a notification with the files when it is done.",
+                intent=OPEN_TASK_INTENT, plan=plan.as_dict(), job_id=job_id, duration_ms=int((monotonic() - started) * 1000), conversation_id=command.conversation_id,
+            )
+            self._record(command, plan, response, started)
+            return response
+        response = await self.open_task.run(command)  # type: ignore[union-attr]
         self._record(command, plan, response, started)
         return response
 

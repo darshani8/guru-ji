@@ -32,6 +32,25 @@ The client assistant (`apps/web/assistant/`, served at `/`) and the developer pl
 - `PUT /v1/intelligence/profile`, `POST /v1/intelligence/investigate`, mentions, digest, monitoring runs.
 - `GET /v1/reports/{id}/download`, notifications, email outbox, institutions.
 
+## Open-task agent
+
+When a command asks for something the registered tools cannot make, the master agent hands it to the open-task agent (off by default; `GURU_OPEN_TASK_ENABLED=true`). It covers presentations, Word documents, charts, workbooks with formulas or several sheets, and custom analyses, comparisons, timetables or drafts built from the records. The agent runs on Claude Opus 5.5 (`GURU_OPEN_TASK_MODEL_ID`) through the Claude API or Amazon Bedrock:
+
+    User request -> master agent (planner)
+       |- a registered tool fits    -> runs as before (fast, cheap)
+       '- the tools cannot do it    -> open-task agent
+             |- reads records through the tool gateway, as the person who asked
+             |- writes and runs Python in a sandbox (openpyxl, python-pptx, python-docx, matplotlib)
+             '- files in outputs/ become downloadable reports + a short summary
+
+- **Same rules as the tools.** It only gets the read-only tools the person's role holds. Every call goes through the gateway: capabilities, scope, consent, field minimisation and audit. It cannot send email, notify anyone or change a record; the person can ask the assistant to send the file afterwards. Its files need `reports:generate`, and anyone other than the creator needs every data permission the creator held to download them.
+- **Figures come from code.** Each tool result is saved into the task's workspace as JSON (and CSV for tables). Claude sees a summary and a short preview and computes figures with code from the files. The workspace is deleted when the task ends.
+- **Sandbox.** `GURU_OPEN_TASK_SANDBOX=isolated` (the default, and the only mode production accepts) runs the code in its own user, network, PID and mount namespaces through `unshare`. It has no network, no view of the API process, and empty mounts over the service's files. It also gets a scrubbed environment, CPU, memory and file-size limits, and a timeout. The host must allow unprivileged user namespaces. `guarded` is for development machines that do not.
+- **Limits.** Turns, a deadline and a daily allowance per person (`GURU_OPEN_TASK_*` in `.env.example`). With a thread or SQS queue, tasks run as background jobs and the person is notified with the download links.
+- With `GURU_AGENT_PLANNER=model`, the planner can also hand work over itself. Otherwise the rules in `apps/api/app/open_task/routing.py` decide: a format the tools cannot make, or unmapped work with a deliverable. Greetings and general questions still go to free conversation.
+
+Install the libraries with `uv sync --extra open-task`; the API image includes them.
+
 ## Voice conversation
 
 The assistant page holds a two-way spoken conversation. The microphone stays on while Guru Ji speaks, so the person can talk over a reply: it stops at once and the new question is answered. Saying "stop", "ruko", "bas" or "ನಿಲ್ಲಿಸು" only silences it. Phrases said with a short pause become one request, and the echo of Guru Ji's own voice is ignored. On iPhone and iPad, where the microphone and speaker cannot both run, it listens between replies and shows a Stop button.

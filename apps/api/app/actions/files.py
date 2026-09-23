@@ -238,6 +238,16 @@ FORMAT_CONTENT_TYPES = {
     "csv": "text/csv",
     "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "pdf": "application/pdf",
+    # Files the open-task agent builds. HTML, SVG and scripts are never stored:
+    # a download must not run in the reader's browser.
+    "pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "txt": "text/plain",
+    "md": "text/markdown",
+    "json": "application/json",
 }
 
 

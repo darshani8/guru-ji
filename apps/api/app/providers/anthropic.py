@@ -23,6 +23,8 @@ from .model_base import ModelEvent, ProviderCapabilities
 logger = logging.getLogger(__name__)
 
 DEFAULT_MODEL_ID = "claude-opus-5"
+# The open-task agent does long, multi-step work; it defaults to Claude Opus 5.5.
+OPEN_TASK_MODEL_ID = "claude-opus-5-5"
 EFFORT_LEVELS = ("low", "medium", "high", "xhigh", "max")
 PLATFORMS = ("anthropic", "bedrock")
 # Claude Opus 5 thinks by default and max_tokens caps thinking plus answer, so
@@ -241,6 +243,45 @@ class AnthropicProvider:
     def stream(self, prompt: str, *, max_tokens: int = 800) -> AsyncIterator[ModelEvent]:
         return self._stream(prompt, max_tokens=max_tokens)
 
+    async def tool_turn(self, *, system: str, tools: list[dict[str, Any]], messages: list[dict[str, Any]], max_tokens: int) -> Any:
+        """One turn of a tool-using conversation; the caller owns the loop and reads ``stop_reason``.
+
+        The reply is streamed (long agentic turns would otherwise hit HTTP
+        timeouts) and returned whole. ``system`` and ``tools`` must stay the
+        same for every turn of one conversation, and ``messages`` only grows:
+        thinking blocks are bound to the exact history that produced them.
+        A refusal is returned like any other stop reason, not raised.
+        """
+
+        if max_tokens <= 0:
+            raise ValueError("max_tokens must be positive")
+        request: dict[str, Any] = {
+            "model": self.model_id,
+            "max_tokens": max(max_tokens, MIN_MAX_TOKENS),
+            "system": system,
+            "tools": tools,
+            "messages": messages,
+            # The history is resent every turn; caching it keeps a long task affordable.
+            "cache_control": {"type": "ephemeral"},
+        }
+        if self._takes_effort:
+            request["output_config"] = {"effort": self.effort}
+        if self.platform == "anthropic" and self._falls_back:
+            request["betas"] = [FALLBACK_BETA]
+            request["fallbacks"] = "default"
+        api = self._messages()
+        try:
+            async with asyncio.timeout(self.timeout_seconds):
+                with self._fallback_scope():
+                    async with api.stream(**request) as stream:
+                        return await stream.get_final_message()
+        except TimeoutError as exc:
+            raise self._unavailable(f"no reply within {self.timeout_seconds:g}s") from exc
+        except GuruJiError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - classified by _describe_failure
+            raise self._unavailable(_describe_failure(exc)) from exc
+
 
 __all__ = [
     "BEDROCK_FALLBACK_MODEL",
@@ -249,6 +290,7 @@ __all__ = [
     "FALLBACK_BETA",
     "LATENCY_SENSITIVE_SYSTEM",
     "MIN_MAX_TOKENS",
+    "OPEN_TASK_MODEL_ID",
     "PLATFORMS",
     "AnthropicProvider",
 ]

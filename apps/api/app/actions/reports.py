@@ -13,7 +13,7 @@ from ..data_access.field_policy import SENSITIVE_STUDENT_KEYS, strip_student_con
 from ..domain.principals import Capability, InstitutionScope, Principal
 from ..institution_data.store import InstitutionDataStore
 from ..storage.object_store import ObjectStore, build_object_key
-from .files import MAX_REPORT_ROWS, render_report
+from .files import FORMAT_CONTENT_TYPES, MAX_REPORT_ROWS, render_report
 
 
 # Report bytes are whatever rows the generating principal supplied, and the
@@ -89,6 +89,39 @@ class ReportService:
         return {
             "report_id": report_id, "title": record.get("title"), "format": fmt, "file_name": file_name, "row_count": len(rows),
             "size_bytes": len(content), "content_type": content_type, "download_path": f"/v1/reports/{report_id}/download",
+            "created_at": record.get("created_at"),
+        }
+
+    def store_file(self, principal: Principal, institution_id: str, *, title: str, file_name: str, content: bytes, tool_name: str, row_count: int = 0) -> dict[str, Any]:
+        """Keep a file built outside the renderers (the open-task agent's outputs) as a downloadable report.
+
+        Nothing about the file's contents can be checked, so a reader other
+        than the creator needs every data capability the creator held, the
+        same rule the rendered reports follow.
+        """
+
+        if not principal.active or not principal.can_access(InstitutionScope(institution_id)):
+            raise PermissionError("report scope is outside the caller's institution")
+        if not principal.has_capability(Capability.REPORTS_GENERATE):
+            raise PermissionError("reports:generate capability is required")
+        if not title.strip():
+            raise ValueError("report title must not be blank")
+        if not content:
+            raise ValueError("report file must not be empty")
+        fmt = file_name.rsplit(".", 1)[-1].lower() if "." in file_name else ""
+        if fmt not in FORMAT_CONTENT_TYPES:
+            raise ValueError(f"files of type .{fmt or '?'} cannot be stored as reports")
+        report_id = f"rpt-{uuid4().hex}"
+        key = build_object_key(institution_id, "reports", report_id, file_name)
+        self.objects.put(key, content, FORMAT_CONTENT_TYPES[fmt])
+        record = self.store.add_report(
+            institution_id, report_id=report_id, title=title.strip()[:200], format_name=fmt, object_key=key, size_bytes=len(content),
+            sha256=hashlib.sha256(content).hexdigest(), row_count=row_count, tool_name=tool_name, created_by=principal.principal_id,
+            required_capabilities=self.required_capabilities_for_creator(principal, ()),
+        )
+        return {
+            "report_id": report_id, "title": record.get("title"), "format": fmt, "file_name": key.rsplit("/", 1)[-1], "row_count": row_count,
+            "size_bytes": len(content), "content_type": FORMAT_CONTENT_TYPES[fmt], "download_path": f"/v1/reports/{report_id}/download",
             "created_at": record.get("created_at"),
         }
 

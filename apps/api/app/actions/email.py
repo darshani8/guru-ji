@@ -19,6 +19,7 @@ from uuid import uuid4
 from ..domain.principals import Capability, InstitutionScope, Principal
 from ..institution_data.store import InstitutionDataStore
 from ..storage.object_store import ObjectStore
+from .files import FORMAT_CONTENT_TYPES
 from .reports import ReportService
 
 _EMAIL = re.compile(r"^[^@\s]+@([^@\s]+\.[A-Za-z]{2,})$")
@@ -201,7 +202,7 @@ class EmailService:
             if len(content) > MAX_ATTACHMENT_BYTES:
                 raise ValueError("report attachment exceeds the email size limit")
             file_name = record["object_key"].rsplit("/", 1)[-1]
-            attachments.append(EmailAttachment(file_name, {"csv": "text/csv", "xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "pdf": "application/pdf"}.get(record["format"], "application/octet-stream"), content))
+            attachments.append(EmailAttachment(file_name, FORMAT_CONTENT_TYPES.get(record["format"], "application/octet-stream"), content))
             attachment_meta.append({"report_id": report_id, "file_name": file_name, "size_bytes": len(content)})
         footer = "\n\n--\nSent by the institutional assistant on behalf of " + principal.principal_id
         message = OutgoingEmail(to=tuple(item["email"] for item in resolved), subject=subject.strip()[:200], body=body.strip() + footer, attachments=tuple(attachments))

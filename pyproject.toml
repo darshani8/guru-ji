@@ -56,6 +56,14 @@ ingest = [
 aws = [
     "boto3>=1.35,<2.0",
 ]
+# Libraries the open-task agent's code sandbox offers the model for building
+# files (GURU_OPEN_TASK_ENABLED): Excel, PowerPoint, Word and charts.
+open-task = [
+    "matplotlib>=3.9,<4.0",
+    "openpyxl>=3.1,<4.0",
+    "python-docx>=1.1,<2.0",
+    "python-pptx>=1.0,<2.0",
+]
 
 [tool.uv]
 # The repository is an application monorepo, not an installable library yet.

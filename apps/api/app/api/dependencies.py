@@ -203,6 +203,17 @@ def _build_planner_model(settings: AppSettings, model):
     return model
 
 
+def _build_open_task_model(settings: AppSettings) -> AnthropicProvider | None:
+    """Claude for the open-task agent: its own model, effort and a per-turn timeout sized for long work."""
+
+    if not settings.open_task_enabled or settings.model_provider not in _CLAUDE_PROVIDERS:
+        return None
+    return AnthropicProvider(
+        model_id=settings.open_task_model_id, api_key=settings.anthropic_api_key, effort=settings.open_task_effort,
+        timeout_seconds=settings.open_task_turn_timeout_seconds, platform=settings.model_provider, aws_region=settings.bedrock_region,
+    )
+
+
 def _build_pdp(settings: AppSettings) -> PolicyDecisionPoint:
     if settings.pdp_mode == "cerbos":
         return CerbosPolicyDecisionPoint(
@@ -311,7 +322,7 @@ def build_runtime(settings: AppSettings | None = None, *, start_workers: bool = 
         pdp=pdp,
         tracer=tracer,
     )
-    platform = build_platform(settings, control_store=store, pdp=pdp, tracer=tracer, model=model, planner_model=_build_planner_model(settings, model), start_workers=start_workers) if settings.platform_enabled else None
+    platform = build_platform(settings, control_store=store, pdp=pdp, tracer=tracer, model=model, planner_model=_build_planner_model(settings, model), start_workers=start_workers, open_task_model=_build_open_task_model(settings)) if settings.platform_enabled else None
     if platform is not None:
         # The intelligence stores open with the platform, so their retention runs here rather than beside the audit pruning above.
         try:
