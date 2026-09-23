@@ -40,6 +40,8 @@ class Lead:
     topic: str = ""
     origin: str = "lead"
     interval_seconds: int = 7 * 86400
+    # The asset the lead was found on; rejecting or forgetting it takes the lead too.
+    parent_asset_id: str | None = None
 
 
 @dataclass(slots=True)

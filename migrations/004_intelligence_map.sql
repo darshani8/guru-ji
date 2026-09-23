@@ -26,6 +26,7 @@ ALTER TABLE intel_assets ADD COLUMN IF NOT EXISTS last_activity_at TEXT;
 ALTER TABLE intel_assets ADD COLUMN IF NOT EXISTS registration_expires_at TEXT;
 ALTER TABLE intel_sources ADD COLUMN IF NOT EXISTS priority REAL NOT NULL DEFAULT 0;
 ALTER TABLE intel_sources ADD COLUMN IF NOT EXISTS base_interval_seconds INTEGER;
+ALTER TABLE intel_sources ADD COLUMN IF NOT EXISTS parent_asset_id TEXT;
 -- PostgreSQL row-level security (skipped on SQLite)
 ALTER TABLE intel_entities ENABLE ROW LEVEL SECURITY;
 ALTER TABLE intel_entities FORCE ROW LEVEL SECURITY;

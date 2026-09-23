@@ -21,7 +21,7 @@ from .learning import coverage_estimate, gap_grid
 from .ownership import OwnerClaimsConnector, instructions, owned_domains
 from .harvest import OfficialSiteHarvester
 from .metrics import map_metrics, record_baseline
-from .pipeline import nominated, regrade, sync_profile
+from .pipeline import forget, nominated, refute_source, regrade, sync_profile
 from .seed import DEFAULT_SWEEP, Lookalike, SeedRow, SeedSummary, import_seed, parse_lookalikes, parse_sweep
 from .store import MapStore
 
@@ -192,7 +192,14 @@ class MapService:
         return {"items": self.store.list_review_items(institution_id, status=status, kind=kind, limit=limit, offset=offset), "open": self.store.review_counts(institution_id)}
 
     def decide(self, principal: Principal, institution_id: str, review_id: str, *, decision: str, note: str = "", relation: str | None = None) -> dict[str, Any]:
-        """Apply a person's decision. Every effect on a grade goes through evidence, so it can be explained later."""
+        """Apply a person's decision. Every effect on a grade goes through evidence, so it can be explained later.
+
+        The item is claimed first (a conditional close of an open item) in
+        the same transaction as every effect: of two people deciding at once
+        only the one whose claim wins changes anything, an item that expired
+        meanwhile changes nothing, and a failure part-way leaves the item open
+        with nothing applied. Alerts go out only once that has committed.
+        """
 
         self.guard(principal, institution_id, Capability.INTELLIGENCE_MANAGE)
         item = self.store.get_review_item(institution_id, review_id)
@@ -209,34 +216,38 @@ class MapService:
         effect: dict[str, Any] = {"decision": decision}
         reviewer = f"reviewer:{principal.principal_id}"
         detail = (note or decision).strip()[:300]
-        if decision == "confirm":
-            self.store.add_evidence(institution_id, asset_id=asset["asset_id"], kind="reviewer_confirm", detail=detail, channel=reviewer, observed_via="reviewer")
-            if relation:
-                self.store.set_relation(institution_id, asset["asset_id"], relation)
-        elif decision in {"reject", "lookalike", "impersonation"}:
-            kind = {"reject": "reviewer_reject", "lookalike": "lookalike", "impersonation": "impersonation"}[decision]
-            self.store.add_evidence(institution_id, asset_id=asset["asset_id"], kind=kind, polarity="refutes", detail=detail, channel=reviewer, observed_via="reviewer")
-            # A rejected website takes its host's leads with it, unless it is one of ours.
-            whole_host = asset["kind"] == "domain" and asset["platform"] == "website" and not nominated(self.store, institution_id, asset["asset_id"])
-            effect["sources_pruned"] = self.store.prune_sources_for(institution_id, asset_id=asset["asset_id"], url=asset["url"], whole_host=whole_host)
-            if decision == "impersonation":
-                effect["incident"] = {"kind": "impersonation_confirmed", "target": asset["asset_key"], "signals": [detail], "severity": "high"}
-                if self.desk is not None:
-                    self.desk.record(institution_id, [effect["incident"]])
-        elif decision == "personal":
-            # A person's account leaves the map: only a keyed fingerprint stays, so it never comes back.
-            self.store.suppress(institution_id, asset["asset_key"], reason="personal account (review decision)")
-            self.store.suppress(institution_id, asset["url"], reason="personal account (review decision)")
-            self.store.forget_asset(institution_id, asset["asset_id"], keep_review_id=review_id)
-            asset = None
-        elif decision == "publish":
-            effect["published"] = self.store.apply_proposed(institution_id)
-        elif decision == "discard":
-            effect["discarded"] = self.store.discard_proposed(institution_id)
-        if asset is not None and decision in ASSET_DECISIONS:
-            effect["changes"] = regrade(self.store, institution_id, [asset["asset_id"]])
-        if not self.store.decide_review_item(institution_id, review_id, decision=decision, decided_by=principal.principal_id, note=note, redact=decision == "personal"):
-            raise ValueError("this item was decided by someone else just now")
+        with self.store.batch(institution_id):
+            # Claim first; a personal account's item is redacted by the same close.
+            if not self.store.decide_review_item(institution_id, review_id, decision=decision, decided_by=principal.principal_id, note=note, redact=decision == "personal"):
+                raise ValueError("this item was decided by someone else, or expired, just now")
+            if decision == "confirm":
+                self.store.add_evidence(institution_id, asset_id=asset["asset_id"], kind="reviewer_confirm", detail=detail, channel=reviewer, observed_via="reviewer")
+                if relation:
+                    self.store.set_relation(institution_id, asset["asset_id"], relation)
+            elif decision in {"reject", "lookalike", "impersonation"}:
+                kind = {"reject": "reviewer_reject", "lookalike": "lookalike", "impersonation": "impersonation"}[decision]
+                self.store.add_evidence(institution_id, asset_id=asset["asset_id"], kind=kind, polarity="refutes", detail=detail, channel=reviewer, observed_via="reviewer")
+                # What it linked (a footer, a hub listing) keeps nothing it lent.
+                effect["links_refuted"] = len(refute_source(self.store, institution_id, asset["asset_id"], reason=f"{kind}: {detail}", channel=reviewer))
+                # A rejected website takes its host's leads with it, unless it is one of ours.
+                whole_host = asset["kind"] == "domain" and asset["platform"] == "website" and not nominated(self.store, institution_id, asset["asset_id"])
+                effect["sources_pruned"] = self.store.prune_sources_for(institution_id, asset_id=asset["asset_id"], url=asset["url"], whole_host=whole_host)
+                if decision == "impersonation":
+                    effect["incident"] = {"kind": "impersonation_confirmed", "target": asset["asset_key"], "signals": [detail], "severity": "high"}
+            elif decision == "personal":
+                # A person's account leaves the map: only a keyed fingerprint stays, so it never comes back.
+                self.store.suppress(institution_id, asset["asset_key"], reason="personal account (review decision)")
+                self.store.suppress(institution_id, asset["url"], reason="personal account (review decision)")
+                forget(self.store, institution_id, asset["asset_id"], keep_review_id=review_id)
+                asset = None
+            elif decision == "publish":
+                effect["published"] = self.store.apply_proposed(institution_id)
+            elif decision == "discard":
+                effect["discarded"] = self.store.discard_proposed(institution_id)
+            if asset is not None and decision in ASSET_DECISIONS:
+                effect["changes"] = regrade(self.store, institution_id, [asset["asset_id"]])
+        if "incident" in effect and self.desk is not None:
+            self.desk.record(institution_id, [effect["incident"]])
         return {"review_id": review_id, "kind": item["kind"], **effect}
 
     def suppress(self, principal: Principal, institution_id: str, *, identifier: str, reason: str) -> dict[str, Any]:
@@ -259,7 +270,7 @@ class MapService:
         for key in dict.fromkeys(keys):
             self.store.suppress(institution_id, key, reason=reason[:200])
         existing = self.store.find_asset(institution_id, ref.key) if ref else None
-        removed = bool(existing) and self.store.forget_asset(institution_id, existing["asset_id"])
+        removed = bool(existing) and forget(self.store, institution_id, existing["asset_id"])
         return {"suppressed": True, "removed": removed}
 
     # ----------------------------------------------------------------- summary

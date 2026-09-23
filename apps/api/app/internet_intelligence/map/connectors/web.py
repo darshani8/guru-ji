@@ -12,7 +12,7 @@ from ...profile import InstitutionProfile
 from ..assets import DOMAIN, asset_ref
 from ..harvest import OfficialSiteHarvester
 from ..integrity import CLEAN, assess
-from ..pipeline import regrade
+from ..pipeline import regrade, reviewer_refuted
 from ..structure import IDENTITY_POSITIONS, parse_structure
 from .base import ConnectorContext, ConnectorResult, Lead
 
@@ -51,14 +51,14 @@ class OfficialSiteConnector:
         result.cost = float(harvest.requests)
         hops = int(source.get("hops") or 0) + 1
         if hops <= context.max_hops:
-            result.leads.extend(Lead("lead_page", url, entity_id=domain["entity_id"], hops=hops) for url in harvest.leads[:25])
+            result.leads.extend(Lead("lead_page", url, entity_id=domain["entity_id"], hops=hops, parent_asset_id=domain["asset_id"]) for url in harvest.leads[:25])
         host = domain["asset_key"].removeprefix("web:")
         for url in harvest.feeds[:5]:
             feed_host = (urlparse(url).hostname or "").lower().removeprefix("www.")
             # The site's own feed dates the site; a feed elsewhere (a YouTube
             # channel it declares) belongs to nothing until that account is mapped.
             own = feed_host == host or feed_host.endswith("." + host)
-            result.leads.append(Lead("feed", url, entity_id=domain["entity_id"], asset_id=domain["asset_id"] if own else None, hops=hops, work_class="rotation", origin="recurring", interval_seconds=86400))
+            result.leads.append(Lead("feed", url, entity_id=domain["entity_id"], asset_id=domain["asset_id"] if own else None, hops=hops, work_class="rotation", origin="recurring", interval_seconds=86400, parent_asset_id=domain["asset_id"]))
         return result
 
 
@@ -107,6 +107,10 @@ class LeadPageConnector:
             host_ref = asset_ref(f"{urlparse(target).scheme or 'https'}://{urlparse(target).hostname}/")
         except ValueError:
             return ConnectorResult(outcome="invalid", prune=True)
+        known = context.store.find_asset(context.institution_id, host_ref.key)
+        if known is not None and (known["grade"] == "D" or reviewer_refuted(context.store, context.institution_id, known["asset_id"])):
+            # A site a reviewer rejected (or refuted otherwise) vouches for nothing, whichever spelling of it a lead names.
+            return ConnectorResult(outcome="refuted", prune=True)
         retrieval = await context.fetcher.retrieve(host_ref.url)
         if not retrieval.ok:
             return ConnectorResult(outcome=retrieval.outcome, failed=retrieval.outcome in _FAILURES, prune=retrieval.outcome in {"not_found", "gone", "robots", "not_public"})

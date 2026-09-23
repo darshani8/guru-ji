@@ -70,6 +70,9 @@ def grade(asset: Mapping[str, Any], evidence: Sequence[Mapping[str, Any]], *, no
     ordered = sorted(evidence, key=lambda item: (_when(item.get("observed_at")), str(item.get("evidence_id", ""))))
     supports = [item for item in ordered if item.get("polarity") == "supports"]
     refutes = [item for item in ordered if item.get("polarity") == "refutes"]
+    # A source a reviewer rejected (a look-alike site, an impostor's hub) lends nothing, before or since: not even A-arch.
+    refuted_sources = {str(item["source_asset_id"]) for item in refutes if item.get("kind") == "source_refuted" and item.get("source_asset_id")}
+    supports = [item for item in supports if not (item.get("kind") in {"official_link", "hub_link", "subdomain", "backlink"} and str(item.get("source_asset_id")) in refuted_sources)]
     status = _status(ordered, current)
     takeover = _takeover(ordered)
     live = [item for item in supports if item.get("observed_via") in {"live", "owner", "reviewer"}]
