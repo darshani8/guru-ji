@@ -36,7 +36,7 @@ from ..conversation.contracts import HistoryTurn, Turn
 from ..conversation.language import DetectedLanguage, detect_language
 from ..conversation.phrases import phrase
 from ..domain.principals import Principal
-from .protocol import CloseMessage, InterruptMessage, PingMessage, UtteranceMessage, VOICE_MESSAGE_ADAPTER
+from .protocol import ClientLogMessage, CloseMessage, InterruptMessage, PingMessage, UtteranceMessage, VOICE_MESSAGE_ADAPTER
 from .realtime_events import RealtimeEvent
 from .session_manager import VoiceSession
 from .speech_text import speech_chunks
@@ -47,6 +47,8 @@ MAX_EVENT_BYTES = 32_000
 # At most this many turns in flight on one socket (one being answered, one
 # protected agent action finishing, one new): more is a client bug or abuse.
 MAX_TURNS_IN_FLIGHT = 3
+# The browser reports what its speech recognition did; one log line per connection at most this often.
+CLIENT_LOG_INTERVAL_SECONDS = 4.0
 
 
 @dataclass(slots=True)
@@ -91,6 +93,7 @@ class VoiceConnection:
     _send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     _turns: dict[str, _TurnState] = field(default_factory=dict)
     _utterance_times: deque[float] = field(default_factory=deque)
+    _client_logged_at: float = -1e9
     _open: bool = True
 
     # ------------------------------------------------------------ sending
@@ -153,6 +156,9 @@ class VoiceConnection:
                     idle_deadline = monotonic() + self.idle_timeout_seconds
                     await self._interrupt(event.client_message_id, reason="interrupted")
                     continue
+                if isinstance(event, ClientLogMessage):
+                    self._log_client(event)
+                    continue
                 if not isinstance(event, UtteranceMessage):
                     await self.error("authentication_not_allowed", "Authentication is only valid as the first event.")
                     continue
@@ -167,6 +173,19 @@ class VoiceConnection:
                 await self._start_turn(event)
         finally:
             await self._shutdown()
+
+    def _log_client(self, event: ClientLogMessage) -> None:
+        """One line per report, at most every few seconds per connection; counts only, no words."""
+
+        now = monotonic()
+        if now - self._client_logged_at < CLIENT_LOG_INTERVAL_SECONDS:
+            return
+        self._client_logged_at = now
+        logger.info(
+            "voice client session=%s browser=%s starts=%d ends=%d restarts=%d interim=%d finals=%d dropped_echo=%d sent=%d errors=%s",
+            self.session.session_id[:8], event.browser or "-", event.starts, event.ends, event.restarts, event.interim, event.finals,
+            event.dropped_echo, event.sent, ",".join(event.errors) or "-",
+        )
 
     # ------------------------------------------------------------ turns
     def _allow_utterance(self) -> bool:

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import atexit
+import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import AsyncIterator
@@ -37,6 +39,26 @@ from .middleware.security_headers import SecurityHeadersMiddleware
 from .middleware.timeout import RequestTimeoutMiddleware
 
 settings = AppSettings.from_env()
+
+
+def _configure_logging(level_name: str | None) -> None:
+    """Show the app's own log lines at GURU_LOG_LEVEL (for example INFO); unset keeps Python's warnings-only default."""
+
+    level = logging.getLevelName((level_name or "").strip().upper()) if level_name else None
+    if not isinstance(level, int):
+        return
+    handler = logging.StreamHandler()
+    handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    for name in ("guru", "app"):
+        app_logger = logging.getLogger(name)
+        if not app_logger.handlers:
+            app_logger.addHandler(handler)
+        app_logger.setLevel(level)
+        # Handled here; the root logger's last-resort handler would print it again.
+        app_logger.propagate = False
+
+
+_configure_logging(os.getenv("GURU_LOG_LEVEL"))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
