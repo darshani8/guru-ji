@@ -2240,7 +2240,8 @@ paths:
     get:
       tags:
       - intelligence-map
-      summary: Coverage and accuracy against the hidden ground truth
+      summary: Coverage and accuracy against the hidden ground truth (the ground truth
+        and runs for managers only)
       operationId: metrics_v1_intelligence_map_metrics_get
       parameters:
       - name: institution_id
@@ -2251,6 +2252,21 @@ paths:
           - type: string
           - type: 'null'
           title: Institution Id
+      - name: kind
+        in: query
+        required: false
+        schema:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Kind
+      - name: limit
+        in: query
+        required: false
+        schema:
+          type: integer
+          default: 10
+          title: Limit
       responses:
         '200':
           description: Successful Response

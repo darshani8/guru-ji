@@ -34,7 +34,7 @@ from ..profile import InstitutionProfile
 from .connectors.base import ConnectorContext, ConnectorRegistry, ConnectorResult, Lead
 from .gate import guard_canaries
 from .incidents import IncidentDesk
-from .learning import prioritise_gaps
+from .learning import GAP_INTERVAL_SECONDS, prioritise_gaps
 from .metrics import map_metrics
 from .pipeline import nominated, regrade, sync_profile
 from .store import MapStore
@@ -75,6 +75,8 @@ class MapEngine:
         """Make sure every standing watch exists; returns how many were added."""
 
         added = 0
+        # Sources from before the base interval was stored get their connector's default as the base their interval moves around.
+        self.store.backfill_base_intervals(institution_id, {item["name"]: item["interval_seconds"] for item in self.registry.describe()})
         if profile is not None:
             sync_profile(self.store, profile)
         # A domain that was never graded (new from the profile or a seed) is
@@ -168,24 +170,28 @@ class MapEngine:
         Failure back-off delays only the next run; the kept interval moves
         with yield around the source's base (productive sooner, idle leads
         later, idle watches back to base), so an outage or a quota refusal
-        never slows a watch down for good.
+        never slows a watch down for good. A gap search (an uncovered cell)
+        is held at the gap pace, delay and interval alike, until the cell is
+        covered; idle, it would otherwise double back toward its base.
         """
 
         interval = int(source.get("interval_seconds") or 86400)
-        base = int(source.get("base_interval_seconds") or interval)
+        # A source from before the base was stored (NULL after the upgrade) moves around its connector's default, not wherever its interval drifted.
+        base = int(source.get("base_interval_seconds") or getattr(self.registry.get(str(source.get("connector") or "")), "default_interval", 0) or interval)
+        ceiling = min(self.config.max_interval, GAP_INTERVAL_SECONDS) if source.get("topic") == "gap" else self.config.max_interval
         if result.failed:
             streak = int(source.get("failure_streak") or 0) + 1
             delay = base * (2 ** min(streak, 5))
-            bounded = max(self.config.min_interval, min(self.config.max_interval, delay))
+            bounded = max(self.config.min_interval, min(ceiling, delay))
             # The kept interval never grows from a failure (one stretched by an older rule comes back to base).
-            return bounded, max(self.config.min_interval, min(self.config.max_interval, min(interval, base)))
+            return bounded, max(self.config.min_interval, min(ceiling, min(interval, base)))
         if result.yield_count > 0:
             interval = max(interval // 2, base // 8)
         elif source.get("origin") == "lead":
             interval = min(interval * 2, base * 4)
         else:
             interval = base if interval >= base else min(base, interval * 2)
-        interval = max(self.config.min_interval, min(self.config.max_interval, interval))
+        interval = max(self.config.min_interval, min(ceiling, interval))
         return interval, interval
 
     async def _run_source(

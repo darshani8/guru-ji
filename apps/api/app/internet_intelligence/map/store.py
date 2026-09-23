@@ -437,21 +437,41 @@ class MapStoreScheduling:
             )
 
     def mark_gap_sources(self, institution_id: str, connector: str, gap_targets: Iterable[str], *, now: str, max_interval: int) -> int:
-        """Flag the sources that search where the map has no verified account yet, and bring them round sooner."""
+        """Flag the sources that search where the map has no verified account yet, and bring them round sooner.
+
+        A flagged source is also due within ``max_interval`` of ``now``: a
+        shorter interval alone would leave one scheduled two weeks out waiting
+        the two weeks.
+        """
 
         targets = list(dict.fromkeys(gap_targets))
         stamp = now_iso()
+        due_by = (datetime.fromisoformat(now) + timedelta(seconds=int(max_interval))).isoformat()
         with self._tenant(institution_id):
             self.backend.execute("UPDATE intel_sources SET topic = '', updated_at = ? WHERE institution_id = ? AND connector = ? AND topic = 'gap'", (stamp, institution_id, connector))
             marked = 0
             for chunk in iter_chunks(targets, 200):
                 marks = ", ".join("?" for _ in chunk)
                 marked += self.backend.execute(
-                    f"UPDATE intel_sources SET topic = 'gap', interval_seconds = CASE WHEN interval_seconds > ? THEN ? ELSE interval_seconds END, updated_at = ? "
+                    f"UPDATE intel_sources SET topic = 'gap', interval_seconds = CASE WHEN interval_seconds > ? THEN ? ELSE interval_seconds END, due_at = CASE WHEN due_at > ? THEN ? ELSE due_at END, updated_at = ? "
                     f"WHERE institution_id = ? AND connector = ? AND status = 'active' AND target IN ({marks})",
-                    (int(max_interval), int(max_interval), stamp, institution_id, connector, *chunk),
+                    (int(max_interval), int(max_interval), due_by, due_by, stamp, institution_id, connector, *chunk),
                 )
         return marked
+
+    def backfill_base_intervals(self, institution_id: str, defaults: Mapping[str, int]) -> int:
+        """Give sources from before ``base_interval_seconds`` existed (NULL after the upgrade) their connector's default as their base.
+
+        Without one, the current interval stood in for the base, so a gap
+        search stayed at the gap pace for good and a productive source
+        ratcheted down to the hourly minimum.
+        """
+
+        with self._tenant(institution_id):
+            return sum(
+                self.backend.execute("UPDATE intel_sources SET base_interval_seconds = ? WHERE institution_id = ? AND connector = ? AND base_interval_seconds IS NULL", (max(60, int(seconds)), institution_id, connector))
+                for connector, seconds in defaults.items()
+            )
 
     def source_yields(self, institution_id: str) -> list[dict[str, Any]]:
         """Per connector: sources, runs, what they found and what they cost."""

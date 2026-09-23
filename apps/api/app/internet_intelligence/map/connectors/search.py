@@ -24,8 +24,13 @@ PLATFORM_DOMAINS: tuple[str, ...] = ("instagram.com", "facebook.com", "youtube.c
 _SPAM_QUERY = "casino OR slot OR gacor OR togel OR judi OR viagra OR replica OR betting"
 
 
-def _entities(context: ConnectorContext, limit: int) -> list[dict[str, Any]]:
-    return [entity for entity in context.entities() if entity["kind"] != "lookalike" and entity.get("status", "active") == "active"][:limit]
+def _entities(context: ConnectorContext, limit: int | None) -> list[dict[str, Any]]:
+    """Every active entity, the institution's own first (a cap here left whole groups unsearched)."""
+
+    from ..learning import ranked_entities  # learning imports this module
+
+    entities = [entity for entity in ranked_entities(context.store, context.institution_id) if entity.get("status", "active") == "active"]
+    return entities if limit is None else entities[:limit]
 
 
 @dataclass(slots=True)
@@ -38,7 +43,8 @@ class SearchConnector:
     budget_key: str = "search"
     max_grade: str = "C"
     default_interval: int = 14 * 86400
-    max_entities: int = 40
+    # None: a source for every entity; the daily search budget, not a cap, bounds what the rotation costs.
+    max_entities: int | None = None
     results_per_query: int = 10
 
     def enabled(self) -> bool:
