@@ -106,6 +106,8 @@ def lose_anchor(store: MapStore, institution_id: str, source_asset_id: str, *, r
     Each account it vouched for gets one ``anchor_lost`` row (repeated
     failures add nothing more); the grader then treats the old live links as
     history ("was official then", A-arch) until a healthy fetch links them again.
+    The owner's confirmation of every account the domain's well-known file
+    listed is withdrawn too: whoever holds the domain now is not the owner.
     Returns the accounts affected, already regraded.
     """
 
@@ -123,9 +125,34 @@ def lose_anchor(store: MapStore, institution_id: str, source_asset_id: str, *, r
             continue  # already recorded for this loss
         store.add_evidence(institution_id, asset_id=asset_id, kind="anchor_lost", polarity="refutes", detail=reason[:80], source_asset_id=source_asset_id, channel="anchor", observed_via="live", run_id=run_id)
         lost.append(asset_id)
+    lost.extend(asset_id for asset_id in withdraw_owner_listing(store, institution_id, source_asset_id, detail=f"the listing domain no longer vouches ({reason})", run_id=run_id) if asset_id not in lost)
     if lost:
         regrade(store, institution_id, lost)
     return lost
+
+
+def withdraw_owner_listing(
+    store: MapStore, institution_id: str, domain_asset_id: str, *, detail: str, keep: Iterable[str] = (), observed_via: str = "live", source_url: str = "", run_id: str | None = None,
+) -> list[str]:
+    """Withdraw the owner's confirmation of each account a domain's well-known file listed (all but ``keep``).
+
+    A listed account is O only while its domain still speaks for the owner:
+    the file gone or its token broken, the domain's own proof withdrawn, or
+    the domain lost (dead, parked, hijacked, redirected) each end it. Only
+    accounts whose latest word on a channel is "supports" get a row, so a
+    repeated loss adds nothing. Returns the accounts withdrawn (not regraded).
+    """
+
+    kept = set(keep)
+    latest: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in store.links_from(institution_id, domain_asset_id, kind="owner_claim"):
+        latest[(row["asset_id"], row["channel"])] = row
+    withdrawn: list[str] = []
+    for (asset_id, channel), row in latest.items():
+        if row["polarity"] == "supports" and asset_id not in kept:
+            store.add_evidence(institution_id, asset_id=asset_id, kind="owner_claim", polarity="refutes", detail=detail[:200], source_url=source_url or str(row["source_url"] or ""), source_asset_id=domain_asset_id, channel=channel, observed_via=observed_via, run_id=run_id)
+            withdrawn.append(asset_id)
+    return unique(withdrawn)
 
 
 def anchor_grade(store: MapStore, institution_id: str, asset_id: str | None) -> str:
@@ -143,4 +170,4 @@ def unique(items: Sequence[str]) -> list[str]:
     return list(dict.fromkeys(items))
 
 
-__all__ = ["anchor_grade", "lose_anchor", "nominated", "regrade", "sync_profile", "unique"]
+__all__ = ["anchor_grade", "lose_anchor", "nominated", "regrade", "sync_profile", "unique", "withdraw_owner_listing"]

@@ -2859,8 +2859,38 @@ paths:
     post:
       tags:
       - intelligence-map
-      summary: Check the official domains for the ownership token now
+      summary: Check the official domains (all, or asset_ids) for the ownership token
+        now; at most ten per call, the rest reported as skipped
       operationId: verify_ownership_v1_intelligence_map_ownership_verify_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/HarvestBody'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Verify Ownership V1 Intelligence Map Ownership Verify
+                  Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
+  /v1/intelligence/map/ownership/rotate:
+    post:
+      tags:
+      - intelligence-map
+      summary: Issue new ownership tokens; every earlier token stops proving anything
+        (managers only)
+      operationId: rotate_ownership_v1_intelligence_map_ownership_rotate_post
       requestBody:
         content:
           application/json:
@@ -2875,7 +2905,7 @@ paths:
               schema:
                 additionalProperties: true
                 type: object
-                title: Response Verify Ownership V1 Intelligence Map Ownership Verify
+                title: Response Rotate Ownership V1 Intelligence Map Ownership Rotate
                   Post
         '422':
           description: Validation Error

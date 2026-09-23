@@ -91,6 +91,17 @@ class PlatformSettingsTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {"CONTROL_DATABASE_URL": ":memory:", "GURU_ENVIRONMENT": "development", "GURU_WEB_CONSOLE_ENABLED": "false"}, clear=False):
             self.assertFalse(AppSettings.from_env().web_console_enabled)
 
+    def test_production_crawling_needs_a_contact_for_site_owners(self):
+        base = dict(PRODUCTION, platform_enabled=True, institution_database_url="postgresql://u:p@h/db", object_store_backend="s3", s3_bucket="bucket", job_queue="sqs", sqs_queue_url="https://sqs.example/q")
+        AppSettings(**base).ensure_safe_for_production()
+        for crawler in ({"intelligence_map_enabled": True, "intelligence_suppression_key": "k" * 32}, {"intelligence_search_provider": "tavily", "web_search_api_key": "key"}):
+            with self.assertRaisesRegex(ValueError, "GURU_INTELLIGENCE_CRAWLER_CONTACT", msg=str(crawler)):
+                AppSettings(**base, **crawler).ensure_safe_for_production()
+            AppSettings(**base, **crawler, intelligence_crawler_contact="webmaster@bgscet.ac.in").ensure_safe_for_production()
+            AppSettings(**crawler).ensure_safe_for_production()  # development may leave it empty
+        with self.assertRaisesRegex(ValueError, "https URL or an email address"):
+            AppSettings(**base, intelligence_map_enabled=True, intelligence_suppression_key="k" * 32, intelligence_crawler_contact="call me").ensure_safe_for_production()
+
     def test_stale_job_age_is_configurable_and_positive(self):
         self.assertEqual(AppSettings().job_stale_seconds, 180)
         with mock.patch.dict(os.environ, {"CONTROL_DATABASE_URL": ":memory:", "GURU_JOB_STALE_SECONDS": "120"}, clear=False):

@@ -221,8 +221,9 @@ def map_connectors(settings: AppSettings, *, transport: Any | None = None) -> Co
         CertificateConnector(active="certificates" in on, client=client), RdapConnector(active="rdap" in on, client=client), DnsConnector(active="dns" in on, client=client),
         WaybackConnector(active="wayback" in on, client=client), LinkHubConnector(active="link_hub" in on), DirectoryConnector(active="directory" in on),
         OpenStreetMapConnector(active="openstreetmap" in on, client=client), GooglePlayConnector(active="google_play" in on),
-        # Reads only the institution's own domains; the DNS TXT check uses DNS over HTTPS only when the dns connector is allowed.
-        OwnerClaimsConnector(key=_suppression_key(settings), dns=client if "dns" in on else None),
+        # Reads only the institution's own domains; its DNS TXT method is always offered, so it always has the DNS-over-HTTPS
+        # client (one public lookup of a domain the institution named, whether or not the dns connector explores).
+        OwnerClaimsConnector(key=_suppression_key(settings), dns=client),
     ])
 
 

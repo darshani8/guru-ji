@@ -9,14 +9,28 @@ the map reads from your sites and how you can confirm, correct or limit it.
 ## What the crawler does
 
 * It identifies itself in the `User-Agent` header as
-  `GuruJi-InstitutionIntelligence/1.0`, followed by the operator's contact
-  (a URL or email address set by the deployment).
-* It obeys `robots.txt`. A `Disallow` for its user agent, or for `*`, is
-  respected; robots.txt is re-read daily.
+  `GuruJi-InstitutionIntelligence/1.0 (+<contact>)`, where the contact is a
+  URL or email address of whoever runs the deployment. A production
+  deployment cannot start the crawler without one, so write to that contact
+  with any question or complaint about the crawler.
+* It obeys `robots.txt`, re-read daily. Name it by its product token,
+  without the version:
+
+  ```
+  User-agent: GuruJi-InstitutionIntelligence
+  Disallow: /
+  ```
+
+  A group written for `GuruJi-InstitutionIntelligence/1.0` is matched the
+  same way (the version is ignored). Without a group of its own, the `*`
+  group applies.
 * On an institution's own domain it reads the homepage and at most a few
-  contact or about pages, about once a week, using conditional requests
-  (`If-None-Match` / `If-Modified-Since`), so an unchanged page costs a
-  `304`.
+  contact or about pages, about once a week. The scheduled reading sends
+  the homepage's validators from the last clean reading (`If-None-Match` /
+  `If-Modified-Since`), so an unchanged homepage costs a `304`; contact and
+  about pages are always fetched in full, as is the homepage when a manager
+  asks for a reading at once. The weekly ownership check (below) reads the
+  homepage and `/.well-known/guruji.json` with conditional requests too.
 * It does not log in anywhere, does not use anyone's session or
   credentials, does not solve CAPTCHAs, rotate proxies or disguise its user
   agent, and treats a `403`, `429` or login wall as "blocked", never as a
@@ -32,15 +46,16 @@ the map reads from your sites and how you can confirm, correct or limit it.
 
 | Grade | Meaning |
 |---|---|
-| O | Confirmed by the institution itself (see below). |
-| A | Linked from the header, navigation or footer of a healthy official page, or an official domain your administrators configured. |
-| A-arch | Linked like that, but only in an archived copy of a site that has since lapsed. |
-| B | One step from an A source, a regulator's listing, a reviewer's confirmation, or two independent sources agreeing. |
-| C | One source only, not yet confirmed. |
-| D | Refuted: a look-alike, an impersonator, dead, or on a parked or hijacked domain. |
+| O | Confirmed by the institution itself (see below): a domain carrying its token, or an account named in that domain's verified `guruji.json`. |
+| A | Linked as the site's own account (a header, navigation or footer link, a `rel="me"` link, a `sameAs` entry in the page's structured data, or a contact-page link naming the institution) on a healthy official page graded O or A; an official domain your administrators configured, while it is live and does not redirect elsewhere; a domain a regulator lists as yours (AICTE, UGC, NIRF, NAAC, NMC, VTU); or listed on a link hub or account page graded O, or a live subdomain of an O domain. |
+| A-arch | Linked like that, but only in an archived copy, or before the site that linked it died, lapsed, was taken over or started redirecting. |
+| B | Linked like that on an official page graded B; listed on a hub or account page graded A, or a live subdomain of an A domain; any other directory record; a reviewer's confirmation; two independent sources agreeing (search, directories, community records, hubs, backlinks, platform APIs, reviewers); or a configured domain that now redirects to another host. |
+| C | One source only: a search snippet, a backlink, a community or platform-API record, a link from a page graded C or a hub graded B or lower, or an imported claim nobody has re-verified. |
+| D | Refuted: rejected by a reviewer, a look-alike or an impersonator (only a reviewer's later confirmation lifts this), dead on two checks at least a day apart, or on a parked or hijacked domain. |
 
 The most useful thing you can do is keep your official accounts linked from
-your website's footer or header: that alone makes them A.
+your website's footer or header, or list them in `sameAs` or with
+`rel="me"`: that alone makes them A.
 
 ## Confirming ownership (grade O)
 
@@ -74,12 +89,27 @@ has its own token; publish it on that domain in any one of these ways:
    }
    ```
 
-Any one method confirms the domain. Accounts listed in the file are graded
-O. To withdraw one, remove it from the list; the map checks weekly (managers
-can also run the check at once). The token is tied to your institution and
-to that one domain on this platform: a copy on any other host proves
-nothing, and it reveals nothing else. Only domains your institution
-configured (or a reviewer confirmed) are checked.
+Any one method confirms the domain. The homepage and the file must be
+served by the domain itself (`www.` is fine); a redirect to another host
+proves nothing. Accounts listed in the file are graded O, unless the map
+already knows the account as another organisation's, a look-alike's or a
+person's. To withdraw one, remove it from the list; deleting the file or
+breaking its token withdraws them all. The map checks weekly (managers can
+also run the check at once, up to ten domains per request). Only a plain
+answer withdraws anything: an outage, a block or a robots.txt refusal leaves
+the confirmations as they were until the next check.
+
+The token is tied to your institution and to that one domain on this
+platform: a copy on any other host proves nothing, and it reveals nothing
+else. Only domains your institution configured (or a reviewer confirmed) are
+checked. The token is public, so the map trusts it only on a healthy site:
+while a domain is reported compromised, hijacked, parked or redirecting it is
+not checked, a hijack or a reviewer's rejection is lifted only by a reviewer,
+and the accounts a lost domain listed stop being O. If a token may be in the
+wrong hands (say a domain lapsed and someone else registered it), your
+managers can issue new tokens (`POST /v1/intelligence/map/ownership/rotate`):
+every earlier token stops proving anything, so publish the new one before the
+next weekly check.
 
 ## When something is wrong
 

@@ -361,16 +361,30 @@ async def ownership(request: Request, institution_id: str | None = None) -> dict
         raise translate(exc) from exc
 
 
-@router.post("/ownership/verify", summary="Check the official domains for the ownership token now")
-async def verify_ownership(request: Request, body: MapInstitutionBody) -> dict[str, Any]:
+@router.post("/ownership/verify", summary="Check the official domains (all, or asset_ids) for the ownership token now; at most ten per call, the rest reported as skipped")
+async def verify_ownership(request: Request, body: HarvestBody) -> dict[str, Any]:
     service = map_service(request)
     principal = require_principal(request, Capability.INTELLIGENCE_MANAGE)
     target = resolve_institution(principal, body.institution_id)
     try:
-        result = await service.verify_ownership(principal, target)
+        result = await service.verify_ownership(principal, target, asset_ids=body.asset_ids)
     except (ValueError, PermissionError) as exc:
         raise translate(exc) from exc
-    audit_map_action(request, principal, "ownership_verify", metadata={"institution_id": target, "verified": sum(item["outcome"] == "verified" for item in result["results"])})
+    audit_map_action(request, principal, "ownership_verify", metadata={"institution_id": target, "verified": sum(item["outcome"] == "verified" for item in result["results"]), "skipped": int(result["skipped"])})
+    return result
+
+
+@router.post("/ownership/rotate", summary="Issue new ownership tokens; every earlier token stops proving anything (managers only)")
+async def rotate_ownership(request: Request, body: MapInstitutionBody) -> dict[str, Any]:
+    service = map_service(request)
+    principal = require_principal(request, Capability.INTELLIGENCE_MANAGE)
+    target = resolve_institution(principal, body.institution_id)
+    try:
+        result = service.rotate_ownership(principal, target)
+    except (ValueError, PermissionError) as exc:
+        audit_map_action(request, principal, "ownership_rotate", outcome=AuditOutcome.DENIED if isinstance(exc, PermissionError) else AuditOutcome.FAILED, metadata={"institution_id": target})
+        raise translate(exc) from exc
+    audit_map_action(request, principal, "ownership_rotate", metadata={"institution_id": target, "epoch": int(result["epoch"])})
     return result
 
 

@@ -40,6 +40,8 @@ _CONTENT_FAMILIES = {
     "xml": ("application/xml", "text/xml"), "json": ("application/json", "application/ld+json", "application/sparql-results+json", "text/json"), "pdf": ("application/pdf",),
 }
 _LOGIN_PATH = re.compile(r"/(?:accounts/)?log[-_]?in\b|/authwall|/signin\b|/checkpoint\b", re.IGNORECASE)
+# The "/1.0" of a robots.txt User-agent line: groups match on the product token alone.
+_ROBOTS_AGENT_VERSION = re.compile(r"^(\s*user-agent\s*:\s*[^/\s#]+)/[^\s#]*", re.IGNORECASE | re.MULTILINE)
 
 
 DEFAULT_SNIPPET_ONLY_DOMAINS = ("facebook.com", "instagram.com", "twitter.com", "x.com", "linkedin.com", "youtube.com", "threads.net", "reddit.com", "quora.com", "justdial.com", "glassdoor.com")
@@ -86,6 +88,24 @@ def crawler_user_agent(contact: str | None) -> str:
     if re.fullmatch(r"[^@\s()]+@[^@\s()]+\.[a-zA-Z]{2,}", value):
         return f"GuruJi-InstitutionIntelligence/1.0 (+mailto:{value})"
     raise ValueError("the crawler contact must be an https URL or an email address")
+
+
+def product_token(user_agent: str) -> str:
+    """The name robots.txt groups are matched on: "GuruJi-InstitutionIntelligence", without version or contact."""
+
+    return user_agent.split("/", 1)[0].split(" ", 1)[0].strip()
+
+
+def robots_lines(text: str) -> list[str]:
+    """robots.txt lines with any version dropped from User-agent names.
+
+    urllib's parser compares a group's name with the product token only, so
+    a group written for "GuruJi-InstitutionIntelligence/1.0" (the full
+    User-Agent a webmaster sees in their logs) would otherwise never match
+    and its rules would be silently ignored.
+    """
+
+    return _ROBOTS_AGENT_VERSION.sub(r"\1", text).splitlines()
 
 
 def resolve_host(hostname: str) -> tuple[str, ...]:
@@ -239,7 +259,7 @@ class PublicPageFetcher:
                         continue
                     if response.status_code == 200:
                         raw = await read_bounded(response, ROBOTS_MAX_BYTES)
-                        parser.parse(raw.decode("utf-8", errors="replace").splitlines())
+                        parser.parse(robots_lines(raw.decode("utf-8", errors="replace")))
                         return parser
                     if 400 <= response.status_code < 500:
                         parser.parse([])  # no robots file: nothing is restricted
@@ -265,7 +285,7 @@ class PublicPageFetcher:
         parser = cached[1]
         if parser is None:
             return False
-        return parser.can_fetch(self.user_agent, url)
+        return parser.can_fetch(product_token(self.user_agent), url)
 
     async def retrieve(
         self, url: str, *, accept: frozenset[str] = HTML_TYPES, etag: str | None = None, last_modified: str | None = None, max_bytes: int | None = None, check_domain: bool = True,
@@ -404,4 +424,4 @@ class Retrieval:
         return self.body.decode("utf-8", errors="replace")
 
 
-__all__ = ["HTML_TYPES", "NEVER_FETCHED_SITES", "Retrieval", "published_from_html", "DEFAULT_SNIPPET_ONLY_DOMAINS", "MAX_REDIRECTS", "ROBOTS_FAILURE_TTL_SECONDS", "ROBOTS_MAX_BYTES", "ROBOTS_TTL_SECONDS", "FetchedPage", "PublicPageFetcher", "USER_AGENT", "crawler_user_agent", "is_public_address", "resolve_host"]
+__all__ = ["HTML_TYPES", "NEVER_FETCHED_SITES", "Retrieval", "published_from_html", "DEFAULT_SNIPPET_ONLY_DOMAINS", "MAX_REDIRECTS", "ROBOTS_FAILURE_TTL_SECONDS", "ROBOTS_MAX_BYTES", "ROBOTS_TTL_SECONDS", "FetchedPage", "PublicPageFetcher", "USER_AGENT", "crawler_user_agent", "is_public_address", "product_token", "resolve_host", "robots_lines"]

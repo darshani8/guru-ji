@@ -737,6 +737,19 @@ class RobotsCacheAndIdentityTests(unittest.IsolatedAsyncioTestCase):
         await fetcher.fetch("https://news.example.com/x")
         self.assertTrue(agents and all("mailto:webmaster@bgscet.ac.in" in agent for agent in agents))
 
+    async def test_a_robots_group_names_the_crawler_by_product_token(self):
+        from app.internet_intelligence.fetch import crawler_user_agent
+
+        for group in ("GuruJi-InstitutionIntelligence", "GuruJi-InstitutionIntelligence/1.0", "guruji-institutionintelligence/2.3"):
+            def handler(request: httpx.Request, group=group) -> httpx.Response:
+                if request.url.path == "/robots.txt":
+                    return httpx.Response(200, text=f"User-agent: SomeOtherBot/1.0\nDisallow: /\n\nUser-agent: {group}\nDisallow: /private\n", request=request)
+                return httpx.Response(200, headers={"content-type": "text/html"}, text=PAGE, request=request)
+
+            fetcher = PublicPageFetcher(transport=httpx.MockTransport(handler), resolver=fake_resolver, user_agent=crawler_user_agent("webmaster@bgscet.ac.in"))
+            self.assertEqual((await fetcher.retrieve("https://news.example.com/private/x")).outcome, "robots", group)
+            self.assertEqual((await fetcher.retrieve("https://news.example.com/x")).outcome, "ok", f"{group}: another bot's group does not apply")
+
     def test_settings_reject_a_malformed_contact(self):
         import os
         from unittest import mock
