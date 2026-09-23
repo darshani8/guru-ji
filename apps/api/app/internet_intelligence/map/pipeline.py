@@ -8,6 +8,7 @@ from typing import Any
 
 from ..profile import InstitutionProfile
 from .assets import asset_ref
+from .connectors.common import _words
 from .grading import SCORER_VERSION, apply_disputes, grade
 from .store import MapStore
 
@@ -62,15 +63,39 @@ def regrade(store: MapStore, institution_id: str, asset_ids: Iterable[str] | Non
     return changes
 
 
+def entity_key(name: str) -> str:
+    """A name reduced to its words, without "and": "BGS College of Engineering & Technology" and "... and Technology" are one key."""
+
+    return "".join(word for word in _words(name.replace("&", " and ")) if word != "and")
+
+
+def find_entity(store: MapStore, institution_id: str, names: Sequence[str]) -> dict[str, Any] | None:
+    """The mapped entity (never a look-alike) known by any of ``names``, trying them in order."""
+
+    entities = [entity for entity in store.list_entities(institution_id, limit=5000) if entity["kind"] != "lookalike"]
+    known = [(entity, {entity_key(str(name)) for name in [entity["name"], *entity["names"]]}) for entity in entities]
+    for key in (entity_key(name) for name in names):
+        found = next((entity for entity, keys in known if key and key in keys), None)
+        if found is not None:
+            return found
+    return None
+
+
 def sync_profile(store: MapStore, profile: InstitutionProfile, *, run_id: str | None = None) -> dict[str, Any]:
     """Make the profile's institution an entity and its configured domains graded assets.
 
     A domain the institution's own managers configured is operator input:
     it anchors the map (grade A while live and healthy). The evidence is
-    added once per domain, not on every sync.
+    added once per domain, not on every sync. An entity already mapped under
+    any of the profile's names (seeded as "... Engineering & Technology" or
+    "BGSCET" for a profile named "... Engineering and Technology") is the
+    same institution: it gains the profile's names instead of a twin.
     """
 
-    entity_id = store.upsert_entity(profile.institution_id, name=profile.name, kind="institution", names=list(profile.aliases), locations=[profile.location] if profile.location else [])
+    names = [profile.name, *profile.aliases]
+    existing = find_entity(store, profile.institution_id, names)
+    name, kind = (str(existing["name"]), str(existing["kind"])) if existing else (profile.name, "institution")
+    entity_id = store.upsert_entity(profile.institution_id, name=name, kind=kind, names=[item for item in names if item != name], locations=[profile.location] if profile.location else [])
     created: list[str] = []
     for domain in profile.official_domains:
         ref = asset_ref(f"https://{domain}/")
@@ -143,4 +168,4 @@ def unique(items: Sequence[str]) -> list[str]:
     return list(dict.fromkeys(items))
 
 
-__all__ = ["anchor_grade", "lose_anchor", "nominated", "regrade", "sync_profile", "unique"]
+__all__ = ["anchor_grade", "entity_key", "find_entity", "lose_anchor", "nominated", "regrade", "sync_profile", "unique"]

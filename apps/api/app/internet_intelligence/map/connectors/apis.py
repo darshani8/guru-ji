@@ -167,7 +167,8 @@ class WikidataConnector:
         candidates = [str(item.get("id")) for item in ((found.json() or {}).get("search") or []) if isinstance(item, dict) and re.fullmatch(r"Q\d+", str(item.get("id")))]
         if not candidates:
             return ConnectorResult(outcome="no_item")
-        got = await self.client.request(WIKIDATA_API, params={"action": "wbgetentities", "ids": "|".join(candidates), "props": "labels|aliases|claims", "languages": "en", "format": "json"})
+        # Kannada labels and aliases too: an item known locally by its Kannada name still matches.
+        got = await self.client.request(WIKIDATA_API, params={"action": "wbgetentities", "ids": "|".join(candidates), "props": "labels|aliases|claims", "languages": "en|kn", "format": "json"})
         if not got.ok:
             return ConnectorResult(outcome=got.outcome, failed=True)
         items = ((got.json() or {}).get("entities") or {})

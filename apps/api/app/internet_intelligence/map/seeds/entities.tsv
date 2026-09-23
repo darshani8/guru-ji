@@ -1,0 +1,18 @@
+# The main entities of the sweep, with the names and places they are known by. A sweep subject that
+# carries one of these names (or a profile synced later) becomes this entity, so every connector
+# searches and matches it by its short, English and Kannada names, not only the sweep's label. A row
+# is merged into an entity an import creates; it never adds an entity on its own, so a pilot import
+# of one institution's groups maps nothing more. Kannada spellings are verified ones only; add none
+# that are not. names and locations are separated by |; the first location is the one searched.
+name	kind	parent	names	locations
+Sri Adichunchanagiri Mahasamsthana Math	organisation		ಶ್ರೀ ಆದಿಚುಂಚನಗಿರಿ ಮಹಾಸಂಸ್ಥಾನ ಮಠ|Adichunchanagiri Math|Adichunchanagiri Mutt	Nagamangala|Mandya|B.G. Nagara|Bengaluru|Mysuru|ನಾಗಮಂಗಲ|ಮಂಡ್ಯ|ಬೆಂಗಳೂರು|ಮೈಸೂರು
+Sri Sri Sri Dr. Nirmalanandanatha Mahaswamiji	role	Sri Adichunchanagiri Mahasamsthana Math	ಶ್ರೀ ಶ್ರೀ ಶ್ರೀ ಡಾ. ನಿರ್ಮಲಾನಂದನಾಥ ಮಹಾಸ್ವಾಮೀಜಿ|Nirmalanandanatha Swamiji|Nirmalanandanatha Mahaswamiji	Nagamangala|Mandya|B.G. Nagara|Bengaluru|Mysuru|ನಾಗಮಂಗಲ|ಮಂಡ್ಯ|ಬೆಂಗಳೂರು|ಮೈಸೂರು
+Adichunchanagiri University	institution		ಆದಿಚುಂಚನಗಿರಿ ವಿಶ್ವವಿದ್ಯಾಲಯ|ACU	Nagamangala|Mandya|B.G. Nagara|ನಾಗಮಂಗಲ|ಮಂಡ್ಯ
+BGS Institute of Technology	institution		BGSIT	Nagamangala|Mandya|B.G. Nagara|ನಾಗಮಂಗಲ|ಮಂಡ್ಯ
+Adichunchanagiri Institute of Medical Sciences	institution		AIMS	Nagamangala|Mandya|B.G. Nagara|ನಾಗಮಂಗಲ|ಮಂಡ್ಯ
+BGS College of Engineering and Technology	institution		BGSCET|BGS College of Engineering & Technology	Bengaluru|Mahalakshmipuram|ಬೆಂಗಳೂರು
+SJB Institute of Technology	institution		SJBIT	Bengaluru|Kengeri|ಬೆಂಗಳೂರು
+BGS & SJB Group of Institutions	trust		BGS and SJB Group of Institutions|BGS & SJB Group of Institutions Bengaluru	Bengaluru|Kengeri|ಬೆಂಗಳೂರು
+BGS Global Institute of Medical Sciences	institution		BGSGIMS	Bengaluru|Kengeri|ಬೆಂಗಳೂರು
+SJC Institute of Technology	institution		SJCIT	Chikkaballapur|Chickballapur|ಚಿಕ್ಕಬಳ್ಳಾಪುರ
+Adichunchanagiri Institute of Technology	institution		AIT	Chikkamagaluru

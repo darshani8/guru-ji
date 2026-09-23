@@ -98,13 +98,30 @@ FAILED_OUTCOMES = frozenset({"blocked", "server_error", "timeout", "too_large", 
 
 
 # ----------------------------------------------------------------- entities
+# The letters a name is made of: Latin, digits and the Kannada block
+# (U+0C80-U+0CFF). Not \w: Python's \w stops at Kannada vowel signs and
+# viramas, so it would cut one Kannada word into pieces.
+_NAME_CHARS = "a-z0-9ಀ-೿"
+
+
 def _compact(text: str) -> str:
-    return re.sub(r"[^a-z0-9]", "", text.lower())
+    return re.sub(f"[^{_NAME_CHARS}]", "", text.lower())
 
 
-def entity_profile(entity: Mapping[str, Any], institution_id: str) -> InstitutionProfile | None:
+def entity_profile(entity: Mapping[str, Any], institution_id: str, text: str = "") -> InstitutionProfile | None:
+    """The entity as a resolver profile, placed at whichever of its locations ``text`` names.
+
+    The resolver weighs a single location, and an entity has several (a
+    city and its Kannada spelling, a campus and its town): the first one the
+    page mentions is used, so "ಬೆಂಗಳೂರು" places a Kannada article as surely
+    as "Bengaluru" places an English one. Without text, the first location.
+    """
+
+    locations = [str(item) for item in entity.get("locations") or [] if str(item).strip()]
+    lowered = text.lower()[:20_000]
+    location = next((item for item in locations if item.lower() in lowered), locations[0] if locations else "")
     try:
-        return InstitutionProfile(institution_id, str(entity["name"]), (entity.get("locations") or [""])[0], aliases=entity.get("names") or [])
+        return InstitutionProfile(institution_id, str(entity["name"]), location, aliases=entity.get("names") or [])
     except ValueError:
         return None
 
@@ -122,7 +139,7 @@ def match_entity(context: ConnectorContext, *, url: str, title: str, text: str, 
     best: tuple[dict[str, Any], float] | None = None
     rival = 0.0
     for entity in context.entities():
-        profile = entity_profile(entity, context.institution_id)
+        profile = entity_profile(entity, context.institution_id, f"{title} {text}")
         if profile is None:
             continue
         match = resolve_entity(profile, url=url, title=title, text=text)
@@ -149,7 +166,7 @@ INSTITUTIONAL_WORDS = frozenset({
 
 
 def _words(text: str) -> list[str]:
-    return re.findall(r"[a-z0-9]+", text.lower())
+    return re.findall(f"[{_NAME_CHARS}]+", text.lower())
 
 
 def _segments(text: str, allowed: frozenset[str]) -> bool:

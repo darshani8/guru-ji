@@ -66,8 +66,12 @@ class SearchConnector:
         entity = context.store.get_entity(context.institution_id, entity_id)
         if entity is None or not domain:
             return ConnectorResult(outcome="entity_missing", prune=True)
+        # One of the entity's names per run, in turn (keyed off how often this
+        # source has run): an account listed under "BGSCET" or a Kannada name
+        # is never found by searching the full English name alone.
+        names = list(dict.fromkeys(str(name).strip() for name in [entity["name"], *(entity.get("names") or [])] if str(name).strip()))
         location = (entity.get("locations") or [""])[0]
-        query = f'"{entity["name"]}" {location}'.strip()[:300]
+        query = f'"{names[int(source.get("runs") or 0) % len(names)]}" {location}'.strip()[:300]
         provider = getattr(context.search, "provider_name", "search")
         try:
             hits = await context.search.search(query, max_results=self.results_per_query, include_domains=[domain])
