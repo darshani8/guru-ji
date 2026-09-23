@@ -207,7 +207,7 @@ INSTITUTIONAL_WORDS = frozenset({
     "campus", "dept", "department", "cse", "ece", "eee", "ise", "mech", "mechanical", "civil", "it", "ai", "aiml", "ds", "mba", "mca", "bba", "bca", "bcom", "bsc", "msc",
     "mtech", "btech", "phd", "pu", "puc", "nss", "ncc", "iste", "ieee", "csi", "acm", "sae", "ecell", "alumni", "association", "placements", "placement", "tpo",
     "admissions", "admission", "library", "sports", "fest", "club", "clubs", "students", "student", "council", "union", "hostel", "events", "news", "media", "page",
-    "team", "research", "innovation", "cell", "hub", "community", "india", "online", "live", "tv", "channel", "updates", "group", "trust", "math", "mutt", "hospital",
+    "team", "research", "innovation", "cell", "hub", "links", "community", "india", "online", "live", "tv", "channel", "updates", "group", "trust", "math", "mutt", "hospital",
     "medical", "nursing", "pharmacy", "law", "arts", "science", "commerce", "high", "primary", "english", "public", "international", "residential", "the", "of", "and", "for",
     "at", "ac", "edu", "org", "com", "net", "in", "co", "gov", "res", "www", "company", "school", "showcase", "u", "r", "c", "user",
 })
