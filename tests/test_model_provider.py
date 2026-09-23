@@ -200,6 +200,23 @@ class ClaudeProviderTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(request["model"], model_id)
                 self.assertEqual(request["system"], LATENCY_SENSITIVE_SYSTEM)
 
+    @unittest.skipUnless(ANTHROPIC_SDK_AVAILABLE, "the anthropic extra is not installed")
+    def test_bedrock_picks_invoke_model_for_profiles_and_the_messages_endpoint_otherwise(self):
+        import anthropic
+
+        cases = {
+            "global.anthropic.claude-haiku-4-5-20251001-v1:0": anthropic.AsyncAnthropicBedrock,
+            "apac.anthropic.claude-3-5-sonnet-20241022-v2:0": anthropic.AsyncAnthropicBedrock,
+            "anthropic.claude-haiku-4-5-20251001-v1:0": anthropic.AsyncAnthropicBedrock,
+            "anthropic.claude-haiku-4-5": anthropic.AsyncAnthropicBedrockMantle,
+            "claude-opus-5": anthropic.AsyncAnthropicBedrockMantle,
+        }
+        for model_id, client_type in cases.items():
+            with self.subTest(model_id=model_id):
+                provider = AnthropicProvider(model_id=model_id, platform="bedrock", aws_region="ap-south-1")
+                provider._messages()
+                self.assertIs(type(provider.client), client_type)
+
     async def test_refused_or_truncated_answers_fall_back_to_the_approved_answer(self):
         answer = AssistantAnswer(request_id="req-claude", status="complete", answer="Approved answer 1240.")
         for stop_reason in ("refusal", "max_tokens"):
