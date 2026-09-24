@@ -1,6 +1,6 @@
 """Background worker: drains queued jobs (ingestion, long agent commands, monitoring).
 
-For GURU_JOB_QUEUE=sqs it long-polls the queue; otherwise it polls the job table.
+For SAFFRON_JOB_QUEUE=sqs it long-polls the queue; otherwise it polls the job table.
 Run one or more copies next to the API in deployments that do not use the
 in-process thread queue.
 """
@@ -22,7 +22,7 @@ async def _loop(runtime, once: bool) -> None:
         raise SystemExit("the data platform is disabled; nothing to process")
     queue = platform.jobs
     consume = getattr(queue, "consume_once", None)
-    sweep_seconds = float(os.getenv("GURU_WORKER_SWEEP_SECONDS", "60"))
+    sweep_seconds = float(os.getenv("SAFFRON_WORKER_SWEEP_SECONDS", "60"))
     last_sweep = 0.0
     while True:
         if time.monotonic() - last_sweep >= sweep_seconds:
@@ -39,7 +39,7 @@ async def _loop(runtime, once: bool) -> None:
         if once:
             return
         if not handled and not callable(consume):
-            time.sleep(float(os.getenv("GURU_WORKER_POLL_SECONDS", "2")))
+            time.sleep(float(os.getenv("SAFFRON_WORKER_POLL_SECONDS", "2")))
 
 
 def main() -> None:

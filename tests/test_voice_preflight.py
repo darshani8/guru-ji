@@ -7,7 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from app.config.settings import AppSettings
-from app.domain.errors import ErrorCode, GuruJiError, PublicError
+from app.domain.errors import ErrorCode, AgenticSaffronError, PublicError
 from app.internet_intelligence.search import IntelligenceSearchUnavailable, SearchHit
 from app.providers.model_base import ModelEvent
 from app.voice.tts import SynthesizedSpeech
@@ -44,7 +44,7 @@ class _Model:
         for piece in self.pieces:
             yield ModelEvent(type="delta", text=piece)
         if self.fail:
-            raise GuruJiError(PublicError(ErrorCode.SERVICE_UNAVAILABLE, "declined", "preflight"))
+            raise AgenticSaffronError(PublicError(ErrorCode.SERVICE_UNAVAILABLE, "declined", "preflight"))
 
 
 class _Web:

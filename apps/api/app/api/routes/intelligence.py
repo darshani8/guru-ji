@@ -42,7 +42,7 @@ class InvestigateBody(BaseModel):
 def _service(request: Request):
     platform = platform_from_request(request)
     if platform.intelligence is None:
-        raise HTTPException(status_code=503, detail="internet intelligence is not configured (set GURU_INTELLIGENCE_SEARCH_PROVIDER)")
+        raise HTTPException(status_code=503, detail="internet intelligence is not configured (set SAFFRON_INTELLIGENCE_SEARCH_PROVIDER)")
     return platform
 
 

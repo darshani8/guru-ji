@@ -1,1 +1,1 @@
-"""Guru Ji institution connector service."""
+"""Agentic Saffron institution connector service."""

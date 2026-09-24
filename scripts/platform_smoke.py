@@ -2,7 +2,7 @@
 
 Uploads a small student sheet, waits for the import, asks the agent a
 question, generates a report, and downloads it. Uses the development demo
-identity, so it only works with GURU_ENVIRONMENT=development.
+identity, so it only works with SAFFRON_ENVIRONMENT=development.
 """
 
 from __future__ import annotations
@@ -13,9 +13,10 @@ import time
 import uuid
 from urllib.request import Request, urlopen
 
-BASE_URL = os.getenv("GURU_BASE_URL", "http://127.0.0.1:8000")
+# The GURU_* spelling from before the rename still works.
+BASE_URL = os.getenv("SAFFRON_BASE_URL") or os.getenv("GURU_BASE_URL") or "http://127.0.0.1:8000"
 # Override on a persistent database so each run starts from an empty institution.
-INSTITUTION = os.getenv("GURU_SMOKE_INSTITUTION", "college_a")
+INSTITUTION = os.getenv("SAFFRON_SMOKE_INSTITUTION") or os.getenv("GURU_SMOKE_INSTITUTION") or "college_a"
 HEADERS = {"Authorization": "Bearer dev-token", "X-Demo-Principal": "platform-smoke", "X-Demo-Role": "principal", "X-Demo-College": INSTITUTION}
 
 
@@ -40,7 +41,7 @@ def call(path: str, method: str = "GET", payload: dict[str, object] | None = Non
 
 
 def multipart(fields: dict[str, str], file_name: str, content: bytes) -> tuple[bytes, str]:
-    boundary = f"----guru{uuid.uuid4().hex}"
+    boundary = f"----saffron{uuid.uuid4().hex}"
     lines: list[bytes] = []
     for key, value in fields.items():
         lines.extend([f"--{boundary}".encode(), f'Content-Disposition: form-data; name="{key}"'.encode(), b"", value.encode()])

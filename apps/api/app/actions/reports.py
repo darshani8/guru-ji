@@ -64,8 +64,7 @@ class ReportService:
         if len(rows) > MAX_REPORT_ROWS:
             raise ValueError(f"report exceeds {MAX_REPORT_ROWS} rows")
         fmt = format_name.lower().strip()
-        if fmt == "excel":
-            fmt = "xlsx"
+        fmt = {"excel": "xlsx", "word": "docx", "powerpoint": "pptx", "ppt": "pptx"}.get(fmt, fmt)
         # The same minimisation the gateway applies to tool output: a principal
         # without students:read_contact never gets contact fields into a file.
         minimized_rows: list[Mapping[str, Any]] = strip_student_contact([dict(row) for row in rows], principal)

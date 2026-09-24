@@ -38,7 +38,7 @@ def ranked_entities(store: MapStore, institution_id: str, *, own_groups: Sequenc
 
     Nominated entities (holding a domain the institution configured in its
     profile) come first, then those in the institution's own sweep groups:
-    the operator's configured groups (GURU_INTELLIGENCE_SEED_GROUPS) when
+    the operator's configured groups (SAFFRON_INTELLIGENCE_SEED_GROUPS) when
     given, else the nominated entities' groups. The rest follow in group and
     name order. Nothing is dropped: a cap over the group-then-name order
     silently left out whole groups (with the bundled sweep, the pilot college

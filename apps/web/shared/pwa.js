@@ -8,7 +8,7 @@
 (function () {
   'use strict';
 
-  const DISMISS_KEY = 'guru.install.dismissed';
+  const DISMISS_KEY = 'saffron.install.dismissed';
   const isIos = /iPad|iPhone|iPod/.test(navigator.userAgent)
     || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
   const isStandalone = window.matchMedia('(display-mode: standalone)').matches
@@ -26,7 +26,7 @@
 
   function dismissed() {
     try {
-      return window.localStorage.getItem(DISMISS_KEY) === '1';
+      return window.localStorage.getItem(DISMISS_KEY) === '1' || window.localStorage.getItem('guru.install.dismissed') === '1';
     } catch {
       return false;
     }
@@ -46,7 +46,7 @@
     banner.id = 'install-banner';
     banner.className = 'install-banner';
     banner.setAttribute('role', 'region');
-    banner.setAttribute('aria-label', 'Install Guru Ji');
+    banner.setAttribute('aria-label', 'Install Agentic Saffron');
 
     const icon = document.createElement('img');
     icon.className = 'install-icon';
@@ -83,7 +83,7 @@
 
     banner.append(icon, text, actions);
     // Under the top bar, in the page flow, so it never covers the composer.
-    const topbar = document.querySelector('.topbar');
+    const topbar = document.querySelector('.topbar, .main-head');
     if (topbar) {
       topbar.after(banner);
     } else {
@@ -98,7 +98,7 @@
     event.preventDefault();
     deferredPrompt = event;
     if (dismissed()) return;
-    showBanner('Install Guru Ji as an app for quicker access.', 'Install', async () => {
+    showBanner('Install Agentic Saffron as an app for quicker access.', 'Install', async () => {
       const prompt = deferredPrompt;
       deferredPrompt = null;
       if (!prompt) return;
@@ -120,7 +120,7 @@
   const isSafari = /Safari/.test(navigator.userAgent) && !/CriOS|FxiOS|EdgiOS|OPiOS/.test(navigator.userAgent);
   if (isIos && isSafari && !isStandalone && !dismissed()) {
     window.addEventListener('load', () => {
-      showBanner('Install Guru Ji: tap Share, then “Add to Home Screen”.', null, null);
+      showBanner('Install Agentic Saffron: tap Share, then “Add to Home Screen”.', null, null);
     });
   }
 

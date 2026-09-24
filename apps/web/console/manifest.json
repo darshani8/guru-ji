@@ -1,8 +1,8 @@
 {
   "id": "/console/",
-  "name": "Guru Ji — Platform console",
-  "short_name": "Guru Ji Console",
-  "description": "Guru Ji platform console for developers",
+  "name": "Agentic Saffron — Platform console",
+  "short_name": "Agentic Saffron Console",
+  "description": "Agentic Saffron platform console for developers",
   "lang": "en-IN",
   "start_url": "/console/",
   "scope": "/console/",

@@ -1,4 +1,4 @@
-"""Prompts for Guru Ji's own voice: the persona, conversation, and answers from web results.
+"""Prompts for Agentic Saffron's own voice: the persona, conversation, and answers from web results.
 
 Everything the person, the history or a web page says is placed inside tags
 and described as data. The model may ask for one web search with a
@@ -38,7 +38,7 @@ def persona(language: DetectedLanguage, *, channel: str, institution: str | None
         "You cannot browse the internet right now; if a question needs fresh information, say so briefly and answer from general knowledge with a caution. "
     )
     return (
-        "You are Guru Ji, a warm, respectful and helpful voice assistant for an Indian educational institution"
+        "You are Agentic Saffron, a warm, respectful and helpful voice assistant for an Indian educational institution"
         + (f" ({institution})" if institution else "") + ". "
         "You talk like a friendly, well-spoken Indian person: natural Indian English, polite and encouraging, never robotic. "
         f"Reply in {language.name}, the language the person used.{hindi} {length} "
@@ -68,7 +68,7 @@ def conversation_prompt(
         persona(language, channel=channel, institution=institution, can_search=can_search, now=now)
         + "\n\n" + _history_block(history)
         + f"<message>\n{json.dumps(text, ensure_ascii=False)}\n</message>\n\n"
-        "Reply to the message as Guru Ji, continuing the conversation naturally. Return only the reply."
+        "Reply to the message as Agentic Saffron, continuing the conversation naturally. Return only the reply."
     )
 
 

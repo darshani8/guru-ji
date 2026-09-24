@@ -6,9 +6,11 @@ import time
 import unittest
 import zipfile
 from datetime import datetime, timedelta, timezone
+from unittest import mock
+from xml.etree import ElementTree
 
 from app.actions.email import EmailService, OutgoingEmail, SmtpEmailSender
-from app.actions.files import render_csv, render_pdf, render_table_pdf, render_xlsx
+from app.actions.files import FORMAT_CONTENT_TYPES, render_csv, render_docx, render_pdf, render_pptx, render_report, render_table_pdf, render_xlsx
 from app.api.platform_runtime import build_platform
 from app.config.settings import AppSettings
 from app.domain.principals import PrincipalType
@@ -80,6 +82,80 @@ class FileRendererTests(unittest.TestCase):
                 self.assertRegex(pdf[offset:offset + 12].decode("latin-1"), r"^\d+ 0 obj")
         multipage = render_pdf("Big", [f"line {i}" for i in range(200)])
         self.assertEqual(multipage.count(b"/Type /Page "), 4)
+
+
+    @staticmethod
+    def _parts(package: bytes) -> dict[str, ElementTree.Element]:
+        """Every XML part of an Office file, parsed: a malformed part fails the test."""
+
+        archive = zipfile.ZipFile(io.BytesIO(package))
+        self_check = archive.testzip()
+        assert self_check is None, self_check
+        return {name: ElementTree.fromstring(archive.read(name)) for name in archive.namelist() if name.endswith((".xml", ".rels"))}
+
+    def test_word_document_holds_a_titled_table(self):
+        w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        rows = [*self.rows, {"student_id": "MBA003", "name": "Bell\x07 <&> Kiran", "attendance_percent": 71}]
+        parts = self._parts(render_docx("Low attendance", self.columns, rows, subtitle="MBA"))
+        body = parts["word/document.xml"]
+        texts = ["".join(node.text or "" for node in paragraph.iter(f"{w}t")) for paragraph in body.iter(f"{w}p")]
+        self.assertEqual(texts[0], "Low attendance")
+        self.assertTrue(texts[1].startswith("MBA · 3 rows · Generated"), texts[1])
+        table_rows = list(body.iter(f"{w}tr"))
+        self.assertEqual(len(table_rows), 4, "a header row and one row per record")
+        self.assertIsNotNone(table_rows[0].find(f"{w}trPr/{w}tblHeader"), "the header repeats on every page")
+        self.assertIn("Attendance Percent", texts)
+        self.assertIn("Student ID", texts)
+        self.assertIn("Bell <&> Kiran", texts, "control characters dropped, markup escaped")
+        self.assertIn("docProps/core.xml", parts)
+        wide = self._parts(render_docx("Wide", [f"c{i}" for i in range(9)], rows))["word/document.xml"]
+        self.assertEqual(wide.find(f"{w}body/{w}sectPr/{w}pgSz").get(f"{w}orient"), "landscape")
+
+    def test_word_document_says_when_it_leaves_rows_out(self):
+        w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+        with mock.patch("app.actions.files.MAX_DOCX_ROWS", 2):
+            body = self._parts(render_docx("Big", self.columns, [*self.rows, *self.rows]))["word/document.xml"]
+        self.assertEqual(len(list(body.iter(f"{w}tr"))), 3)
+        note = "".join(node.text or "" for node in list(body.iter(f"{w}p"))[1].iter(f"{w}t"))
+        self.assertIn("Showing the first 2; ask for an Excel file to get every row.", note)
+
+    def test_powerpoint_deck_pages_the_rows(self):
+        a = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+        p = "{http://schemas.openxmlformats.org/presentationml/2006/main}"
+        rows = [{"student_id": f"MBA{i:03d}", "name": f"Student {i}", "attendance_percent": 60 + i % 15} for i in range(30)]
+        parts = self._parts(render_pptx("Low attendance", self.columns, rows))
+        slides = sorted(name for name in parts if name.startswith("ppt/slides/slide"))
+        self.assertEqual(len(slides), 4, "a title slide and three slides of twelve rows")
+        self.assertEqual(len(parts["ppt/presentation.xml"].findall(f"{p}sldIdLst/{p}sldId")), 4)
+        overrides = {node.get("PartName") for node in parts["[Content_Types].xml"]}
+        self.assertTrue({f"/{name}" for name in slides} <= overrides)
+        table_rows = [len(list(parts[name].iter(f"{a}tr"))) for name in slides[1:]]
+        self.assertEqual(table_rows, [13, 13, 7])
+        headings = ["".join(node.text or "" for node in parts[name].iter(f"{a}t")) for name in slides[1:]]
+        self.assertTrue(headings[2].startswith("Low attendance — rows 25–30 of 30"), headings[2])
+        empty = self._parts(render_pptx("None", self.columns, []))
+        self.assertEqual(len([name for name in empty if name.startswith("ppt/slides/slide")]), 2)
+
+    def test_powerpoint_deck_keeps_to_what_fits(self):
+        a = "{http://schemas.openxmlformats.org/drawingml/2006/main}"
+        columns = [f"c{i}" for i in range(14)]
+        with mock.patch("app.actions.files.MAX_PPTX_ROWS", 5):
+            parts = self._parts(render_pptx("Wide", columns, [{column: 1 for column in columns} for _ in range(9)]))
+        self.assertEqual(len(parts["ppt/slides/slide2.xml"].findall(f".//{a}gridCol")), 10)
+        about = "".join(node.text or "" for node in parts["ppt/slides/slide1.xml"].iter(f"{a}t"))
+        self.assertIn("Showing the first 5", about)
+        self.assertIn("Showing 10 of 14 columns.", about)
+
+    def test_every_report_format_renders_with_its_content_type(self):
+        for fmt in ("csv", "xlsx", "pdf", "docx", "pptx"):
+            content, content_type = render_report(fmt, "Low attendance", self.columns, self.rows)
+            self.assertTrue(content, fmt)
+            self.assertEqual(content_type, FORMAT_CONTENT_TYPES[fmt], fmt)
+        # A lone surrogate (JSON accepts "\\ud800") would make the file impossible to write.
+        for fmt in ("xlsx", "docx", "pptx"):
+            self.assertTrue(render_report(fmt, "Odd \ud800 title", self.columns, [{"student_id": "\ud800", "name": "x", "attendance_percent": 1}])[0], fmt)
+        workbook = render_xlsx(self.columns, [{"student_id": "MBA009", "name": "Tab\x0bbed\x00", "attendance_percent": 1}])
+        self.assertEqual(parse_xlsx("out.xlsx", workbook).tables[0].records[0].fields["name"], "Tabbed")
 
 
 class EmailAndQueueTests(unittest.IsolatedAsyncioTestCase):

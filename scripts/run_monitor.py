@@ -7,7 +7,7 @@ internet map engine instead: one tick per institution with monitoring
 enabled, each picking up where the last stopped. ``--digest`` sends each
 institution's map digest (open incidents, the review queue, what was found
 since the last digest) once its last one is 23 hours old, then applies the
-intelligence retention period (GURU_INTELLIGENCE_RETENTION_DAYS) to that
+intelligence retention period (SAFFRON_INTELLIGENCE_RETENTION_DAYS) to that
 institution's data; run it hourly (``--digest --every 3600``) so a failed
 digest is retried within the hour and a restart never sends one twice.
 Alerts go to each
@@ -29,7 +29,7 @@ async def _run(runtime, institution_id: str | None, map_mode: bool = False, dige
     platform = runtime.platform
     if map_mode or digest:
         if platform is None or platform.intelligence_map is None or platform.intelligence_map.engine is None:
-            raise SystemExit("the internet map is not enabled (GURU_INTELLIGENCE_MAP_ENABLED)")
+            raise SystemExit("the internet map is not enabled (SAFFRON_INTELLIGENCE_MAP_ENABLED)")
         institutions = [institution_id] if institution_id else platform.intelligence_store.monitored_institutions()
         if digest:
             desk, days = platform.intelligence_map.desk, runtime.settings.intelligence_retention_days
@@ -47,7 +47,7 @@ async def _run(runtime, institution_id: str | None, map_mode: bool = False, dige
             return results
         return await platform.intelligence_map.engine.tick_all(institutions)
     if platform is None or platform.monitor is None:
-        raise SystemExit("internet monitoring is not configured (GURU_INTELLIGENCE_SEARCH_PROVIDER)")
+        raise SystemExit("internet monitoring is not configured (SAFFRON_INTELLIGENCE_SEARCH_PROVIDER)")
     if institution_id:
         return [await platform.monitor.run_for(institution_id)]
     return await platform.monitor.run_all()

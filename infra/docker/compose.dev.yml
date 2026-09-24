@@ -3,38 +3,38 @@
 # connectors, keys, budgets and the one suppression key that fingerprints
 # and ownership tokens are keyed on.
 x-internet-map: &internet-map
-  GURU_INTELLIGENCE_MAP_ENABLED: "true"
-  GURU_INTELLIGENCE_SEARCH_PROVIDER: ${GURU_INTELLIGENCE_SEARCH_PROVIDER:-disabled}
-  GURU_WEB_SEARCH_API_KEY: ${GURU_WEB_SEARCH_API_KEY:-}
+  SAFFRON_INTELLIGENCE_MAP_ENABLED: "true"
+  SAFFRON_INTELLIGENCE_SEARCH_PROVIDER: ${SAFFRON_INTELLIGENCE_SEARCH_PROVIDER:-disabled}
+  SAFFRON_WEB_SEARCH_API_KEY: ${SAFFRON_WEB_SEARCH_API_KEY:-}
   # https URL or email for site owners (required in production; may stay empty in development)
-  GURU_INTELLIGENCE_CRAWLER_CONTACT: ${GURU_INTELLIGENCE_CRAWLER_CONTACT:-}
-  GURU_INTELLIGENCE_SUPPRESSION_KEY: ${GURU_INTELLIGENCE_SUPPRESSION_KEY:-}
-  GURU_INTELLIGENCE_CONNECTORS: ${GURU_INTELLIGENCE_CONNECTORS:-}
-  GURU_INTELLIGENCE_YOUTUBE_API_KEY: ${GURU_INTELLIGENCE_YOUTUBE_API_KEY:-}
-  GURU_INTELLIGENCE_INDIANKANOON_TOKEN: ${GURU_INTELLIGENCE_INDIANKANOON_TOKEN:-}
-  GURU_INTELLIGENCE_BUDGETS: ${GURU_INTELLIGENCE_BUDGETS:-}
-  GURU_INTELLIGENCE_SEED_GROUPS: ${GURU_INTELLIGENCE_SEED_GROUPS:-}
-  GURU_INTELLIGENCE_ENTITY_APPROVERS: ${GURU_INTELLIGENCE_ENTITY_APPROVERS:-}
-  GURU_INTELLIGENCE_AUTHORITY_CONTACTS: ${GURU_INTELLIGENCE_AUTHORITY_CONTACTS:-}
-  GURU_INTELLIGENCE_CERTSPOTTER_TOKEN: ${GURU_INTELLIGENCE_CERTSPOTTER_TOKEN:-}
-  GURU_INTELLIGENCE_RETENTION_DAYS: ${GURU_INTELLIGENCE_RETENTION_DAYS:-365}
+  SAFFRON_INTELLIGENCE_CRAWLER_CONTACT: ${SAFFRON_INTELLIGENCE_CRAWLER_CONTACT:-}
+  SAFFRON_INTELLIGENCE_SUPPRESSION_KEY: ${SAFFRON_INTELLIGENCE_SUPPRESSION_KEY:-}
+  SAFFRON_INTELLIGENCE_CONNECTORS: ${SAFFRON_INTELLIGENCE_CONNECTORS:-}
+  SAFFRON_INTELLIGENCE_YOUTUBE_API_KEY: ${SAFFRON_INTELLIGENCE_YOUTUBE_API_KEY:-}
+  SAFFRON_INTELLIGENCE_INDIANKANOON_TOKEN: ${SAFFRON_INTELLIGENCE_INDIANKANOON_TOKEN:-}
+  SAFFRON_INTELLIGENCE_BUDGETS: ${SAFFRON_INTELLIGENCE_BUDGETS:-}
+  SAFFRON_INTELLIGENCE_SEED_GROUPS: ${SAFFRON_INTELLIGENCE_SEED_GROUPS:-}
+  SAFFRON_INTELLIGENCE_ENTITY_APPROVERS: ${SAFFRON_INTELLIGENCE_ENTITY_APPROVERS:-}
+  SAFFRON_INTELLIGENCE_AUTHORITY_CONTACTS: ${SAFFRON_INTELLIGENCE_AUTHORITY_CONTACTS:-}
+  SAFFRON_INTELLIGENCE_CERTSPOTTER_TOKEN: ${SAFFRON_INTELLIGENCE_CERTSPOTTER_TOKEN:-}
+  SAFFRON_INTELLIGENCE_RETENTION_DAYS: ${SAFFRON_INTELLIGENCE_RETENTION_DAYS:-365}
 
 services:
   postgres:
     image: postgres:16-alpine
     environment:
-      POSTGRES_DB: guru_ji
-      POSTGRES_USER: guru_ji
-      POSTGRES_PASSWORD: guru_ji_dev_only
+      POSTGRES_DB: agentic_saffron
+      POSTGRES_USER: agentic_saffron
+      POSTGRES_PASSWORD: agentic_saffron_dev_only
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U guru_ji -d guru_ji"]
+      test: ["CMD-SHELL", "pg_isready -U agentic_saffron -d agentic_saffron"]
       interval: 5s
       timeout: 5s
       retries: 12
     ports:
       - "5432:5432"
     volumes:
-      - guru-ji-postgres:/var/lib/postgresql/data
+      - agentic-saffron-postgres:/var/lib/postgresql/data
 
   cerbos:
     image: ghcr.io/cerbos/cerbos:0.40.0
@@ -55,11 +55,11 @@ services:
       context: ../..
       dockerfile: infra/docker/Dockerfile.connector
     environment:
-      GURU_CONNECTOR_ENVIRONMENT: development
-      GURU_CONNECTOR_SERVICE_TOKEN: connector-dev-token
-      GURU_CONNECTOR_SOURCE_ID: college_a_remote
-      GURU_CONNECTOR_INSTITUTION_ID: college_a
-      GURU_CONNECTOR_ALLOWED_COLLEGE_ID: college_a
+      SAFFRON_CONNECTOR_ENVIRONMENT: development
+      SAFFRON_CONNECTOR_SERVICE_TOKEN: connector-dev-token
+      SAFFRON_CONNECTOR_SOURCE_ID: college_a_remote
+      SAFFRON_CONNECTOR_INSTITUTION_ID: college_a
+      SAFFRON_CONNECTOR_ALLOWED_COLLEGE_ID: college_a
     depends_on:
       postgres:
         condition: service_healthy
@@ -71,24 +71,24 @@ services:
       context: ../..
       dockerfile: infra/docker/Dockerfile.api
     environment:
-      GURU_ENVIRONMENT: development
-      GURU_DEV_BEARER_TOKEN: dev-token
-      GURU_PDP_MODE: cerbos
-      GURU_CERBOS_URL: http://cerbos:3592
-      GURU_CERBOS_POLICY_VERSION: guru-cerbos-v1
-      GURU_CERBOS_REQUIRE_FRESH: "false"
-      CONTROL_DATABASE_URL: postgresql://guru_ji:guru_ji_dev_only@postgres:5432/guru_ji
-      GURU_ENABLE_DEMO_DATA: "false"
-      GURU_INSTITUTION_CONNECTOR_BASE_URL: http://connector:8010
-      GURU_INSTITUTION_CONNECTOR_AUTH_TOKEN: connector-dev-token
-      GURU_CONNECTOR_SCOPE_ATTESTATION_REQUIRED: "true"
-      GURU_ALLOWED_ORIGINS: http://localhost:8000,http://localhost:5173
+      SAFFRON_ENVIRONMENT: development
+      SAFFRON_DEV_BEARER_TOKEN: dev-token
+      SAFFRON_PDP_MODE: cerbos
+      SAFFRON_CERBOS_URL: http://cerbos:3592
+      SAFFRON_CERBOS_POLICY_VERSION: guru-cerbos-v1
+      SAFFRON_CERBOS_REQUIRE_FRESH: "false"
+      CONTROL_DATABASE_URL: postgresql://agentic_saffron:agentic_saffron_dev_only@postgres:5432/agentic_saffron
+      SAFFRON_ENABLE_DEMO_DATA: "false"
+      SAFFRON_INSTITUTION_CONNECTOR_BASE_URL: http://connector:8010
+      SAFFRON_INSTITUTION_CONNECTOR_AUTH_TOKEN: connector-dev-token
+      SAFFRON_CONNECTOR_SCOPE_ATTESTATION_REQUIRED: "true"
+      SAFFRON_ALLOWED_ORIGINS: http://localhost:8000,http://localhost:5173
       # Data platform: canonical tables live in the same PostgreSQL, uploads on a volume.
-      GURU_PLATFORM_ENABLED: "true"
-      INSTITUTION_DATABASE_URL: postgresql://guru_ji:guru_ji_dev_only@postgres:5432/guru_ji
-      GURU_OBJECT_STORE: local
-      GURU_OBJECT_STORE_PATH: /app/data/objects
-      GURU_JOB_QUEUE: thread
+      SAFFRON_PLATFORM_ENABLED: "true"
+      INSTITUTION_DATABASE_URL: postgresql://agentic_saffron:agentic_saffron_dev_only@postgres:5432/agentic_saffron
+      SAFFRON_OBJECT_STORE: local
+      SAFFRON_OBJECT_STORE_PATH: /app/data/objects
+      SAFFRON_JOB_QUEUE: thread
       <<: *internet-map
     depends_on:
       postgres:
@@ -101,7 +101,7 @@ services:
       - "8000:8000"
     volumes:
       - ../../apps:/app/apps:ro
-      - guru-ji-objects:/app/data/objects
+      - agentic-saffron-objects:/app/data/objects
 
   worker:
     build:
@@ -109,25 +109,25 @@ services:
       dockerfile: infra/docker/Dockerfile.api
     command: ["python", "scripts/run_worker.py"]
     environment:
-      GURU_ENVIRONMENT: development
-      GURU_PDP_MODE: local
-      CONTROL_DATABASE_URL: postgresql://guru_ji:guru_ji_dev_only@postgres:5432/guru_ji
-      INSTITUTION_DATABASE_URL: postgresql://guru_ji:guru_ji_dev_only@postgres:5432/guru_ji
-      GURU_OBJECT_STORE: local
-      GURU_OBJECT_STORE_PATH: /app/data/objects
-      GURU_JOB_QUEUE: thread
-      GURU_ENABLE_DEMO_DATA: "true"
+      SAFFRON_ENVIRONMENT: development
+      SAFFRON_PDP_MODE: local
+      CONTROL_DATABASE_URL: postgresql://agentic_saffron:agentic_saffron_dev_only@postgres:5432/agentic_saffron
+      INSTITUTION_DATABASE_URL: postgresql://agentic_saffron:agentic_saffron_dev_only@postgres:5432/agentic_saffron
+      SAFFRON_OBJECT_STORE: local
+      SAFFRON_OBJECT_STORE_PATH: /app/data/objects
+      SAFFRON_JOB_QUEUE: thread
+      SAFFRON_ENABLE_DEMO_DATA: "true"
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
       - ../../apps:/app/apps:ro
       - ../../scripts:/app/scripts:ro
-      - guru-ji-objects:/app/data/objects
+      - agentic-saffron-objects:/app/data/objects
 
   # Scheduled internet monitoring. Opt-in: start it with
   #   docker compose --profile monitor up monitor
-  # after setting GURU_INTELLIGENCE_SEARCH_PROVIDER=tavily and the search key.
+  # after setting SAFFRON_INTELLIGENCE_SEARCH_PROVIDER=tavily and the search key.
   monitor:
     build:
       context: ../..
@@ -135,24 +135,24 @@ services:
     command: ["python", "scripts/run_monitor.py", "--every", "3600"]
     profiles: ["monitor"]
     environment:
-      GURU_ENVIRONMENT: development
-      GURU_PDP_MODE: local
-      CONTROL_DATABASE_URL: postgresql://guru_ji:guru_ji_dev_only@postgres:5432/guru_ji
-      INSTITUTION_DATABASE_URL: postgresql://guru_ji:guru_ji_dev_only@postgres:5432/guru_ji
-      GURU_OBJECT_STORE: local
-      GURU_OBJECT_STORE_PATH: /app/data/objects
-      GURU_JOB_QUEUE: inline
-      GURU_INTELLIGENCE_SEARCH_PROVIDER: ${GURU_INTELLIGENCE_SEARCH_PROVIDER:-disabled}
-      GURU_WEB_SEARCH_API_KEY: ${GURU_WEB_SEARCH_API_KEY:-}
+      SAFFRON_ENVIRONMENT: development
+      SAFFRON_PDP_MODE: local
+      CONTROL_DATABASE_URL: postgresql://agentic_saffron:agentic_saffron_dev_only@postgres:5432/agentic_saffron
+      INSTITUTION_DATABASE_URL: postgresql://agentic_saffron:agentic_saffron_dev_only@postgres:5432/agentic_saffron
+      SAFFRON_OBJECT_STORE: local
+      SAFFRON_OBJECT_STORE_PATH: /app/data/objects
+      SAFFRON_JOB_QUEUE: inline
+      SAFFRON_INTELLIGENCE_SEARCH_PROVIDER: ${SAFFRON_INTELLIGENCE_SEARCH_PROVIDER:-disabled}
+      SAFFRON_WEB_SEARCH_API_KEY: ${SAFFRON_WEB_SEARCH_API_KEY:-}
       # https URL or email for site owners (required in production; may stay empty in development)
-      GURU_INTELLIGENCE_CRAWLER_CONTACT: ${GURU_INTELLIGENCE_CRAWLER_CONTACT:-}
+      SAFFRON_INTELLIGENCE_CRAWLER_CONTACT: ${SAFFRON_INTELLIGENCE_CRAWLER_CONTACT:-}
     depends_on:
       postgres:
         condition: service_healthy
     volumes:
       - ../../apps:/app/apps:ro
       - ../../scripts:/app/scripts:ro
-      - guru-ji-objects:/app/data/objects
+      - agentic-saffron-objects:/app/data/objects
 
   # The internet map engine: one tick per institution every 15 minutes; only
   # sources that are due do any work. Opt-in like the monitor:
@@ -164,13 +164,13 @@ services:
     command: ["python", "scripts/run_monitor.py", "--map", "--every", "900"]
     profiles: ["monitor"]
     environment:
-      GURU_ENVIRONMENT: development
-      GURU_PDP_MODE: local
-      CONTROL_DATABASE_URL: postgresql://guru_ji:guru_ji_dev_only@postgres:5432/guru_ji
-      INSTITUTION_DATABASE_URL: postgresql://guru_ji:guru_ji_dev_only@postgres:5432/guru_ji
-      GURU_OBJECT_STORE: local
-      GURU_OBJECT_STORE_PATH: /app/data/objects
-      GURU_JOB_QUEUE: inline
+      SAFFRON_ENVIRONMENT: development
+      SAFFRON_PDP_MODE: local
+      CONTROL_DATABASE_URL: postgresql://agentic_saffron:agentic_saffron_dev_only@postgres:5432/agentic_saffron
+      INSTITUTION_DATABASE_URL: postgresql://agentic_saffron:agentic_saffron_dev_only@postgres:5432/agentic_saffron
+      SAFFRON_OBJECT_STORE: local
+      SAFFRON_OBJECT_STORE_PATH: /app/data/objects
+      SAFFRON_JOB_QUEUE: inline
       <<: *internet-map
     depends_on:
       postgres:
@@ -190,13 +190,13 @@ services:
     command: ["python", "scripts/run_monitor.py", "--digest", "--every", "3600"]
     profiles: ["monitor"]
     environment:
-      GURU_ENVIRONMENT: development
-      GURU_PDP_MODE: local
-      CONTROL_DATABASE_URL: postgresql://guru_ji:guru_ji_dev_only@postgres:5432/guru_ji
-      INSTITUTION_DATABASE_URL: postgresql://guru_ji:guru_ji_dev_only@postgres:5432/guru_ji
-      GURU_OBJECT_STORE: local
-      GURU_OBJECT_STORE_PATH: /app/data/objects
-      GURU_JOB_QUEUE: inline
+      SAFFRON_ENVIRONMENT: development
+      SAFFRON_PDP_MODE: local
+      CONTROL_DATABASE_URL: postgresql://agentic_saffron:agentic_saffron_dev_only@postgres:5432/agentic_saffron
+      INSTITUTION_DATABASE_URL: postgresql://agentic_saffron:agentic_saffron_dev_only@postgres:5432/agentic_saffron
+      SAFFRON_OBJECT_STORE: local
+      SAFFRON_OBJECT_STORE_PATH: /app/data/objects
+      SAFFRON_JOB_QUEUE: inline
       <<: *internet-map
     depends_on:
       postgres:
@@ -206,5 +206,5 @@ services:
       - ../../scripts:/app/scripts:ro
 
 volumes:
-  guru-ji-postgres:
-  guru-ji-objects:
+  agentic-saffron-postgres:
+  agentic-saffron-objects:

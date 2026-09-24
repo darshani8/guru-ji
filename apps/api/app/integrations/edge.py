@@ -1,6 +1,6 @@
 """Trusted LMS edge adapters.
 
-The browser never supplies Guru Ji roles or capabilities directly. An adapter
+The browser never supplies Agentic Saffron roles or capabilities directly. An adapter
 calls a configured, authenticated LMS edge endpoint and derives the principal
 from its server response, preserving only the institution scope needed for
 policy evaluation.

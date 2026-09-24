@@ -1,4 +1,4 @@
-"""Guru Ji policy decision point boundaries.
+"""Agentic Saffron policy decision point boundaries.
 
 The local PDP is useful for tests and explicit development runs. Production can
 replace it with the Cerbos adapter in this module without changing orchestration

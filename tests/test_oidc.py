@@ -31,10 +31,10 @@ class OidcAuthenticationTests(unittest.TestCase):
         cls.settings = AppSettings(
             environment="production",
             dev_bearer_token="not-used-by-production",
-            allowed_origins=("https://guru.example.test",),
+            allowed_origins=("https://saffron.example.test",),
             control_database_url="postgresql://user:password@private.example/guru",
             oidc_issuer_url="https://issuer.example.test/",
-            oidc_audience="guru-ji-api",
+            oidc_audience="agentic-saffron-api",
             oidc_jwks_url="https://issuer.example.test/.well-known/jwks.json",
             oidc_algorithms=("RS256",),
         )

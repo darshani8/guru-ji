@@ -4,7 +4,7 @@
 
 **Purpose:** Move one approved college from contract review through a limited production canary without widening institutional access, placing secrets in source control, or confusing a green local test suite with production readiness.
 
-**Scope:** One college, one institution-local connector service, read-only aggregate reporting, and the central Guru Ji API registry. This checklist does not authorize a merge, deployment, credential creation, data migration, or external system change by itself.
+**Scope:** One college, one institution-local connector service, read-only aggregate reporting, and the central Agentic Saffron API registry. This checklist does not authorize a merge, deployment, credential creation, data migration, or external system change by itself.
 
 ## Non-negotiable boundaries
 
@@ -37,7 +37,7 @@ Record the names, contact paths, and approval date before collecting credentials
 Use stable identifiers approved by the institution. Do not invent identifiers from a display name after deployment begins.
 
 - [ ] `institution_id`: `____________________`
-- [ ] `source_id` (globally unique in the Guru Ji deployment): `____________________`
+- [ ] `source_id` (globally unique in the Agentic Saffron deployment): `____________________`
 - [ ] Connector display name: `____________________`
 - [ ] Approved College ID: `____________________`
 - [ ] Approved Department IDs, if the first rollout is narrower than the college: `____________________`
@@ -81,13 +81,13 @@ The current PostgreSQL adapter expects institution-owned reporting views. If the
 Deploy `apps/connector` inside the institution-approved network boundary or an equivalently controlled private service path.
 
 - [ ] Build from the exact reviewed PR head and record the immutable image digest.
-- [ ] `GURU_CONNECTOR_ENVIRONMENT=production` is set.
-- [ ] `GURU_CONNECTOR_SOURCE_ID` equals the approved `source_id`.
-- [ ] `GURU_CONNECTOR_INSTITUTION_ID` equals the approved `institution_id`.
-- [ ] `GURU_CONNECTOR_ALLOWED_COLLEGE_ID` equals the approved College ID.
-- [ ] `GURU_CONNECTOR_ALLOWED_DEPARTMENTS` and `GURU_CONNECTOR_ALLOWED_BATCHES` are populated when the canary is intentionally narrower than the college.
-- [ ] `GURU_CONNECTOR_DATABASE_URL` is injected by the secret manager and points to PostgreSQL.
-- [ ] `GURU_CONNECTOR_SERVICE_TOKEN` is injected by the secret manager and is not `connector-dev-token`.
+- [ ] `SAFFRON_CONNECTOR_ENVIRONMENT=production` is set.
+- [ ] `SAFFRON_CONNECTOR_SOURCE_ID` equals the approved `source_id`.
+- [ ] `SAFFRON_CONNECTOR_INSTITUTION_ID` equals the approved `institution_id`.
+- [ ] `SAFFRON_CONNECTOR_ALLOWED_COLLEGE_ID` equals the approved College ID.
+- [ ] `SAFFRON_CONNECTOR_ALLOWED_DEPARTMENTS` and `SAFFRON_CONNECTOR_ALLOWED_BATCHES` are populated when the canary is intentionally narrower than the college.
+- [ ] `SAFFRON_CONNECTOR_DATABASE_URL` is injected by the secret manager and points to PostgreSQL.
+- [ ] `SAFFRON_CONNECTOR_SERVICE_TOKEN` is injected by the secret manager and is not `connector-dev-token`.
 - [ ] No demo repository is active in the production connector.
 - [ ] The service is reachable only through the approved HTTPS/private route; certificate, hostname, firewall, and service-to-service policy are verified.
 - [ ] Health and readiness checks pass:
@@ -109,7 +109,7 @@ Secrets are references in deployment configuration and values in the secret mana
 - [ ] The connector's database URL/password is stored and rotated by the approved secret manager.
 - [ ] Secret access is limited to the intended API/connector workloads; humans receive no unnecessary read access.
 - [ ] Rotation and revocation procedures have been rehearsed without placing old/new values in logs or tickets.
-- [ ] `GURU_AUDIT_FAIL_CLOSED=true` is set for production.
+- [ ] `SAFFRON_AUDIT_FAIL_CLOSED=true` is set for production.
 - [ ] Trace/log export, if enabled, is redaction-reviewed and has an owner and retention policy.
 
 ## 5. Register the first college in the central API
@@ -117,14 +117,14 @@ Secrets are references in deployment configuration and values in the secret mana
 Use a deployment-managed registry. The following is a shape example only; replace placeholders through the deployment system and never commit secret values.
 
 ```text
-GURU_ENVIRONMENT=production
-GURU_ENABLE_DEMO_DATA=false
-GURU_CONNECTOR_SCOPE_ATTESTATION_REQUIRED=true
-GURU_PDP_MODE=cerbos
-GURU_CERBOS_URL=https://<approved-private-cerbos>
-GURU_CERBOS_POLICY_VERSION=guru-cerbos-v1
+SAFFRON_ENVIRONMENT=production
+SAFFRON_ENABLE_DEMO_DATA=false
+SAFFRON_CONNECTOR_SCOPE_ATTESTATION_REQUIRED=true
+SAFFRON_PDP_MODE=cerbos
+SAFFRON_CERBOS_URL=https://<approved-private-cerbos>
+SAFFRON_CERBOS_POLICY_VERSION=guru-cerbos-v1
 
-GURU_INSTITUTION_CONNECTORS=[
+SAFFRON_INSTITUTION_CONNECTORS=[
   {
     "source_id": "first_college_remote",
     "institution_id": "first_college",
@@ -145,12 +145,12 @@ FIRST_COLLEGE_CONNECTOR_TOKEN=<injected-at-runtime-by-secret-manager>
 # Institutional data platform (ingestion, canonical data, agents). Off in
 # production unless enabled here; when enabled, every line below is required
 # and startup validation fails without them.
-GURU_PLATFORM_ENABLED=true
+SAFFRON_PLATFORM_ENABLED=true
 INSTITUTION_DATABASE_URL=postgresql://<user>:<password>@<approved-private-host>/<database>
-GURU_OBJECT_STORE=s3
-GURU_S3_BUCKET=<approved-bucket>
-GURU_JOB_QUEUE=sqs
-GURU_SQS_QUEUE_URL=https://sqs.<region>.amazonaws.com/<account>/<queue>
+SAFFRON_OBJECT_STORE=s3
+SAFFRON_S3_BUCKET=<approved-bucket>
+SAFFRON_JOB_QUEUE=sqs
+SAFFRON_SQS_QUEUE_URL=https://sqs.<region>.amazonaws.com/<account>/<queue>
 ```
 
 - [ ] The real `source_id`, `institution_id`, display name, HTTPS endpoint, and secret reference are approved before release.
@@ -163,7 +163,7 @@ GURU_SQS_QUEUE_URL=https://sqs.<region>.amazonaws.com/<account>/<queue>
 - [ ] OIDC is configured; the development bearer token is replaced; allowed browser origins are exact and non-wildcard.
 - [ ] The configured model provider is approved and non-deterministic for production; provider credentials remain server-side.
 - [ ] Configuration validation passes before deployment and startup fails rather than widening scope or enabling demo data.
-- [ ] If the data platform is enabled (`GURU_PLATFORM_ENABLED=true`), `INSTITUTION_DATABASE_URL` is PostgreSQL, `GURU_OBJECT_STORE=s3` with `GURU_S3_BUCKET`, and `GURU_JOB_QUEUE` is `thread` or `sqs` (with `GURU_SQS_QUEUE_URL` and a running `make worker` for `sqs`); the workload role holds the S3 and SQS permissions. Leave it unset (off) to deploy the assistant alone.
+- [ ] If the data platform is enabled (`SAFFRON_PLATFORM_ENABLED=true`), `INSTITUTION_DATABASE_URL` is PostgreSQL, `SAFFRON_OBJECT_STORE=s3` with `SAFFRON_S3_BUCKET`, and `SAFFRON_JOB_QUEUE` is `thread` or `sqs` (with `SAFFRON_SQS_QUEUE_URL` and a running `make worker` for `sqs`); the workload role holds the S3 and SQS permissions. Leave it unset (off) to deploy the assistant alone.
 
 ## 6. Run the repository and artifact gates
 
@@ -277,13 +277,13 @@ For each gate, attach only redacted evidence and a link or ticket ID.
 
 ### Voice conversation and internet search
 
-- [ ] The institution has approved, in its privacy notice, that the browser vendor (Google for Chrome, Microsoft for Edge, Apple for Safari) turns microphone audio into text, and that only the text reaches Guru Ji.
-- [ ] The institution has approved that open-web search queries (never personal data; the assistant refuses those) are sent to Tavily, and has recorded `GURU_WEB_SEARCHES_PER_PERSON_PER_DAY`.
-- [ ] If spoken replies use Amazon Polly (`GURU_VOICE_TTS_PROVIDER=polly`): the ECS task role has `polly:SynthesizeSpeech` in ap-south-1, and one spoken reply with Kajal was checked in English and in Hindi. Kannada replies are spoken by the device's own voice or shown as text.
+- [ ] The institution has approved, in its privacy notice, that the browser vendor (Google for Chrome, Microsoft for Edge, Apple for Safari) turns microphone audio into text, and that only the text reaches Agentic Saffron.
+- [ ] The institution has approved that open-web search queries (never personal data; the assistant refuses those) are sent to Tavily, and has recorded `SAFFRON_WEB_SEARCHES_PER_PERSON_PER_DAY`.
+- [ ] If spoken replies use Amazon Polly (`SAFFRON_VOICE_TTS_PROVIDER=polly`): the ECS task role has `polly:SynthesizeSpeech` in ap-south-1, and one spoken reply with Kajal was checked in English and in Hindi. Kannada replies are spoken by the device's own voice or shown as text.
 - [ ] `PYTHONPATH=apps/api python scripts/voice_preflight.py`, run in the deployed task, ends with `VOICE_PREFLIGHT_OK` and shows OK (not WARN) for every service the institution expects: Polly voice, conversation model, web search.
 - [ ] The identity provider either sends no explicit `guru_capabilities` claim, or its claim includes `web:search` for the roles that may search the internet.
 - [ ] A staging check on Chrome (desktop and Android) and Safari (iPhone): talk over a reply, say "stop", ask in Hindi, ask for an internet search, and confirm a record change still waits for the on-screen Confirm.
-- [ ] `GURU_VOICE_MAX_ACTIVE_SESSIONS`, `GURU_VOICE_IDLE_TIMEOUT_SECONDS` and the conversation model timeout are sized for the canary's expected concurrent users.
+- [ ] `SAFFRON_VOICE_MAX_ACTIVE_SESSIONS`, `SAFFRON_VOICE_IDLE_TIMEOUT_SECONDS` and the conversation model timeout are sized for the canary's expected concurrent users.
 
 ### Final production gate
 

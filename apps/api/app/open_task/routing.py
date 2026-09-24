@@ -6,7 +6,8 @@ handed over only when
 * the model planner said so (intent ``open_task``), or
 * it asks for something the tools cannot produce (a presentation, a Word
   document, a chart, a workbook with formulas or several sheets), even when
-  the planner matched the records it needs, or
+  the planner matched the records it needs (without this agent, the report
+  tool still lays the records out as a Word or PowerPoint table), or
 * the planner could not map it and it asks for work with a deliverable
   ("prepare a timetable", "compare our fees with ...").
 

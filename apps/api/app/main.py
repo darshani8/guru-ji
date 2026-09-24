@@ -14,7 +14,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api.dependencies import build_runtime
-from .api.error_handlers import guruji_error_handler, http_exception_handler, validation_exception_handler
+from .api.error_handlers import agentic_saffron_error_handler, http_exception_handler, validation_exception_handler
 from .api.routes.agent import router as agent_router
 from .api.routes.audit import router as audit_router
 from .api.routes.auth import router as auth_router
@@ -31,7 +31,7 @@ from .api.routes.research import router as research_router
 from .api.routes.sources import router as sources_router
 from .api.routes.voice import router as voice_router
 from .config.settings import AppSettings
-from .domain.errors import GuruJiError
+from .domain.errors import AgenticSaffronError
 from .middleware.rate_limit import RateLimitMiddleware
 from .middleware.request_id import RequestIdMiddleware
 from .middleware.request_size import RequestSizeLimitMiddleware
@@ -42,14 +42,14 @@ settings = AppSettings.from_env()
 
 
 def _configure_logging(level_name: str | None) -> None:
-    """Show the app's own log lines at GURU_LOG_LEVEL (for example INFO); unset keeps Python's warnings-only default."""
+    """Show the app's own log lines at SAFFRON_LOG_LEVEL (for example INFO); unset keeps Python's warnings-only default."""
 
     level = logging.getLevelName((level_name or "").strip().upper()) if level_name else None
     if not isinstance(level, int):
         return
     handler = logging.StreamHandler()
     handler.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
-    for name in ("guru", "app"):
+    for name in ("saffron", "app"):
         app_logger = logging.getLogger(name)
         if not app_logger.handlers:
             app_logger.addHandler(handler)
@@ -58,7 +58,7 @@ def _configure_logging(level_name: str | None) -> None:
         app_logger.propagate = False
 
 
-_configure_logging(os.getenv("GURU_LOG_LEVEL"))
+_configure_logging(os.getenv("SAFFRON_LOG_LEVEL"))
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -68,7 +68,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title=settings.app_name, description="AI-powered institutional intelligence platform: ingestion, canonical data, policy-bound agents, and internet intelligence", version=settings.version, lifespan=lifespan)
 app.state.runtime = build_runtime(settings, start_workers=True)  # the API process runs the thread queue, if configured
 atexit.register(app.state.runtime.close)
-app.add_exception_handler(GuruJiError, guruji_error_handler)  # type: ignore[arg-type]
+app.add_exception_handler(AgenticSaffronError, agentic_saffron_error_handler)  # type: ignore[arg-type]
 app.add_exception_handler(HTTPException, http_exception_handler)  # type: ignore[arg-type]
 app.add_exception_handler(RequestValidationError, validation_exception_handler)  # type: ignore[arg-type]
 app.add_middleware(RequestIdMiddleware)

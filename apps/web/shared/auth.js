@@ -1,5 +1,5 @@
 /*
- * Browser-side identity for Guru Ji.
+ * Browser-side identity for Agentic Saffron.
  *
  * The server decides which scheme it will accept and publishes that at
  * /v1/auth/config. In `demo` mode (local development only) the old fixed
@@ -20,9 +20,9 @@
 (function (global) {
   'use strict';
 
-  const TOKEN_KEY = 'guru.auth.token';
-  const VERIFIER_KEY = 'guru.auth.verifier';
-  const STATE_KEY = 'guru.auth.state';
+  const TOKEN_KEY = 'saffron.auth.token';
+  const VERIFIER_KEY = 'saffron.auth.verifier';
+  const STATE_KEY = 'saffron.auth.state';
 
   // Re-authenticate slightly early so a request cannot be sent with a token
   // that expires while it is in flight.
@@ -53,11 +53,21 @@
     }
   }
 
+  // Keys were "guru.auth.*" before the rename: a session or a sign-in in
+  // progress at that moment carries over once, under the new key.
   function readStored(key) {
     const s = store();
     if (!s) return null;
     try {
-      return s.getItem(key);
+      const value = s.getItem(key);
+      if (value !== null || !key.startsWith('saffron.')) return value;
+      const legacyKey = 'guru.' + key.slice('saffron.'.length);
+      const legacy = s.getItem(legacyKey);
+      if (legacy !== null) {
+        s.setItem(key, legacy);
+        s.removeItem(legacyKey);
+      }
+      return legacy;
     } catch {
       return null;
     }
@@ -147,6 +157,7 @@
       expiresAt: Number(claims.exp) || 0,
       subject: claims.sub || '',
       email: claims.email || '',
+      name: claims.name || claims.given_name || '',
       collegeId: firstCollegeId(claims),
     };
     writeStored(TOKEN_KEY, JSON.stringify(value));
@@ -304,6 +315,21 @@
     return '';
   }
 
+  // A stable key for things this browser keeps per person (chat history), so
+  // two people signing in on one computer never see each other's chats.
+  function userKey() {
+    if (config.mode === 'demo') return 'demo:' + demoSession.principal;
+    if (config.mode === 'oidc' && token) return 'oidc:' + (token.subject || token.email);
+    return '';
+  }
+
+  // What to call the person: their name from the identity provider, or the
+  // part of their email before the @.
+  function displayName() {
+    if (config.mode === 'oidc' && token) return token.name || (token.email || '').split('@')[0] || '';
+    return '';
+  }
+
   function collegeId() {
     if (config.mode === 'demo') return demoSession.college;
     if (config.mode === 'oidc' && token) return token.collegeId;
@@ -339,11 +365,13 @@
     global.location.reload();
   }
 
-  global.GuruAuth = {
+  global.SaffronAuth = {
     init,
     headers,
     isAuthenticated,
     currentUser,
+    userKey,
+    displayName,
     collegeId,
     signIn: beginLogin,
     signOut,

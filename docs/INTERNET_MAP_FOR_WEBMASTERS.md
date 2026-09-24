@@ -1,4 +1,4 @@
-# The Guru Ji internet map: a guide for institution web administrators
+# The Agentic Saffron internet map: a guide for institution web administrators
 
 The internet map keeps a graded list of an institution's official websites
 and social accounts, so that staff, students and families can tell the real
@@ -9,7 +9,7 @@ the map reads from your sites and how you can confirm, correct or limit it.
 ## What the crawler does
 
 * It identifies itself in the `User-Agent` header as
-  `GuruJi-InstitutionIntelligence/1.0 (+<contact>)`, where the contact is a
+  `AgenticSaffron-InstitutionIntelligence/1.0 (+<contact>)`, where the contact is a
   URL or email address of whoever runs the deployment. A production
   deployment cannot start the crawler without one, so write to that contact
   with any question or complaint about the crawler.
@@ -17,11 +17,11 @@ the map reads from your sites and how you can confirm, correct or limit it.
   without the version:
 
   ```
-  User-agent: GuruJi-InstitutionIntelligence
+  User-agent: AgenticSaffron-InstitutionIntelligence
   Disallow: /
   ```
 
-  A group written for `GuruJi-InstitutionIntelligence/1.0` is matched the
+  A group written for `AgenticSaffron-InstitutionIntelligence/1.0` is matched the
   same way (the version is ignored). Without a group of its own, the `*`
   group applies.
 * On an institution's own domain it reads the homepage and at most a few
@@ -80,7 +80,7 @@ OpenStreetMap through the Nominatim API, within Nominatim's usage policy:
 
 * requests carry the crawler's User-Agent with the operator's contact, and
   the connector cannot be enabled without one
-  (`GURU_INTELLIGENCE_CRAWLER_CONTACT`);
+  (`SAFFRON_INTELLIGENCE_CRAWLER_CONTACT`);
 * at least 15 seconds pass between requests, and each institution is
   looked up about once a month;
 * the place is searched for once; after that the chosen object is re-read
@@ -193,7 +193,7 @@ weekly check.
 
 India's Digital Personal Data Protection Act asks that data be kept no
 longer than its purpose needs, so the map has a retention period: 365 days
-by default, set by the operator (`GURU_INTELLIGENCE_RETENTION_DAYS`, 30 to
+by default, set by the operator (`SAFFRON_INTELLIGENCE_RETENTION_DAYS`, 30 to
 3650 days). It is applied every day, with the map's daily digest, and each
 time the service starts.
 

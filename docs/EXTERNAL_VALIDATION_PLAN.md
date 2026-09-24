@@ -1,4 +1,4 @@
-# Guru Ji deployment-specific external validation plan
+# Agentic Saffron deployment-specific external validation plan
 
 Status: prepared for execution; no deployment, production write, migration, credential creation, or external-system change was performed while preparing this plan.
 
@@ -8,7 +8,7 @@ This plan converts the remaining external gates in `IMPLEMENTATION_STATUS.md` in
 
 1. Use synthetic users and synthetic institutional aggregates in staging. Do not use real student records in test payloads, logs, screenshots, tickets, or chat.
 2. Store credentials only in the approved deployment secret manager. Do not place secrets in `.env` files, CI logs, test fixtures, curl history, or this document.
-3. Validate the complete trust chain: browser/API identity -> Guru Ji authorization -> Cerbos decision -> connector scope enforcement -> approved reporting view -> redacted response.
+3. Validate the complete trust chain: browser/API identity -> Agentic Saffron authorization -> Cerbos decision -> connector scope enforcement -> approved reporting view -> redacted response.
 4. A dependency outage must deny or degrade safely. It must never widen scope, enable a client-supplied role, expose raw identity fields, or silently switch production to deterministic demo data.
 5. Capture request IDs and version/image digests for every test. Record only redacted evidence.
 6. A failed security test blocks progression even if functional tests pass.
@@ -31,23 +31,23 @@ The release owner should complete this inventory without placing secret values i
 
 ### Application/API
 
-- `GURU_ENVIRONMENT=production` only in the production deployment.
+- `SAFFRON_ENVIRONMENT=production` only in the production deployment.
 - `CONTROL_DATABASE_URL`: PostgreSQL URL supplied by the secret manager.
-- `GURU_ALLOWED_ORIGINS`: exact approved browser origins; no wildcard.
-- `GURU_OIDC_ISSUER_URL`, `GURU_OIDC_AUDIENCE`, `GURU_OIDC_JWKS_URL`, and approved signing algorithms.
-- `GURU_MODEL_PROVIDER`: `litellm` or approved non-deterministic provider; never `deterministic` in production.
-- `GURU_LITELLM_MODEL_ID`, gateway URL if used, and server-side API-key reference.
-- `GURU_ENABLE_DEMO_DATA=false`.
-- `GURU_PDP_MODE=cerbos`, HTTPS Cerbos URL, policy version `guru-cerbos-v1`, and the approved freshness setting.
-- `GURU_INSTITUTION_CONNECTOR_BASE_URL` over HTTPS, source/institution IDs, connector token reference, and `GURU_CONNECTOR_SCOPE_ATTESTATION_REQUIRED=true`.
-- `GURU_AUDIT_FAIL_CLOSED=true`, retention period, and approved trace collector endpoint if enabled.
+- `SAFFRON_ALLOWED_ORIGINS`: exact approved browser origins; no wildcard.
+- `SAFFRON_OIDC_ISSUER_URL`, `SAFFRON_OIDC_AUDIENCE`, `SAFFRON_OIDC_JWKS_URL`, and approved signing algorithms.
+- `SAFFRON_MODEL_PROVIDER`: `litellm` or approved non-deterministic provider; never `deterministic` in production.
+- `SAFFRON_LITELLM_MODEL_ID`, gateway URL if used, and server-side API-key reference.
+- `SAFFRON_ENABLE_DEMO_DATA=false`.
+- `SAFFRON_PDP_MODE=cerbos`, HTTPS Cerbos URL, policy version `guru-cerbos-v1`, and the approved freshness setting.
+- `SAFFRON_INSTITUTION_CONNECTOR_BASE_URL` over HTTPS, source/institution IDs, connector token reference, and `SAFFRON_CONNECTOR_SCOPE_ATTESTATION_REQUIRED=true`.
+- `SAFFRON_AUDIT_FAIL_CLOSED=true`, retention period, and approved trace collector endpoint if enabled.
 - Approved request, model, connector, response-size, and rate-limit budgets.
 
 ### Connector/database
 
-- `GURU_CONNECTOR_ENVIRONMENT=production`.
-- A non-default `GURU_CONNECTOR_SERVICE_TOKEN` held by the secret manager.
-- `GURU_CONNECTOR_DATABASE_URL` for the institution reporting database.
+- `SAFFRON_CONNECTOR_ENVIRONMENT=production`.
+- A non-default `SAFFRON_CONNECTOR_SERVICE_TOKEN` held by the secret manager.
+- `SAFFRON_CONNECTOR_DATABASE_URL` for the institution reporting database.
 - Exact institution-approved read-only views matching the current adapter contract:
   - `public.guru_student_overview`
   - `public.guru_attendance_summary`
@@ -234,7 +234,7 @@ For the API path, assert that the API rejects an invalid scope attestation befor
 Owner: AI/platform owner. Evidence: provider configuration, model-gateway request IDs, evaluation report, cost report, and redacted trace sample.
 
 1. Configure the approved LiteLLM/model gateway through the secret manager. Do not expose the provider key to the browser or connector.
-2. Confirm production startup rejects `GURU_MODEL_PROVIDER=deterministic`.
+2. Confirm production startup rejects `SAFFRON_MODEL_PROVIDER=deterministic`.
 3. Run a synthetic evaluation set covering:
 
 - correct institution and reporting-period grounding;
@@ -297,7 +297,7 @@ Run only the adapters approved for this deployment. Each adapter must have a nam
 
 - Authentication and session scope match the text path.
 - Lifecycle and final-transcript metadata are captured as designed.
-- Raw audio is not persisted by Guru Ji.
+- Raw audio is not persisted by Agentic Saffron.
 - Disconnect, reconnect, timeout, unauthorized room, and provider outage are safe.
 - The 10-concurrent-session cap is enforced or enforced by the approved edge layer.
 

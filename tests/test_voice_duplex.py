@@ -152,7 +152,7 @@ class FullDuplexVoiceTests(unittest.TestCase):
     def test_the_browser_reports_what_it_heard_as_counts_only(self) -> None:
         websocket = self._open()
         report = {"type": "client_log", "starts": 2, "ends": 1, "interim": 9, "finals": 1, "dropped_echo": 0, "sent": 1, "restarts": 0, "errors": ["network"], "browser": "Chrome 140", "level_peak": 37}
-        with self.assertLogs("guru.voice", "INFO") as logs:
+        with self.assertLogs("saffron.voice", "INFO") as logs:
             websocket.send_json(report)
             websocket.send_json({"type": "ping"})
             self.assertEqual(websocket.receive_json(), {"type": "pong"})
@@ -268,7 +268,7 @@ class FullDuplexVoiceTests(unittest.TestCase):
 
         self.runtime.dialogue = _Broken()
         websocket = self._open(features=())
-        with self.assertLogs("guru.voice", "ERROR"):
+        with self.assertLogs("saffron.voice", "ERROR"):
             websocket.send_json({"type": "utterance", "client_message_id": "x", "text": "boom"})
             error = websocket.receive_json()
         self.assertEqual((error["type"], error["code"], error["client_message_id"]), ("error", "turn_failed", "x"))

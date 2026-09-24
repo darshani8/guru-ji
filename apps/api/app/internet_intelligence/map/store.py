@@ -378,7 +378,7 @@ def suppression_fingerprint(key: bytes, identifier: str) -> str:
 
 
 def render_sql_migration() -> str:
-    lines = [f"-- Guru Ji internet map schema {SCHEMA_VERSION}", "-- Generated from app.internet_intelligence.map.store; edit the store, not this file."]
+    lines = [f"-- Agentic Saffron internet map schema {SCHEMA_VERSION}", "-- Generated from app.internet_intelligence.map.store; edit the store, not this file."]
     lines.extend(" ".join(statement.split()) + ";" for statement in _STATEMENTS)
     lines.extend(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {column_type};" for table, column, column_type in ADDED_COLUMNS)
     lines.append("-- PostgreSQL row-level security (skipped on SQLite)")

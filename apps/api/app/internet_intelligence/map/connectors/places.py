@@ -2,7 +2,7 @@
 
 * OpenStreetMap: the Nominatim API, used within its usage policy: an
   identifying User-Agent with the operator's contact
-  (GURU_INTELLIGENCE_CRAWLER_CONTACT is required to enable it), at least
+  (SAFFRON_INTELLIGENCE_CRAWLER_CONTACT is required to enable it), at least
   15 seconds between requests, one request a month per entity, and no
   repeated searches: the object a search chose is kept on the source and
   re-read with ``/lookup`` from then on. A campus mapped in OSM often

@@ -38,7 +38,7 @@ class _Heartbeat:
         self._job_id = job_id
         self._interval = max(0.01, float(interval_seconds))
         self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._run, name=f"guru-heartbeat-{job_id[-8:]}", daemon=True)
+        self._thread = threading.Thread(target=self._run, name=f"saffron-heartbeat-{job_id[-8:]}", daemon=True)
 
     def start(self) -> None:
         self._thread.start()
@@ -169,7 +169,7 @@ class JobQueue:
         def _target() -> None:
             result["count"] = asyncio.run(self.run_pending(limit))
 
-        thread = threading.Thread(target=_target, name="guru-jobs-inline", daemon=True)
+        thread = threading.Thread(target=_target, name="saffron-jobs-inline", daemon=True)
         thread.start()
         thread.join()
         return result.get("count", 0)
@@ -204,7 +204,7 @@ class ThreadJobQueue(JobQueue):
             if self._thread is not None and self._thread.is_alive():
                 return
             self._stop.clear()
-            self._thread = threading.Thread(target=self._loop, name="guru-jobs", daemon=True)
+            self._thread = threading.Thread(target=self._loop, name="saffron-jobs", daemon=True)
             self._thread.start()
 
     def stop(self, timeout: float = 30.0) -> None:

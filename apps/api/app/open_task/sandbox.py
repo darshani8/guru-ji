@@ -39,7 +39,7 @@ from pathlib import Path
 
 from ..actions.files import FORMAT_CONTENT_TYPES
 
-logger = logging.getLogger("guru.open_task.sandbox")
+logger = logging.getLogger("saffron.open_task.sandbox")
 
 SANDBOX_MODES = ("isolated", "auto", "guarded")
 LAUNCHER = Path(__file__).with_name("_launcher.py")
@@ -187,7 +187,7 @@ class Workspace:
         self.isolated = isolated
         self._unshare = unshare
         base = config.base_dir or tempfile.gettempdir()
-        self.root = Path(tempfile.mkdtemp(prefix="guru-task-", dir=base)).resolve()
+        self.root = Path(tempfile.mkdtemp(prefix="saffron-task-", dir=base)).resolve()
         for name in ("data", "outputs", "tmp", ".config", ".cache"):
             (self.root / name).mkdir()
         os.chmod(self.root, 0o700)

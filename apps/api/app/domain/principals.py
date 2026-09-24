@@ -1,4 +1,4 @@
-"""Identity and institution-scope primitives for Guru Ji."""
+"""Identity and institution-scope primitives for Agentic Saffron."""
 
 from __future__ import annotations
 

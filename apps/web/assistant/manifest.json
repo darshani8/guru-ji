@@ -1,8 +1,8 @@
 {
   "id": "/",
-  "name": "Guru Ji — Institutional assistant",
-  "short_name": "Guru Ji",
-  "description": "Guru Ji institutional text and voice assistant",
+  "name": "Agentic Saffron — Institutional assistant",
+  "short_name": "Agentic Saffron",
+  "description": "Agentic Saffron institutional text and voice assistant",
   "lang": "en-IN",
   "start_url": "/",
   "scope": "/",

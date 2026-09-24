@@ -1,6 +1,6 @@
 openapi: 3.1.0
 info:
-  title: guru-ji-api
+  title: agentic-saffron-api
   description: 'AI-powered institutional intelligence platform: ingestion, canonical
     data, policy-bound agents, and internet intelligence'
   version: 0.1.0

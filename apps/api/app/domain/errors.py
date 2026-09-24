@@ -30,7 +30,7 @@ class PublicError:
     retry_after_seconds: int | None = None
 
 
-class GuruJiError(Exception):
+class AgenticSaffronError(Exception):
     """Base exception carrying a safe client-facing category."""
 
     def __init__(self, public_error: PublicError) -> None:
@@ -38,4 +38,4 @@ class GuruJiError(Exception):
         self.public_error = public_error
 
 
-__all__ = ["ErrorCode", "GuruJiError", "PublicError"]
+__all__ = ["ErrorCode", "AgenticSaffronError", "PublicError"]

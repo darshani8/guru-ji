@@ -30,7 +30,7 @@ from ..web_research.http_transport import WebPayloadTooLarge, read_bounded
 from .relevance import parse_published
 from .urls import domain_of
 
-USER_AGENT = "GuruJi-InstitutionIntelligence/1.0 (+https://example.invalid/robots-respecting)"
+USER_AGENT = "AgenticSaffron-InstitutionIntelligence/1.0 (+https://example.invalid/robots-respecting)"
 # robots.txt answers are re-read after a day; a failed read (server error,
 # oversize, redirect loop) disallows the site only for a short while, so one
 # outage no longer shuts a site out for the life of the process.
@@ -44,6 +44,10 @@ _CONTENT_FAMILIES = {
 _LOGIN_PATH = re.compile(r"/(?:accounts/)?log[-_]?in\b|/authwall|/signin\b|/checkpoint\b", re.IGNORECASE)
 # The "/1.0" of a robots.txt User-agent line: groups match on the product token alone.
 _ROBOTS_AGENT_VERSION = re.compile(r"^(\s*user-agent\s*:\s*[^/\s#]+)/[^\s#]*", re.IGNORECASE | re.MULTILINE)
+# The crawler's name before the product was renamed: a group a webmaster wrote
+# for it still binds the crawler, so the rename can never widen what it fetches.
+LEGACY_PRODUCT_TOKEN = "GuruJi-InstitutionIntelligence"
+_ROBOTS_AGENT_NAME = re.compile(r"^(\s*user-agent\s*:\s*)([^\s#]+)", re.IGNORECASE | re.MULTILINE)
 
 
 # Every host map/assets.py reads as a social platform, short links included (fb.me, youtu.be, t.me, wa.me),
@@ -136,14 +140,14 @@ def crawler_user_agent(contact: str | None) -> str:
     if not value:
         return USER_AGENT
     if value.startswith("https://") and " " not in value and "(" not in value and ")" not in value:
-        return f"GuruJi-InstitutionIntelligence/1.0 (+{value})"
+        return f"AgenticSaffron-InstitutionIntelligence/1.0 (+{value})"
     if re.fullmatch(r"[^@\s()]+@[^@\s()]+\.[a-zA-Z]{2,}", value):
-        return f"GuruJi-InstitutionIntelligence/1.0 (+mailto:{value})"
+        return f"AgenticSaffron-InstitutionIntelligence/1.0 (+mailto:{value})"
     raise ValueError("the crawler contact must be an https URL or an email address")
 
 
 def product_token(user_agent: str) -> str:
-    """The name robots.txt groups are matched on: "GuruJi-InstitutionIntelligence", without version or contact."""
+    """The name robots.txt groups are matched on: "AgenticSaffron-InstitutionIntelligence", without version or contact."""
 
     return user_agent.split("/", 1)[0].split(" ", 1)[0].strip()
 
@@ -152,12 +156,29 @@ def robots_lines(text: str) -> list[str]:
     """robots.txt lines with any version dropped from User-agent names.
 
     urllib's parser compares a group's name with the product token only, so
-    a group written for "GuruJi-InstitutionIntelligence/1.0" (the full
+    a group written for "AgenticSaffron-InstitutionIntelligence/1.0" (the full
     User-Agent a webmaster sees in their logs) would otherwise never match
-    and its rules would be silently ignored.
+    and its rules would be silently ignored. A group for the crawler's
+    former name applies to it too.
     """
 
-    return _ROBOTS_AGENT_VERSION.sub(r"\1", text).splitlines()
+    text = _ROBOTS_AGENT_VERSION.sub(r"\1", text)
+    return _ROBOTS_AGENT_NAME.sub(_bind_legacy_group, text).splitlines()
+
+
+def _bind_legacy_group(match: re.Match[str]) -> str:
+    """Point a group written for the old crawler name at the current one.
+
+    urllib applies a group when its name appears anywhere in the crawler's
+    product token, so "GuruJi" or "guruji-institution" bound the old crawler;
+    each such name is rewritten, so the rename never widens what is fetched.
+    """
+
+    name = match.group(2).lower()
+    current = product_token(USER_AGENT).lower()
+    if name != "*" and name in LEGACY_PRODUCT_TOKEN.lower() and name not in current:
+        return match.group(1) + product_token(USER_AGENT)
+    return match.group(0)
 
 
 def resolve_host(hostname: str) -> tuple[str, ...]:
@@ -576,4 +597,4 @@ class Retrieval:
         return self.body.decode("utf-8", errors="replace")
 
 
-__all__ = ["DEADLINE_TIMEOUTS", "DEFAULT_SNIPPET_ONLY_DOMAINS", "FetchedPage", "HTML_TYPES", "MAX_CRAWL_DELAY_SECONDS", "MAX_REDIRECTS", "MIN_HOST_INTERVAL_SECONDS", "NEVER_FETCHED_SITES", "PublicPageFetcher", "ROBOTS_FAILURE_TTL_SECONDS", "ROBOTS_MAX_BYTES", "ROBOTS_TTL_SECONDS", "Retrieval", "USER_AGENT", "crawler_user_agent", "is_public_address", "product_token", "published_from_html", "resolve_host", "robots_lines"]
+__all__ = ["DEADLINE_TIMEOUTS", "DEFAULT_SNIPPET_ONLY_DOMAINS", "FetchedPage", "HTML_TYPES", "LEGACY_PRODUCT_TOKEN", "MAX_CRAWL_DELAY_SECONDS", "MAX_REDIRECTS", "MIN_HOST_INTERVAL_SECONDS", "NEVER_FETCHED_SITES", "PublicPageFetcher", "ROBOTS_FAILURE_TTL_SECONDS", "ROBOTS_MAX_BYTES", "ROBOTS_TTL_SECONDS", "Retrieval", "USER_AGENT", "crawler_user_agent", "is_public_address", "product_token", "published_from_html", "resolve_host", "robots_lines"]

@@ -52,10 +52,10 @@ def build_action_tools(services: PlatformServices) -> tuple[PlatformToolSpec, ..
 
     return (
         PlatformToolSpec(
-            name="generate_report", group="reports", description="Create a downloadable CSV, Excel (xlsx), or PDF report from rows produced by an earlier data tool.",
+            name="generate_report", group="reports", description="Create a downloadable CSV, Excel (xlsx), PDF, Word (docx) or PowerPoint (pptx) report from rows produced by an earlier data tool.",
             required_capability=Capability.REPORTS_GENERATE, handler=generate_report, risk=RiskLevel.WRITE, returns="{report_id, download_path, row_count}",
-            parameters=(param("title", "string", "Report title", required=True, max_length=150), param("format", "string", "Output format", enum=("csv", "xlsx", "pdf"), default="xlsx"), param("columns", "array", "Column order", max_length=60), param("rows", "array", "Row objects (from a previous tool result)", items_type="object", max_length=50_000), param("subtitle", "string", "Optional subtitle", max_length=200)),
-            examples=("Create an Excel report of students below 75% attendance",),
+            parameters=(param("title", "string", "Report title", required=True, max_length=150), param("format", "string", "Output format", enum=("csv", "xlsx", "pdf", "docx", "pptx"), default="xlsx"), param("columns", "array", "Column order", max_length=60), param("rows", "array", "Row objects (from a previous tool result)", items_type="object", max_length=50_000), param("subtitle", "string", "Optional subtitle", max_length=200)),
+            examples=("Create an Excel report of students below 75% attendance", "Make a Word document of MBA students with pending fees"),
         ),
         PlatformToolSpec(name="list_reports", group="reports", description="List recently generated reports and their download paths.", required_capability=Capability.REPORTS_GENERATE, handler=list_reports, returns="{count, reports[]}", parameters=(param("limit", "integer", "Maximum rows", minimum=1, maximum=100, default=20),)),
         PlatformToolSpec(

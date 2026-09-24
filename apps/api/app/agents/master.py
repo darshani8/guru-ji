@@ -50,7 +50,7 @@ class MasterAgent:
     limits: QueryLimits = field(default_factory=QueryLimits)
     specialists: dict[str, SpecializedAgent] = field(default_factory=dict)
     background: Any | None = None  # JobQueue; set by the runtime when background execution is enabled
-    open_task: Any | None = None  # OpenTaskAgent, when GURU_OPEN_TASK_ENABLED
+    open_task: Any | None = None  # OpenTaskAgent, when SAFFRON_OPEN_TASK_ENABLED
 
     def __post_init__(self) -> None:
         if not self.specialists:

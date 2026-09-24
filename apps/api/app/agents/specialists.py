@@ -11,7 +11,7 @@ from ..gateway.gateway import ToolGateway
 from ..gateway.spec import ToolCallContext
 from .contracts import PlanStep, StepResult
 
-logger = logging.getLogger("guru.agents")
+logger = logging.getLogger("saffron.agents")
 
 STEP_FAILURE_MESSAGE = "the step could not complete because of an internal error; the details have been logged for the administrator"
 

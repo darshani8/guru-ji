@@ -103,23 +103,23 @@ def parse_institution_connectors(
     *,
     environment: Mapping[str, str] | None = None,
 ) -> tuple[InstitutionConnectorDefinition, ...]:
-    """Parse ``GURU_INSTITUTION_CONNECTORS`` JSON into unique definitions."""
+    """Parse ``SAFFRON_INSTITUTION_CONNECTORS`` JSON into unique definitions."""
 
     if not raw or not raw.strip():
         return ()
     try:
         value = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise ValueError("GURU_INSTITUTION_CONNECTORS must be a JSON array") from exc
+        raise ValueError("SAFFRON_INSTITUTION_CONNECTORS must be a JSON array") from exc
     if not isinstance(value, list):
-        raise ValueError("GURU_INSTITUTION_CONNECTORS must be a JSON array")
+        raise ValueError("SAFFRON_INSTITUTION_CONNECTORS must be a JSON array")
 
     definitions = tuple(
         InstitutionConnectorDefinition.from_mapping(item, environment=environment) for item in value
     )
     source_ids = [item.source_id for item in definitions]
     if len(set(source_ids)) != len(source_ids):
-        raise ValueError("GURU_INSTITUTION_CONNECTORS source_id values must be unique")
+        raise ValueError("SAFFRON_INSTITUTION_CONNECTORS source_id values must be unique")
     return definitions
 
 

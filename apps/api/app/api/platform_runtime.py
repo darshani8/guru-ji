@@ -100,7 +100,7 @@ class PlatformRuntime:
 
 
 def prune_intelligence(intelligence_store: IntelligenceStore, map_store: MapStore | None, days: int, *, institution_id: str | None = None) -> dict[str, dict[str, int]]:
-    """GURU_INTELLIGENCE_RETENTION_DAYS for one institution or (with none named) every one: counts per store.
+    """SAFFRON_INTELLIGENCE_RETENTION_DAYS for one institution or (with none named) every one: counts per store.
 
     Runs at start-up and with the daily map digest. The map's tables are
     pruned only while the map is on, because the map store is not opened otherwise.
@@ -248,7 +248,7 @@ def map_connectors(settings: AppSettings, *, transport: Any | None = None, cache
 
     The public-page connectors (and the owner check, which reads only the
     institution's own domains) are always on; every other one stays off
-    until GURU_INTELLIGENCE_CONNECTORS names it (and its key is configured).
+    until SAFFRON_INTELLIGENCE_CONNECTORS names it (and its key is configured).
     ``cache`` (the map store) shares open-API answers across institutions for
     Wikidata, OpenStreetMap, RDAP and the certificate log; never for YouTube
     (quota is per key) or court records (sensitive).

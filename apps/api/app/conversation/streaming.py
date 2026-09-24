@@ -6,7 +6,7 @@ arrive within ``first_text_seconds``, and the whole reply within
 ``total_seconds``. The opening is held back until it is clear it is not the
 ``[[search: ...]]`` marker, which is never spoken. Provider failures (an
 unreachable model, a refusal of the whole fallback chain) are returned, not
-raised; cancellation still propagates, so talking over Guru Ji stops the
+raised; cancellation still propagates, so talking over Agentic Saffron stops the
 generation.
 """
 
@@ -19,10 +19,10 @@ from dataclasses import dataclass
 from time import monotonic
 from typing import Any
 
-from ..domain.errors import GuruJiError
+from ..domain.errors import AgenticSaffronError
 from .prompts import split_search_request
 
-logger = logging.getLogger("guru.conversation.stream")
+logger = logging.getLogger("saffron.conversation.stream")
 
 MAX_MARKER_CHARS = 320
 
@@ -100,7 +100,7 @@ async def stream_reply(
             await release(held)
     except asyncio.CancelledError:
         raise
-    except GuruJiError:
+    except AgenticSaffronError:
         # Includes a refusal of the whole fallback chain, raised after text.
         return StreamOutcome("".join(parts), emitted, error="provider")
     except Exception:  # noqa: BLE001 - a provider bug must not end the conversation

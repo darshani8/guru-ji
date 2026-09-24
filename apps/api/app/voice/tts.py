@@ -17,7 +17,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any, Protocol
 
-logger = logging.getLogger("guru.voice.tts")
+logger = logging.getLogger("saffron.voice.tts")
 
 # Polly bills and limits by characters of input text per request.
 POLLY_MAX_TEXT_CHARS = 2900

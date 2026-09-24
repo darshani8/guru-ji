@@ -7,43 +7,43 @@
 
 .platform { width: min(100%, 1180px); min-height: 100vh; }
 .platform-body { display: grid; grid-template-columns: 210px 1fr; min-height: 0; flex: 1; }
-.platform-nav { display: flex; flex-direction: column; gap: 4px; padding: 18px 14px; border-right: 1px solid var(--line); background: #f8fbfd; }
-.platform-nav button { padding: 10px 12px; text-align: left; color: var(--navy-soft); background: transparent; border: 0; border-radius: 10px; font-size: 13px; font-weight: 750; }
-.platform-nav button.active, .platform-nav button:hover { color: var(--teal-dark); background: var(--teal-pale); }
+.platform-nav { display: flex; flex-direction: column; gap: 4px; padding: 18px 14px; border-right: 1px solid var(--border); background: var(--surface-2); }
+.platform-nav button { padding: 10px 12px; text-align: left; color: var(--text-soft); background: transparent; border: 0; border-radius: 10px; font-size: 13px; font-weight: 750; }
+.platform-nav button.active, .platform-nav button:hover { color: var(--accent-strong); background: var(--accent-soft); }
 .platform-panel { display: none; padding: 22px 26px 40px; overflow: auto; }
 .platform-panel.active { display: block; }
-.platform-panel h2 { margin: 0 0 4px; color: var(--navy); font-size: 18px; letter-spacing: -.02em; }
-.platform-panel .lede { margin: 0 0 18px; color: var(--muted); font-size: 12px; }
-.card { margin-bottom: 16px; padding: 16px 18px; background: #fff; border: 1px solid var(--line); border-radius: 14px; }
-.card h3 { margin: 0 0 10px; font-size: 13px; color: var(--navy); }
+.platform-panel h2 { margin: 0 0 4px; color: var(--text); font-size: 18px; letter-spacing: -.02em; }
+.platform-panel .lede { margin: 0 0 18px; color: var(--text-muted); font-size: 12px; }
+.card { margin-bottom: 16px; padding: 16px 18px; background: var(--surface); border: 1px solid var(--border); border-radius: 14px; }
+.card h3 { margin: 0 0 10px; font-size: 13px; color: var(--text); }
 .field-row { display: flex; flex-wrap: wrap; gap: 10px; align-items: flex-end; }
-.field-row label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 11px; font-weight: 750; }
-.field-row input, .field-row select, .field-row textarea { min-width: 160px; padding: 8px 10px; color: var(--ink); background: #fff; border: 1px solid #cfdde7; border-radius: 9px; font-size: 13px; }
+.field-row label { display: flex; flex-direction: column; gap: 4px; color: var(--text-muted); font-size: 11px; font-weight: 750; }
+.field-row input, .field-row select, .field-row textarea { min-width: 160px; padding: 8px 10px; color: var(--text); background: var(--surface); border: 1px solid var(--border-strong); border-radius: 9px; font-size: 13px; }
 .field-row textarea { min-width: 320px; min-height: 60px; }
-.btn { padding: 9px 14px; color: #fff; background: var(--teal); border: 0; border-radius: 9px; font-size: 12px; font-weight: 800; }
-.btn.secondary { color: var(--teal-dark); background: var(--teal-pale); border: 1px solid #cde8ea; }
+.btn { padding: 9px 14px; color: #fff; background: var(--accent); border: 0; border-radius: 9px; font-size: 12px; font-weight: 800; }
+.btn.secondary { color: var(--accent-strong); background: var(--accent-soft); border: 1px solid var(--border); }
 .btn.danger { background: var(--danger); }
 .btn:hover { filter: brightness(.95); }
 .table { width: 100%; border-collapse: collapse; font-size: 12px; }
-.table th, .table td { padding: 7px 8px; text-align: left; vertical-align: top; border-bottom: 1px solid #edf2f6; }
-.table th { color: var(--muted); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; }
-.pill { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 10px; font-weight: 850; letter-spacing: .05em; text-transform: uppercase; background: #eef3f7; color: var(--navy-soft); }
-.pill.ok { background: #e7f7ee; color: var(--success); }
-.pill.warn { background: #fff2d9; color: var(--warn); }
-.pill.bad { background: #fdeceb; color: var(--danger); }
-.result-box { margin-top: 12px; padding: 12px 14px; background: #f3f7fa; border: 1px solid #e7eef3; border-radius: 10px; font-size: 13px; white-space: pre-wrap; }
-.result-meta { margin-top: 8px; color: var(--muted); font-size: 11px; }
+.table th, .table td { padding: 7px 8px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--border); }
+.table th { color: var(--text-muted); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; }
+.pill { display: inline-block; padding: 2px 8px; border-radius: 99px; font-size: 10px; font-weight: 850; letter-spacing: .05em; text-transform: uppercase; background: var(--surface-2); color: var(--text-soft); }
+.pill.ok { background: var(--success-soft); color: var(--success); }
+.pill.warn { background: var(--warn-soft); color: var(--warn); }
+.pill.bad { background: var(--danger-soft); color: var(--danger); }
+.result-box { margin-top: 12px; padding: 12px 14px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 10px; font-size: 13px; white-space: pre-wrap; }
+.result-meta { margin-top: 8px; color: var(--text-muted); font-size: 11px; }
 .source-list { margin: 8px 0 0; padding-left: 18px; font-size: 12px; }
-.source-list a { color: var(--teal-dark); }
+.source-list a { color: var(--accent-strong); }
 .mapping-grid { display: grid; grid-template-columns: 1fr 1fr 80px; gap: 6px 10px; align-items: center; font-size: 12px; }
-.mapping-grid select { padding: 6px 8px; border: 1px solid #cfdde7; border-radius: 8px; font-size: 12px; }
-.muted { color: var(--muted); }
+.mapping-grid select { padding: 6px 8px; border: 1px solid var(--border-strong); border-radius: 8px; font-size: 12px; }
+.muted { color: var(--text-muted); }
 /* Layout helpers that replace inline style attributes (the CSP has no
    style-src 'unsafe-inline', so element styles are refused). */
 .field-row .grow { flex: 1; }
 .stack { margin-top: 10px; }
 .stack-sm { margin-top: 8px; }
-.link-button { padding: 0; color: var(--teal-dark); background: none; border: 0; font: inherit; text-decoration: underline; cursor: pointer; }
+.link-button { padding: 0; color: var(--accent-strong); background: none; border: 0; font: inherit; text-decoration: underline; cursor: pointer; }
 .link-button:disabled { cursor: wait; opacity: .68; }
 .stack, .result-box { overflow-x: auto; }
 .table { min-width: 520px; }
@@ -59,7 +59,7 @@
     overflow-x: auto;
     padding: 10px max(12px, env(safe-area-inset-left, 0px));
     border-right: 0;
-    border-bottom: 1px solid var(--line);
+    border-bottom: 1px solid var(--border);
     scrollbar-width: none;
   }
   .platform-nav button { flex: none; min-height: 40px; white-space: nowrap; }

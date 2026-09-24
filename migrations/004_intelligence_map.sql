@@ -1,4 +1,4 @@
--- Guru Ji internet map schema 004_intelligence_map
+-- Agentic Saffron internet map schema 004_intelligence_map
 -- Generated from app.internet_intelligence.map.store; edit the store, not this file.
 CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS intel_entities ( entity_id TEXT PRIMARY KEY, institution_id TEXT NOT NULL, kind TEXT NOT NULL, name TEXT NOT NULL, names_json TEXT NOT NULL DEFAULT '[]', locations_json TEXT NOT NULL DEFAULT '[]', group_label TEXT NOT NULL DEFAULT '', parent_id TEXT, authority TEXT NOT NULL DEFAULT 'self', status TEXT NOT NULL DEFAULT 'active', notes TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(institution_id, kind, name) );
