@@ -10,7 +10,7 @@ from app.conversation.dialogue import DialogueManager
 from app.conversation.language import detect_language
 from app.conversation.phrases import all_variants, has, keys
 from app.conversation.prompts import conversation_prompt, split_search_request
-from app.conversation.router import classify, extract_query, looks_institutional
+from app.conversation.router import classify, extract_query, looks_institutional, name_the_institution
 from app.conversation.web_search import OpenWebSearchService, personal_data_in
 from app.domain.principals import Capability, InstitutionScope, Principal, PrincipalType
 from app.internet_intelligence.search import StaticSearchProvider, hits_from_fixture
@@ -116,6 +116,7 @@ class RouterTests(unittest.TestCase):
             "hi, how many students are below 75% attendance?": ("task", None), "look up student MBA001": ("task", None),
             "What happened about our college on the internet this week?": ("task", None), "Any news online about our exam result this week?": ("task", None),
             "search the web for news about ABC College": ("task", None), "tell me a joke": ("task", None),
+            "Okay go and search the Google reviews of our College": ("task", None), "Sure can you tell me about BGS Google reviews": ("web", None),
         }
         for text, (intent, kind) in cases.items():
             result = classify(text, institution_names=("ABC College",))
@@ -127,6 +128,18 @@ class RouterTests(unittest.TestCase):
         self.assertEqual(extract_query("can you look up the capital of Australia online"), "the capital of Australia")
         self.assertEqual(extract_query("इंटरनेट पर इसरो के बारे में खोजो"), "इसरो")
         self.assertTrue(classify("what's the latest news").news)
+
+    def test_a_web_request_about_the_institution_keeps_its_search_terms(self) -> None:
+        about_us = classify("Okay go and search the Google reviews of our College", institution_names=("ABC College",))
+        self.assertEqual((about_us.intent, about_us.web_about_us, about_us.query), ("task", True, "the Google reviews of our College"))
+        self.assertFalse(classify("How many MBA students are below 75% attendance?").web_about_us)
+        self.assertEqual(extract_query("Sure can you tell me about BGS Google reviews"), "about BGS Google reviews")
+        self.assertEqual(extract_query("google who won the IPL final"), "who won the IPL final")
+        self.assertEqual(name_the_institution("the Google reviews of our College", "ABC College"), "the Google reviews of ABC College")
+        self.assertEqual(name_the_institution("ABC College placements", "ABC College"), "ABC College placements")
+        self.assertEqual(name_the_institution("placement news", "ABC College"), "placement news ABC College")
+        self.assertEqual(name_the_institution("ನಮ್ಮ ಕಾಲೇಜಿನ ವಿಮರ್ಶೆಗಳು", "ABC College"), "ABC College ವಿಮರ್ಶೆಗಳು")
+        self.assertEqual(name_the_institution("our college reviews", None), "our college reviews")
 
     def test_institutional_words(self) -> None:
         self.assertTrue(looks_institutional("What is the attendance summary?"))
@@ -308,6 +321,24 @@ class DialogueTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("निजी", reply.response.answer)
         off = await self._dialogue(web=None).respond(_turn("search the internet for ISRO"))
         self.assertEqual((off.status, off.response.refusal_reason), ("refused", "internet search is not configured"))
+
+    async def test_a_web_request_about_the_institution_searches_the_web_without_intelligence_tools(self) -> None:
+        dialogue = self._dialogue(institution_names=lambda _college: ("ABC College",))
+        reply = await dialogue.respond(_turn("Okay go and search the Google reviews of our College", who=principal(PrincipalType.FACULTY)))
+        self.assertEqual((reply.route, reply.response.intent), ("web", "web_search"))
+        self.assertEqual(self.provider.calls, ["the Google reviews of ABC College"], "the search names the college, not 'our college'")
+        student = await dialogue.respond(_turn("Okay go and search the Google reviews of our College"))
+        self.assertEqual((student.route, student.status), ("task", "needs_input"), "without intelligence:read the agent's answer stands")
+        self.assertEqual(len(self.provider.calls), 1)
+
+    async def test_google_reviews_without_search_or_intelligence_are_told_search_is_off(self) -> None:
+        model = _Model(ValueError("down"))
+        dialogue = self._dialogue(web=None, model=model, institution_names=lambda _college: ("ABC College",))
+        for text in ("Sure can you tell me about BGS Google reviews", "Okay go and search the Google reviews of our College"):
+            reply = await dialogue.respond(_turn(text, who=principal(PrincipalType.FACULTY)))
+            self.assertEqual((reply.route, reply.status, reply.response.refusal_reason), ("web", "refused", "internet search is not configured"), text)
+            self.assertIn("Internet search isn't switched on", reply.response.answer, text)
+        self.assertEqual(model.prompts, [], "neither turn waits on the model")
 
     async def test_a_slow_model_falls_back(self) -> None:
         dialogue = self._dialogue(model=_SlowModel(None), timeout_seconds=0.05)
