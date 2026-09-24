@@ -196,47 +196,91 @@ def _extract_change(text: str) -> tuple[str, Any] | None:
 
 
 # Word and PowerPoint are asked for by name, but the same words are everyday
-# college vocabulary ("attended the presentation", "attendance slides below
-# 75%", "submit their ppt"). A format word counts only where it names the file
-# to make: as the object of a making verb followed by what goes in it
-# ("create a PowerPoint of ..."), after "as"/"into" ("... as a Word document"),
-# after "in"/"to" for words that can only mean a file ("... in a PPT", "... to
-# Word"), or opening the request ("PowerPoint of ...").
+# college vocabulary: "attended the presentation", "students will make a
+# presentation", "send their ppt", "the PPT round", "trained in MS Word". A
+# format word counts only where the request is an instruction to make that
+# file, never in a question:
+# - a making verb that opens the request or a clause ("create a PowerPoint of
+#   ...", "can you prepare slides for ..."), or a sending verb with a word that
+#   can only mean a file and what goes in it ("email the HOD the PPT of ...");
+# - "as"/"into" a format, or "in"/"to" a word that can only mean a file, ending
+#   the phrase ("... as a Word document", "... in a PPT", "... to Word"), and
+#   not after a skill ("weak in PowerPoint");
+# - the request opening with the format ("PowerPoint of ..."), a "<format>
+#   format" phrase, or Hinglish ("PPT bana do", "word mein chahiye").
+# A miss only means an Excel file or no file; a false match would put records
+# into a file nobody asked for, so every rule leans towards missing.
 _DOCX_WORDS = r"(?:docx|(?:ms |microsoft )?word (?:doc|docs|document|documents|file|files|report|format)|(?:ms|microsoft) ?word)"
 _PPTX_WORDS = r"(?:pptx?s?|power ?points?(?: (?:presentation|deck|file|slides?))?|(?:slide ?)?decks?|slides?|presentations?)"
 _PPTX_FILE_WORDS = r"(?:pptx?s?|power ?points?(?: (?:presentation|deck|file|slides?))?|slide ?decks?)"
-_FILE_VERB = r"(?:make|create|prepare|generate|build|export|download|convert|produce|draft|want|need|get|send|share|email|mail|attach|put|give (?:me|us))"
-# "a", "the" or one describing word; never a possessive ("send their ppt" is not a request for a file).
-_FILE_OBJECT = r"(?:(?:me|us)\s+)?(?:(?:a|an|the|some|one)\s+)?(?:(?!(?:their|his|her|its|my|our|your)\b)[a-z]+\s+)?"
-_FILE_CONTENT = r"(?:\s+(?:of|on|for|with|about|listing|showing|covering)\b|\s*[.?!]?\s*$)"
-# A file-type phrase that names the output ("a Word document of ...", "as a PDF file"); "the Word document on leave" is a document to search.
-_OUTPUT_FILE_PHRASE = re.compile(r"(?:^\s*|\b(?:an?|as|in|into|to)\s+(?:an?\s+)?)(?:ms |microsoft )?(?:word|pdf|excel|pptx?|docx|powerpoint) (?:doc|docs|document|documents|file|files)\b")
-
-
-# Per format: the words that name it, those that may follow "as"/"into", and
-# those that may follow "in"/"to" ("in a presentation" is an event, "in a PPT"
-# a file; "in a word," is a figure of speech).
+_MAKE_VERB = r"(?:make|create|prepare|generate|build|export|convert|produce|draft|put together|draw up|turn)"
+_SEND_VERB = r"(?:send|share|email|e-mail|mail|attach|download|get|want|need|give)"
+# Opens the request or a clause, after at most a polite lead-in.
+_LEAD = r"(?:^|[,.;:!?-]\s*|\b(?:and|then)\s+)(?:(?:please|pls|kindly|can you|could you|would you|will you|i|we|just|also|now)\s+)*"
+# Who receives it, when named first ("email the HOD a PowerPoint of ..."). Not him/her/them: "send her ppt" is her own file.
+_RECIPIENT = r"(?:(?:me|us|(?:the|our)\s+(?:vice[- ]?)?(?:principal|hods?|deans?|chairman|chancellor|director|registrar|management|coordinators?))\s+)?"
+# "a", "the" and up to two describing words; never a possessive or a demonstrative.
+_FILE_OBJECT = r"(?:(?:a|an|the|some|one)\s+)?(?:(?!(?:their|his|her|its|my|our|your|the|this|that)\b)[\w-]+\s+){0,2}?"
+_FILE_CONTENT = r"(?:\s+(?:of|on|for|with|about|listing|showing|covering)\b|[.?!]?$)"
+_FILE_END = r"(?=[.,;:!?]|$|\s(?:and|to|for|with|of|please|format|file)\b)"
+_SKILL_BEFORE = re.compile(r"\b(?:weak|good|poor|strong|trained|training|skilled|skills?|expert|expertise|proficient|proficiency|certified|certification|course|workshop|fluent|typing|scored?|marks?)\s+(?:at\s+|with\s+)?$")
+_QUESTION = re.compile(r"^\s*(?:which|who|whom|whose|what|when|where|why|how|is|are|was|were|do|does|did|has|have|had|kya)\b|\?\s*$")
+# "Could you create a Word file of ...?" is a request, not a question.
+_POLITE_REQUEST = re.compile(r"^\s*(?:please\s+)?(?:can|could|would|will)\s+(?:you|i|we)\b|^\s*may\s+i\b")
+_HINGLISH_VERB = r"(?:banao|bana do|bana dijiye|banaiye|bana ke do|ready karo|taiyar karo|chahiye|bhejo|bhej do|(?:mein|me|main) (?:dena|de do|bhejo|bhej do|chahiye|convert|bana|banao|bana do|dijiye|do(?=\s*(?:[.!,]|please|$))))"
 _OFFICE_FORMATS = (
-    ("docx", _DOCX_WORDS, rf"(?:{_DOCX_WORDS}|(?:ms |microsoft )?word)", _DOCX_WORDS),
-    ("pptx", _PPTX_WORDS, _PPTX_WORDS, _PPTX_FILE_WORDS),
+    # format, its names, after "as"/"into", after "in"/"to", before a Hinglish verb
+    ("docx", _DOCX_WORDS, rf"(?:{_DOCX_WORDS}|(?:ms |microsoft )?word)", _DOCX_WORDS, r"(?:docx|(?:ms |microsoft )?word(?: (?:doc|docs|document|file|report))?)"),
+    ("pptx", _PPTX_WORDS, _PPTX_WORDS, _PPTX_FILE_WORDS, r"(?:pptx?s?|power ?points?|slides?|presentations?|(?:slide ?)?decks?)"),
 )
-# "Export ... to Word"; without such a verb "to word" is the verb ("help me to word this notice").
-_TO_WORD = re.compile(r"\b(?:export|convert|save|put|move|copy|send)\b.*\bto\s+(?:ms |microsoft )?word\b")
+_BARE_IN_WORD = re.compile(r"\bin\s+(?:ms\s+|microsoft\s+)?word(?=\s*(?:[.,;:!]|$)|\s+(?:please|format|file)\b)")
+_TO_WORD = re.compile(r"\bto\s+(?:ms\s+|microsoft\s+)?word\b(?!\s+(?:it|this|that|the|these|those|them|a|an|my|our|your|his|her|their)\b)")
+_MOVE_VERB = re.compile(r"\b(?:export|convert|save|put|move|copy|send)\b")
+# A Word or PowerPoint phrase naming the file to make, taken out of the document-question check.
+_OUTPUT_FILE_PHRASE = re.compile(r"\b(?:ms |microsoft )?(?:word|pptx?|docx|powerpoint) (?:doc|docs|document|documents|file|files)\b")
+
+
+def _not_after_skill(lowered: str, matches) -> bool:
+    return any(not _SKILL_BEFORE.search(lowered[max(0, match.start() - 40):match.start()]) for match in matches)
 
 
 def requested_office_format(lowered: str) -> str | None:
-    """docx or pptx when the request names a Word or PowerPoint file to make, else None."""
+    """docx or pptx when the request is an instruction to make a Word or PowerPoint file, else None."""
 
-    for fmt, words, after_as, after_in in _OFFICE_FORMATS:
+    lowered = " ".join(lowered.split())
+    if _QUESTION.search(lowered) and not _POLITE_REQUEST.search(lowered):
+        return None
+    for fmt, words, after_as, after_in, hinglish in _OFFICE_FORMATS:
         if (
-            re.search(rf"\b{_FILE_VERB}\s+{_FILE_OBJECT}{words}{_FILE_CONTENT}", lowered)
-            or re.search(rf"\b(?:as|into)\s+(?:(?:a|an)\s+)?{after_as}\b", lowered)
-            or re.search(rf"\b(?:in|to)\s+(?:(?:a|an)\s+)?{after_in}\b", lowered)
-            or re.match(rf"\s*(?:(?:a|an)\s+)?{words}\s+(?:of|on|for|with)\b", lowered)
-            or (fmt == "docx" and _TO_WORD.search(lowered))
+            re.search(rf"{_LEAD}{_MAKE_VERB}\s+{_RECIPIENT}{_FILE_OBJECT}{words}{_FILE_CONTENT}", lowered)
+            or re.search(rf"{_LEAD}{_SEND_VERB}\s+{_RECIPIENT}{_FILE_OBJECT}{after_in}\s+(?:of|listing|showing|covering)\b", lowered)
+            or re.search(rf"\b(?:as|into)\s+(?:(?:a|an)\s+)?{after_as}{_FILE_END}", lowered)
+            or _not_after_skill(lowered, re.finditer(rf"\b(?:in|to)\s+(?:(?:a|an)\s+)?{after_in}{_FILE_END}", lowered))
+            or re.match(rf"(?:(?:a|an)\s+)?{words}\s+(?:of|for|with)\b", lowered) and not re.search(r"\b(?:is|are|was|were|will be|scheduled)\b", lowered)
+            or re.search(rf"\s[-\u2013\u2014:]\s*(?:(?:as|in)\s+)?(?:(?:a|an)\s+)?{words}(?:\s+please)?[.!]?$", lowered)
+            or re.search(rf"\b{hinglish}\s+{_HINGLISH_VERB}", lowered)
+            or fmt == "docx" and (re.search(r"\b(?:ms |microsoft )?word format\b", lowered) or _not_after_skill(lowered, _BARE_IN_WORD.finditer(lowered)))
+            or fmt == "pptx" and re.search(r"\b(?:pptx?|power ?point|slides?) format\b", lowered)
         ):
             return fmt
+        if fmt == "docx":
+            for match in _TO_WORD.finditer(lowered):
+                clause = re.split(r"[,.;!?]", lowered[max(0, match.start() - 120):match.start()])[-1]
+                if _MOVE_VERB.search(clause):
+                    return fmt
     return None
+
+
+def strip_output_file_phrase(lowered: str) -> str:
+    """Take the Word/PowerPoint phrase naming the file to make out of the document-question check.
+
+    "a Word document on maternity leave" names a document to search and stays.
+    """
+
+    def keep_or_drop(match: re.Match[str]) -> str:
+        return match.group(0) if re.match(r"\s+(?:on|about|regarding)\b", lowered[match.end():]) else " "
+
+    return _OUTPUT_FILE_PHRASE.sub(keep_or_drop, lowered)
 
 
 def extract_entities(text: str, vocabulary: Vocabulary) -> ExtractedEntities:
@@ -317,8 +361,9 @@ class DeterministicPlanner:
                     add("get_institution_summary", {}, "combine internal indicators with public information")
             return AgentPlan(intent, steps, summary="Investigate public web sources about the institution.", planner=self.planner_name, entities=entities.as_dict())
         # -- 3. documents ---------------------------------------------------------
-        # "a Word document of ..." names the file to make, not a document to search.
-        topic = _OUTPUT_FILE_PHRASE.sub(" ", lowered)
+        # "a Word document of ..." names the file to make, not a document to search;
+        # anything that is not a Word or PowerPoint request is checked as before.
+        topic = strip_output_file_phrase(lowered) if entities.report_format in {"docx", "pptx"} else lowered
         if re.search(r"\b(policy|policies|circular|rule|rules|regulation|guideline|guidelines|handbook|procedure|according to|what does the .* say|document|notice|syllabus|code of conduct)\b", topic) and not re.search(r"\battendance (?:below|under|less)", lowered):
             intent = "document_question"
             if (plan := missing("search_documents")):
@@ -615,4 +660,4 @@ def vocabulary_from_registry(registry: PlatformToolRegistry) -> list[str]:
     return list(registry.names())
 
 
-__all__ = ["DeterministicPlanner", "ExtractedEntities", "ModelPlanner", "Vocabulary", "extract_entities", "requested_office_format", "vocabulary_from_registry"]
+__all__ = ["DeterministicPlanner", "ExtractedEntities", "ModelPlanner", "Vocabulary", "extract_entities", "requested_office_format", "strip_output_file_phrase", "vocabulary_from_registry"]

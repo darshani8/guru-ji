@@ -309,7 +309,7 @@ class AppSettings:
             environment=environment,
             allowed_origins=origins,
             dev_bearer_token=os.getenv("SAFFRON_DEV_BEARER_TOKEN", "dev-token"),
-            control_database_url=os.getenv("CONTROL_DATABASE_URL", "sqlite:///./data/agentic_saffron.db"),
+            control_database_url=os.getenv("CONTROL_DATABASE_URL", _default_control_database_url()),
             oidc_issuer_url=os.getenv("SAFFRON_OIDC_ISSUER_URL") or None,
             oidc_audience=os.getenv("SAFFRON_OIDC_AUDIENCE") or None,
             oidc_jwks_url=os.getenv("SAFFRON_OIDC_JWKS_URL") or None,

@@ -25,6 +25,22 @@ class LegacyEnvironmentNameTests(unittest.TestCase):
         self.assertEqual(settings.app_name, "legacy-task")
         self.assertEqual(settings.voice_tts_provider, "polly")
 
+    def test_a_local_database_from_before_the_rename_keeps_being_used(self):
+        import tempfile
+
+        previous = os.getcwd()
+        with tempfile.TemporaryDirectory() as folder, mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("CONTROL_DATABASE_URL", None)
+            try:
+                os.chdir(folder)
+                os.mkdir("data")
+                open("data/guru_ji.db", "wb").close()
+                self.assertEqual(AppSettings.from_env().control_database_url, "sqlite:///./data/guru_ji.db")
+                open("data/agentic_saffron.db", "wb").close()
+                self.assertEqual(AppSettings.from_env().control_database_url, "sqlite:///./data/agentic_saffron.db")
+            finally:
+                os.chdir(previous)
+
     def test_connector_reads_the_legacy_names_too(self):
         from connector.app.main import ConnectorSettings
 

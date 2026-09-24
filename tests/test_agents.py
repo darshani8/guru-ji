@@ -46,6 +46,11 @@ class PlannerTests(unittest.TestCase):
             "Download MBA students below 75% attendance as a word document": "docx",
             "Word document of students with pending fees": "docx",
             "Put MBA students below 75% attendance in Microsoft Word": "docx",
+            "Could you create a Word file of students with pending fees?": "docx",
+            "Can you make the pending fee list into a Word document?": "docx",
+            "Students with pending fees - PowerPoint please": "pptx",
+            "Email the HOD a PowerPoint of MBA students below 75% attendance": "pptx",
+            "MBA students below 75% attendance ka PPT bana do": "pptx",
             "Create a PowerPoint of students with pending fees": "pptx",
             "Prepare slides of MBA students below 75% attendance": "pptx",
             "Export MBA students below 75% attendance as a PowerPoint": "pptx",
@@ -79,9 +84,18 @@ class PlannerTests(unittest.TestCase):
             "Summarize the Word document on maternity leave": ["search_documents"],
             "Open the PDF document on anti-ragging": ["search_documents"],
             "Download the Word document on maternity leave": ["search_documents"],
+            "Is the leave policy available as a PDF document?": ["search_documents"],
+            "Share the PDF document on anti-ragging with MBA students": ["search_documents"],
         }
         for text, expected in cases.items():
             self.assertEqual([step.tool for step in self.planner.plan(text, self.tools, self.vocab).steps], expected, text)
+        # A talk someone gives, a deck someone sends, a skill, a question: never a Word or PowerPoint file.
+        for text in (
+            "MBA students will make a presentation on Monday", "Send the slides of the orientation to MBA students", "Group MBA students into presentation batches",
+            "List students who are weak in PowerPoint", "Which faculty are trained in MS Word?", "Ask Priya to send her ppt of the seminar",
+            "Which students have not submitted the PPT?", "Presentation on AI is at 3 pm for MBA students", "Help me to word the message about exams",
+        ):
+            self.assertNotIn(extract_entities(text, self.vocab).report_format, {"docx", "pptx"}, text)
 
     def test_plans_for_representative_commands(self):
         cases = {
