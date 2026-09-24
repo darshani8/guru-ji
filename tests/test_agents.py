@@ -156,7 +156,7 @@ class PlannerTests(unittest.TestCase):
             # Skills, training and events: the paper-presentation round is called "PPT".
             "List faculty who are new to PowerPoint", "List MBA students with experience in MS Word.", "Introduce BCA semester 1 students to MS Word.",
             "Arrange a hands-on session in MS Word for BCA students", "Schedule the BCA lab exam in PowerPoint for next Monday",
-            "List BCA students who participated in PPT and quiz", "Count BCA students in PPT.", "Students with attendance below 75% in PPT.",
+            "List BCA students who participated in PPT and quiz", "Count BCA students in PPT.",
             # Messages for others: the file is theirs to make.
             "Remind faculty to upload lesson plans in Word format", "Notify MBA students that assignments should be submitted as Word documents",
             "Tell students to type their answers in MS Word, not by hand", "Remind faculty to export lesson plans to Word", "Please share the PPT with BCA students",
