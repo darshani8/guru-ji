@@ -4,9 +4,10 @@ Small talk is only a turn that is nothing but a greeting, thanks, a goodbye or
 a question about the assistant itself. A web turn needs an explicit web phrase
 ("search the internet for", "latest news", "इंटरनेट पर", "ಇಂಟರ್ನೆಟ್‌ನಲ್ಲಿ");
 if it is about the institution itself ("our college online") it stays an
-institutional task, which goes to the internet-intelligence tools. Everything
-else is a task for the master agent, whose "could not map" becomes free
-conversation one level up.
+institutional task, which goes to the internet-intelligence tools, and carries
+its search terms for the open-web search where those tools are not set up.
+Everything else is a task for the master agent, whose "could not map" becomes
+free conversation one level up.
 """
 
 from __future__ import annotations
@@ -72,13 +73,20 @@ _SELF_REFERENCE = re.compile(
 _QUERY_NOISE = re.compile(
     r"\b(internet|net|google) (pe|par|mein)\b|\b(search|google) (karo|kariye|kijiye|karke batao)\b|\bke baa?re (mein|me)\b"
     r"|\b(dhoondo|dhundo|khojo|batao|bataiye|dekho)\b"
-    r"|^(please|can you|could you|would you|kindly|hey|ok|okay|guru ?ji)\s+"
+    r"|^((please|can you|could you|would you|kindly|hey|ok|okay|sure|alright|go and|guru ?ji)\s+)+"
     r"|\b(please|kindly)\b"
-    r"|\b(search|google|look up|lookup|find|check|browse)( (for|about|on))?\b"
+    # "Google" is the verb in "google who won", but the subject in "Google reviews".
+    r"|\b(search|google(?!\s+(reviews?|ratings?|maps))|look up|lookup|find|check|browse)( (for|about|on))?\b"
     r"|\b(on|from|in|using|via) (the )?(internet|web|google|net)\b|\b(the )?(internet|web) (for|about)\b|\bonline\b|\binternet\b"
     r"|\b(and )?(tell|let) me( know)?\b"
     r"|इंटरनेट पर|इन्टरनेट पर|गूगल पर|ऑनलाइन|खोजो|खोजिए|ढूंढो|सर्च करो|बताओ|बताइए|के बारे में"
     r"|ಇಂಟರ್ನೆಟ್‌ನಲ್ಲಿ|ಇಂಟರ್ನೆಟ್ ನಲ್ಲಿ|ಗೂಗಲ್‌ನಲ್ಲಿ|ಹುಡುಕಿ|ಹುಡುಕು|ಹೇಳಿ|ಬಗ್ಗೆ",
+    re.IGNORECASE,
+)
+# "Our college" in a search query, which a search engine cannot resolve.
+_OUR_INSTITUTION = re.compile(
+    r"\b(our|my|this) (college|institution|institute|university|campus|school)\b|\bnamma (college|kaleju)\b|\bhamar[ae] (college|sanstha)\b"
+    r"|हमारे कॉलेज|हमारा कॉलेज|हमारी संस्था|मेरे कॉलेज|ನಮ್ಮ ಕಾಲೇಜ[ಀ-೿]*|ನಮ್ಮ ಸಂಸ್ಥೆ[ಀ-೿]*",
     re.IGNORECASE,
 )
 
@@ -104,6 +112,8 @@ class Classification:
     small_talk: SmallTalkKind | None = None
     query: str | None = None
     news: bool = False
+    # A web request about the institution itself: a task, with its search terms kept.
+    web_about_us: bool = False
 
 
 def _normalise(text: str) -> str:
@@ -134,6 +144,15 @@ def extract_query(text: str) -> str:
     return query if len(query) >= 2 else " ".join(text.split())
 
 
+def name_the_institution(query: str, name: str | None) -> str:
+    """Put the institution's name in a search query ("Google reviews of our college" -> "Google reviews of ABC College")."""
+
+    if not name:
+        return query
+    named = _OUR_INSTITUTION.sub(name, query)
+    return named if name.lower() in named.lower() else f"{named} {name}"
+
+
 def classify(text: str, *, institution_names: tuple[str, ...] = ()) -> Classification:
     normalised = _normalise(text)
     kind = _small_talk(normalised)
@@ -144,10 +163,12 @@ def classify(text: str, *, institution_names: tuple[str, ...] = ()) -> Classific
     )
     direct = _WEB_DIRECT.search(normalised)
     anchored = _WEB_ANCHOR.search(normalised) and _WEB_VERB.search(normalised)
-    if (direct or anchored) and not about_us:
+    if direct or anchored:
         news = bool(re.search(r"news|headline|latest|today|breaking|खबर|समाचार|ಸುದ್ದಿ", normalised))
+        if about_us:
+            return Classification("task", query=extract_query(text)[:300], news=news, web_about_us=True)
         return Classification("web", query=extract_query(text)[:300], news=news)
     return Classification("task")
 
 
-__all__ = ["Classification", "classify", "extract_query", "looks_institutional"]
+__all__ = ["Classification", "classify", "extract_query", "looks_institutional", "name_the_institution"]

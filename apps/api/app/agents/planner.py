@@ -257,7 +257,7 @@ class DeterministicPlanner:
         if re.search(r"\b(update|change|set|correct|modify)\b", lowered) and re.search(r"\b(student|record|usn|roll)\b", lowered) and not entities.field_change:
             return AgentPlan("update_student_record", clarification="Tell me the student ID, the field to change (phone, email, semester, section, status, address), and the new value.", planner=self.planner_name, entities=entities.as_dict())
         # -- 2. internet intelligence ----------------------------------------
-        internet = re.search(r"\b(internet|online|news|web|website|social media|socials|public(?:ly)? (?:posted|available)|what happened|what'?s happening|mentions?|reputation|press|coverage|trending)\b", lowered)
+        internet = re.search(r"\b(internet|online|news|web|website|google|reviews|ratings|social media|socials|public(?:ly)? (?:posted|available)|what happened|what'?s happening|mentions?|reputation|press|coverage|trending)\b", lowered)
         overview = re.search(r"\b(overview|complete update|full update|status of (?:our|the) (?:college|institution)|how (?:is|are) (?:our|the) (?:college|institution)|summary of (?:our|the) (?:college|institution))\b", lowered)
         if internet:
             intent = "internet_intelligence"

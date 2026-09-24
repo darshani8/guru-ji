@@ -487,6 +487,8 @@ class IntelligenceServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status, "complete")
         self.assertEqual(response.steps[0].tool, "internet_investigate")
         self.assertTrue(all(source.get("url") for source in response.sources))
+        reviews = await fx.agent.handle(AgentCommand("r2", self.pri, InstitutionScope("college_a"), "Okay go and search the Google reviews of our College"))
+        self.assertEqual(reviews.steps[0].tool, "internet_investigate")
 
 
 class _CountingProvider:

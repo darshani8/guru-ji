@@ -31,7 +31,7 @@ from .contracts import Reply, Turn
 from .language import DetectedLanguage, detect_language
 from .phrases import phrase
 from .prompts import conversation_prompt, split_search_request, web_answer_prompt
-from .router import classify, looks_institutional
+from .router import classify, looks_institutional, name_the_institution
 from .streaming import StreamOutcome, stream_reply
 from .web_search import OpenWebSearchService, WebFindings, WebSearchRefused
 
@@ -85,7 +85,8 @@ class DialogueManager:
             elif classification.intent == "web":
                 reply = await self._web(turn, language, classification.query or turn.text, news=classification.news, on_progress=on_progress, on_speech=on_speech)
             else:
-                reply = await self._task(turn, language, converse_on_unknown=True, on_progress=on_progress, on_speech=on_speech)
+                web_query = classification.query if classification.web_about_us else None
+                reply = await self._task(turn, language, converse_on_unknown=True, web_query=web_query, news=classification.news, on_progress=on_progress, on_speech=on_speech)
         if reply.route != "task":
             self._audit(turn, reply, started)
         self.tracer.record("conversation.turn", trace_id=turn.request_id, attributes={
@@ -192,7 +193,8 @@ class DialogueManager:
         started = monotonic()
         if self.web is None:
             if self.model is not None:
-                return await self._converse(turn, language, on_speech=on_speech)
+                # Should the model fail too, the person hears why nothing was searched.
+                return await self._converse(turn, language, fallback=phrase("web_off", language), on_speech=on_speech)
             return self._reply(turn, "web", language, phrase("web_off", language), status="refused", intent="web_search", refusal_reason="internet search is not configured", started=started)
         if on_progress is not None:
             await on_progress("web_search", phrase("web_filler", language), language)
@@ -241,7 +243,8 @@ class DialogueManager:
         mode = turn.mode or ("agent" if turn.channel == "text" else self.voice_agent_mode)
         return mode == "agent"
 
-    async def _task(self, turn: Turn, language: DetectedLanguage, *, converse_on_unknown: bool, on_progress: Progress | None = None, on_speech: Speech | None = None) -> Reply:
+    async def _task(self, turn: Turn, language: DetectedLanguage, *, converse_on_unknown: bool, web_query: str | None = None, news: bool = False,
+                    on_progress: Progress | None = None, on_speech: Speech | None = None) -> Reply:
         if self._use_agent(turn):
             if on_progress is not None:
                 # From here the turn may change records: a voice interrupt
@@ -251,6 +254,11 @@ class DialogueManager:
                 turn.request_id, turn.principal, turn.scope, turn.text, turn.channel, turn.conversation_id, turn.approval_id, turn.run_in_background,
             )
             response: AgentResponse = await self.agent.handle(command)  # type: ignore[union-attr]
+            if web_query is not None and self._intelligence_missing(turn, response):
+                if on_progress is not None:
+                    await on_progress("conversation", "", language)
+                query = name_the_institution(web_query, self._institution(turn))
+                return await self._web(turn, language, query, news=news, on_progress=on_progress, on_speech=on_speech)
             if converse_on_unknown and self._unmapped(response):
                 if on_progress is not None:
                     # The agent changed nothing: the conversation that follows may be cut short.
@@ -277,6 +285,18 @@ class DialogueManager:
             response.intent == "document_question" and isinstance(confidence, (int, float)) and confidence < 0.5
             and not response.sources and response.status in {"complete", "partial", "failed"}
         )
+
+    def _intelligence_missing(self, turn: Turn, response: AgentResponse) -> bool:
+        """A web request about the institution that no internet-intelligence tool took.
+
+        Where those tools are not set up, a person allowed to use them gets the
+        open-web search instead; anyone else keeps the agent's own answer.
+        """
+
+        if not turn.principal.has_capability(Capability.INTELLIGENCE_READ):
+            return False
+        # The planner asks for internet_investigate by name when it is not registered.
+        return self._unmapped(response) or (response.status == "needs_input" and response.intent == "internet_intelligence")
 
     async def _institutional_reply(self, turn: Turn, language: DetectedLanguage, response: AgentResponse | AssistantAnswer) -> Reply:
         response = await self._localise(response, language)

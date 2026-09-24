@@ -44,6 +44,7 @@ class PlannerTests(unittest.TestCase):
             "Who is the HOD of Computer Science department?": ["find_hod"],
             "What is the leave policy?": ["search_documents"],
             "What happened about our college on the internet this week?": [],
+            "Okay go and search the Google reviews of our College": [],
             "Give me an overview of our institution": ["get_institution_summary"],
             "how many students": ["count_students"],
             "Update the email of student MBA002 to new@abc.edu.in": ["update_student_record"],
@@ -57,6 +58,7 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(emailed.steps[3].depends_on, ("s2", "s3"))
         internet = self.planner.plan("What happened about our college on the internet this week?", self.tools, self.vocab)
         self.assertIsNotNone(internet.clarification, "no intelligence service registered -> clarification")
+        self.assertEqual(self.planner.plan("Okay go and search the Google reviews of our College", self.tools, self.vocab).intent, "internet_intelligence")
 
     def test_change_value_stops_at_conjunctions_and_clause_boundaries(self):
         cases = {
