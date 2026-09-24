@@ -10,6 +10,9 @@
 const LANGUAGES = ['en-IN', 'hi-IN', 'kn-IN'];
 const HISTORY_TURNS = 12;
 const HISTORY_TURN_CHARS = 1000;
+// What the server keeps of the history (MAX_HISTORY_CHARS); more would only
+// make a voice message too large for the socket in Hindi or Kannada.
+const HISTORY_TOTAL_CHARS = 6000;
 // A spoken turn ends after this much quiet, so "search the internet for" and
 // "the latest ISRO launch" said with a pause become one request.
 const TURN_QUIET_MS = 700;
@@ -39,6 +42,10 @@ const TITLE_CHARS = 60;
 // A background task (the open-task agent on a queue) is followed until done.
 const JOB_POLL_MS = 4000;
 const JOB_FOLLOW_MS = 20 * 60 * 1000;
+// Only this server's own report downloads are ever fetched with the identity.
+const REPORT_PATH = /^\/v1\/reports\/[\w-]+\/download$/;
+// Blockquotes nest no deeper than this; beyond it the text shows as it is.
+const MAX_QUOTE_DEPTH = 4;
 // Warnings worth showing under an answer; the rest are for operators.
 const NOTE_CODES = new Set(['list_truncated', 'empty_report', 'email_failed', 'email_no_recipients', 'unresolved_recipients', 'email_delivery_error', 'step_not_executed']);
 const STATUS_LABELS = {
@@ -69,7 +76,10 @@ const state = {
   utterance: null,
   voiceTransportReady: false,
   intentionalClose: false,
-  requestInFlight: false,
+  // Chats with a typed question still waiting for its answer, and the
+  // "Thinking…" shown for each while it is open.
+  inFlight: new Set(),
+  textThinking: new Map(),
   finalResultKeys: new Set(),
   voiceCommands: new Map(),
   // Which chat (and which question in it) each spoken turn belongs to, so the
@@ -81,6 +91,7 @@ const state = {
   conversation: null,
   conversations: [],
   historyQuery: '',
+  renaming: null,
   followedJobs: new Set(),
   language: loadLanguage(),
   pendingTurn: '',
@@ -255,7 +266,7 @@ function externalLink(href, text) {
 // ------------------------------------------------------------------ Markdown
 // Answers may carry light Markdown. It is built node by node, never parsed as
 // HTML, so nothing in an answer can become markup or script.
-const INLINE = /\*\*([^*\n]+)\*\*|__([^_\n]+)__|`([^`\n]+)`|\[([^\]\n]+)\]\(([^)\s]+)\)|(https?:\/\/[^\s<>"'()]+[^\s<>"'().,;:!?])|\*([^*\s\n](?:[^*\n]*[^*\s\n])?)\*/g;
+const INLINE = /\*\*([^*\n]+)\*\*|`([^`\n]+)`|\[([^\]\n]+)\]\(([^)\s]+)\)|(https?:\/\/[^\s<>"'()]+[^\s<>"'().,;:!?])|\*([^*\s\n](?:[^*\n]*[^*\s\n])?)\*/g;
 const BULLET = /^\s*[-*•]\s+/;
 const ORDERED = /^\s*(\d{1,3})[.)]\s+/;
 const TABLE_RULE = /^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)*\|?$/;
@@ -264,10 +275,10 @@ function appendInline(parent, text) {
   let last = 0;
   for (const match of text.matchAll(INLINE)) {
     if (match.index > last) parent.append(text.slice(last, match.index));
-    const [whole, bold, boldAlt, code, linkText, linkUrl, bare, italic] = match;
-    if (bold || boldAlt) {
+    const [whole, bold, code, linkText, linkUrl, bare, italic] = match;
+    if (bold) {
       const strong = el('strong');
-      appendInline(strong, bold || boldAlt);
+      appendInline(strong, bold);
       parent.append(strong);
     } else if (code) {
       parent.append(el('code', '', code));
@@ -314,7 +325,15 @@ function markdownTable(rows) {
   return wrap;
 }
 
-function renderMarkdown(container, source) {
+// "## Title ##" -> "Title", in one pass: a regex here is slow on long runs of spaces.
+function stripClosingHashes(text) {
+  let end = text.length;
+  while (end > 0 && text[end - 1] === '#') end -= 1;
+  if (end === text.length || (end > 0 && text[end - 1] !== ' ' && text[end - 1] !== '\t')) return text;
+  return text.slice(0, end).trimEnd();
+}
+
+function renderMarkdown(container, source, depth = 0) {
   container.replaceChildren();
   const lines = String(source || '').replace(/\r\n?/g, '\n').split('\n');
   let paragraph = [];
@@ -356,7 +375,7 @@ function renderMarkdown(container, source) {
     if (heading) {
       flush();
       const node = el(heading[1].length <= 2 ? 'h3' : 'h4');
-      appendInline(node, heading[2].replace(/\s+#+$/, ''));
+      appendInline(node, stripClosingHashes(heading[2]));
       container.append(node);
       index += 1;
       continue;
@@ -378,7 +397,7 @@ function renderMarkdown(container, source) {
       container.append(markdownTable(rows));
       continue;
     }
-    if (/^>\s?/.test(trimmed)) {
+    if (/^>\s?/.test(trimmed) && depth < MAX_QUOTE_DEPTH) {
       flush();
       const quoted = [];
       while (index < lines.length && /^>\s?/.test(lines[index].trim())) {
@@ -386,7 +405,7 @@ function renderMarkdown(container, source) {
         index += 1;
       }
       const quote = el('blockquote');
-      renderMarkdown(quote, quoted.join('\n'));
+      renderMarkdown(quote, quoted.join('\n'), depth + 1);
       container.append(quote);
       continue;
     }
@@ -455,17 +474,27 @@ const HistoryStore = (() => {
           db.createObjectStore(HISTORY_STORE, { keyPath: 'id' }).createIndex('owner', 'owner');
         }
       };
-      request.onsuccess = () => resolve(request.result);
+      request.onsuccess = () => {
+        const db = request.result;
+        // Safari drops the connection when an installed app sits in the
+        // background, and clearing site data closes it: open a new one then.
+        db.onclose = () => { opening = null; };
+        db.onversionchange = () => {
+          db.close();
+          opening = null;
+        };
+        resolve(db);
+      };
       request.onerror = () => resolve(null);
       request.onblocked = () => resolve(null);
     });
     return opening;
   }
 
-  async function run(mode, work) {
+  async function run(mode, work, retried = false) {
     const db = await open();
     if (!db) return { ok: false };
-    return new Promise((resolve) => {
+    const outcome = await new Promise((resolve) => {
       let value;
       try {
         const tx = db.transaction(HISTORY_STORE, mode);
@@ -475,9 +504,15 @@ const HistoryStore = (() => {
         tx.onerror = () => resolve({ ok: false });
         tx.onabort = () => resolve({ ok: false });
       } catch {
-        resolve({ ok: false });
+        // The connection is gone (closing, or closed under us).
+        resolve({ ok: false, lost: true });
       }
     });
+    if (outcome.lost && !retried) {
+      opening = null;
+      return run(mode, work, true);
+    }
+    return outcome;
   }
 
   async function list(owner) {
@@ -501,7 +536,29 @@ const HistoryStore = (() => {
     await run('readwrite', (store) => store.delete(id));
   }
 
-  return { list, get, put, remove };
+  // Read, change and write one chat in a single transaction, so two writers
+  // (an answer for a chat that is not open, a finished job, a rename) never
+  // undo each other and a chat deleted meanwhile is not brought back.
+  // Returns the changed chat, or null when there was none.
+  async function update(id, change) {
+    let changed = null;
+    const outcome = await run('readwrite', (store) => {
+      const request = store.get(id);
+      request.onsuccess = () => {
+        const record = request.result;
+        if (!record || change(record) === false) return;
+        changed = record;
+        store.put(record);
+      };
+      return null;
+    });
+    if (outcome.ok) return changed;
+    const record = memory.get(id);
+    if (!record || change(record) === false) return null;
+    return record;
+  }
+
+  return { list, get, put, remove, update };
 })();
 
 function clip(text, limit = MAX_MESSAGE_CHARS) {
@@ -553,7 +610,18 @@ function recentHistory() {
     .filter((message) => !message.awaiting && (message.role === 'user' || message.role === 'assistant') && message.text)
     .map((message) => ({ role: message.role, text: message.text.replace(/\s+/g, ' ').trim().slice(0, HISTORY_TURN_CHARS) }))
     .filter((turn) => turn.text);
-  return turns.slice(-HISTORY_TURNS);
+  const kept = [];
+  let total = 0;
+  for (const turn of turns.slice(-HISTORY_TURNS).reverse()) {
+    if (total + turn.text.length > HISTORY_TOTAL_CHARS) break;
+    total += turn.text.length;
+    kept.unshift(turn);
+  }
+  return kept;
+}
+
+function chatContext() {
+  return { conversationId: state.conversation.id, history: recentHistory() };
 }
 
 // Put a message into its chat: shown at once when that chat is open, stored
@@ -576,15 +644,27 @@ function addToConversation(conversationId, message, answered = null) {
     saveConversation(current).catch(() => {});
     return article;
   }
-  HistoryStore.get(conversationId).then((stored) => {
-    if (!stored) return null;
+  const apply = (conversation) => {
+    if (conversation.messages.some((item) => item.id === message.id)) return false;
     if (answered) {
-      const question = stored.messages.find((item) => item.id === answered);
+      const question = conversation.messages.find((item) => item.id === answered);
       if (question) delete question.awaiting;
     }
-    stored.messages.push(message);
-    touch(stored);
-    return saveConversation(stored);
+    conversation.messages.push(message);
+    touch(conversation);
+    return true;
+  };
+  HistoryStore.update(conversationId, apply).then((stored) => {
+    if (!stored) return null;
+    // Opened while this was being written: show it there as well.
+    const opened = state.conversation;
+    if (opened?.id === conversationId && apply(opened)) {
+      $('thread').append(renderMessage(message));
+      markLatest();
+      setEmpty(false);
+      scrollHistory();
+    }
+    return refreshHistory();
   }).catch(() => {});
   return null;
 }
@@ -614,7 +694,11 @@ function voiceTag() {
 function displayText(message) {
   const files = (message.answer?.artifacts || []).some((item) => item.type === 'report');
   // The file cards below replace the plain download paths in the text.
-  return files ? message.text.replace(/\s*Download:\s*\/v1\/reports\/[\w-]+\/download\.?/g, '').trim() : message.text;
+  if (!files) return message.text;
+  return message.text
+    .replace(/Download: *\/v1\/reports\/[\w-]+\/download\.?/g, '')
+    .replace(/\n\nFiles:\n(?:- [^\n]*\/v1\/reports\/[\w-]+\/download\n?)+/g, '\n')
+    .trim();
 }
 
 function assistantShell(options = {}) {
@@ -650,7 +734,7 @@ function renderMessage(message) {
     return article;
   }
   const answer = message.answer || {};
-  const parts = assistantShell({ voice: message.voice, language: message.language, status: answer.status });
+  const parts = assistantShell({ voice: message.voice, language: message.language, status: answer.decided ? null : answer.status });
   parts.article.dataset.id = message.id;
   renderMarkdown(parts.text, displayText(message));
   const files = (answer.artifacts || []).filter((item) => item.type === 'report');
@@ -673,6 +757,7 @@ function renderMessage(message) {
     parts.bubble.append(notes);
   }
   addSources(parts.bubble, answer.sources);
+  if (answer.status === 'approval_required' && answer.approval && !answer.decided) addApprovalControls(parts.article, message);
   parts.body.append(messageActions(message));
   return parts.article;
 }
@@ -711,7 +796,9 @@ function messageActions(message) {
   if (window.speechSynthesis) {
     actions.append(iconButton('i-speaker', 'Read aloud', () => readAloud(displayText(message), message.language || state.language)));
   }
-  actions.append(iconButton('i-retry', 'Retry', () => retry(message)));
+  const again = iconButton('i-retry', 'Retry', () => retry(message));
+  again.classList.add('retry-action');
+  actions.append(again);
   return actions;
 }
 
@@ -769,18 +856,24 @@ function showThinking(options = {}) {
 
 // A failed request is shown but not kept: the question stays in the chat and
 // can be asked again.
-function showError(text, retryText = null, options = {}) {
+function showError(text, questionId = null, options = {}) {
   const parts = assistantShell(options);
   parts.text.append(el('p', 'error-text', text));
-  if (retryText) {
+  if (questionId) {
     const actions = el('div', 'message-actions');
     actions.append(iconButton('i-retry', 'Try again', () => {
+      if (state.inFlight.has(state.conversation.id)) {
+        showToast('Wait for the answer that is on its way.');
+        return;
+      }
+      const question = state.conversation.messages.find((message) => message.id === questionId);
       parts.article.remove();
-      ask(retryText, { reuseQuestion: true, keepInput: true });
+      if (question) ask(question.text, { questionId, keepInput: true });
     }));
     parts.body.append(actions);
   }
   $('thread').append(parts.article);
+  setEmpty(false);
   scrollHistory();
   return parts.article;
 }
@@ -794,6 +887,8 @@ function renderConversation() {
   $('chat-title').textContent = conversation.messages.length ? conversation.title : 'New chat';
   document.title = conversation.messages.length ? `${conversation.title} — Agentic Saffron` : 'Agentic Saffron — Assistant';
   renderHistoryList();
+  if (state.inFlight.has(conversation.id)) state.textThinking.set(conversation.id, showThinking());
+  updateSendButton();
   requestAnimationFrame(scrollHistory);
   for (const message of conversation.messages) {
     if (message.answer?.status === 'accepted' && message.answer.job_id && !message.answer.job_done) followJob(conversation.id, message.id, message.answer.job_id);
@@ -850,7 +945,7 @@ function fileNameFromDisposition(disposition, fallback) {
 // this server are ever requested.
 async function downloadFile(file, card) {
   const path = String(file.download_path || '');
-  if (!path.startsWith('/v1/reports/')) {
+  if (!REPORT_PATH.test(path)) {
     showToast('This file cannot be downloaded here.');
     return;
   }
@@ -924,13 +1019,14 @@ function compactAnswer(answer) {
     }
   }
   const notes = (answer.warnings || []).filter((warning) => warning && NOTE_CODES.has(warning.code)).slice(0, 3).map((warning) => String(warning.message).slice(0, 300));
-  return { status: answer.status || 'complete', artifacts: [...files, ...emails], sources, notes, job_id: answer.job_id || null, generation_mode: answer.generation_mode || null };
+  const approval = answer.status === 'approval_required' && answer.approval?.approval_id ? { approval_id: String(answer.approval.approval_id) } : null;
+  return { status: answer.status || 'complete', artifacts: [...files, ...emails], sources, notes, approval, job_id: answer.job_id || null, generation_mode: answer.generation_mode || null };
 }
 
 // Questions go to the institutional agent, which answers from the records the
 // college has imported. Where the data platform is off (503) or the account may
 // not run agent commands (403), the read-only assistant answers instead.
-function askAgent(text, approvalId = null) {
+function askAgent(text, approvalId = null, context = chatContext()) {
   return api('/v1/agent/commands', {
     method: 'POST',
     body: JSON.stringify({
@@ -938,23 +1034,23 @@ function askAgent(text, approvalId = null) {
       channel: 'text',
       include_data: false,
       approval_id: approvalId,
-      conversation_id: state.conversation.id,
-      history: approvalId ? [] : recentHistory(),
+      conversation_id: context.conversationId,
+      history: approvalId ? [] : context.history,
       language: state.language,
     }),
   });
 }
 
-function askReadOnlyAssistant(text) {
+function askReadOnlyAssistant(text, context = chatContext()) {
   return api('/v1/chat', {
     method: 'POST',
     body: JSON.stringify({
       prompt: text,
       institution_scope: { college_id: window.SaffronAuth.collegeId() },
       channel: 'text',
-      conversation_id: state.conversation.id,
+      conversation_id: context.conversationId,
       conversational: true,
-      history: recentHistory(),
+      history: context.history,
       language: state.language,
     }),
   });
@@ -972,16 +1068,16 @@ function showAnswer(data, options = {}) {
   });
   const conversationId = options.conversationId || state.conversation.id;
   const article = addToConversation(conversationId, message, options.answers || null);
-  if (article && answer.status === 'approval_required' && answer.approval) {
-    addApprovalControls(article, answer.approval, options.command);
-  }
   if (message.answer.status === 'accepted' && message.answer.job_id) followJob(conversationId, message.id, message.answer.job_id);
   return article;
 }
 
 // An action that changes institutional records waits for the person to
 // confirm it; confirming records the decision and runs the same command again.
-function addApprovalControls(article, approval, command) {
+function addApprovalControls(article, message) {
+  const conversationId = state.conversation.id;
+  const { approval } = message.answer;
+  const { command } = message;
   const controls = el('div', 'approval-actions');
   const confirm = el('button', 'approval-button', 'Confirm and run');
   confirm.type = 'button';
@@ -999,11 +1095,19 @@ function addApprovalControls(article, approval, command) {
         body: JSON.stringify({ approve }),
       });
       controls.remove();
+      await updateMessage(conversationId, message.id, (stored) => {
+        stored.answer = { ...stored.answer, decided: approve ? 'confirmed' : 'cancelled' };
+      });
       if (!approve || !command) {
-        addToConversation(state.conversation.id, makeMessage('assistant', approve ? 'Confirmed.' : 'Cancelled. Nothing was changed.'));
+        addToConversation(conversationId, makeMessage('assistant', approve ? 'Confirmed.' : 'Cancelled. Nothing was changed.'));
         return;
       }
-      showAnswer(await askAgent(command, approval.approval_id), { command });
+      const loading = state.conversation.id === conversationId ? showThinking() : null;
+      try {
+        showAnswer(await askAgent(command, approval.approval_id, { conversationId, history: [] }), { command, conversationId });
+      } finally {
+        loading?.remove();
+      }
     } catch (error) {
       confirm.disabled = false;
       cancel.disabled = false;
@@ -1027,7 +1131,13 @@ async function followJob(conversationId, messageId, jobId) {
       try {
         job = (await api(`/v1/agent/jobs/${encodeURIComponent(jobId)}`)).job;
       } catch (error) {
-        if (error.status === 404 || error.status === 403) return;
+        if (error.status === 404 || error.status === 403) {
+          await updateMessage(conversationId, messageId, (message) => {
+            message.text = clip(`${message.text}\n\nThis background task can no longer be followed from here; its files, if any, are in “Your files”.`);
+            message.answer = { ...message.answer, job_done: true };
+          });
+          return;
+        }
         continue;
       }
       if (!job || (job.status !== 'succeeded' && job.status !== 'failed')) continue;
@@ -1046,28 +1156,38 @@ async function followJob(conversationId, messageId, jobId) {
 }
 
 async function updateMessage(conversationId, messageId, change) {
-  const current = state.conversation;
-  const conversation = current && current.id === conversationId ? current : await HistoryStore.get(conversationId);
-  const message = conversation?.messages.find((item) => item.id === messageId);
-  if (!message) return;
-  change(message);
-  touch(conversation);
-  await saveConversation(conversation);
+  const apply = (conversation) => {
+    const message = conversation.messages.find((item) => item.id === messageId);
+    if (!message) return false;
+    change(message);
+    touch(conversation);
+    return true;
+  };
   if (state.conversation?.id === conversationId) {
+    if (!apply(state.conversation)) return;
+    await saveConversation(state.conversation);
+  } else {
+    if (!(await HistoryStore.update(conversationId, apply))) return;
+    await refreshHistory();
+  }
+  const message = state.conversation?.id === conversationId ? state.conversation.messages.find((item) => item.id === messageId) : null;
+  if (message) {
     const old = $('thread').querySelector(`[data-id="${CSS.escape(messageId)}"]`);
     if (old) old.replaceWith(renderMessage(message));
     markLatest();
   }
 }
 
-function setComposerBusy(busy) {
-  state.requestInFlight = busy;
-  $('send-button').classList.toggle('busy', busy);
-  updateSendButton();
+function updateSendButton() {
+  const busy = Boolean(state.conversation && state.inFlight.has(state.conversation.id));
+  const send = $('send-button');
+  send.classList.toggle('busy', busy);
+  send.disabled = busy || !$('text-input').value.trim();
 }
 
-function updateSendButton() {
-  $('send-button').disabled = state.requestInFlight || !$('text-input').value.trim();
+function clearTextThinking(conversationId) {
+  state.textThinking.get(conversationId)?.remove();
+  state.textThinking.delete(conversationId);
 }
 
 function resizeInput() {
@@ -1078,52 +1198,61 @@ function resizeInput() {
 
 async function ask(prompt, options = {}) {
   const text = prompt.trim();
-  if (!text || state.requestInFlight) return;
   const conversationId = state.conversation.id;
-  let question = null;
-  if (options.reuseQuestion) {
-    question = [...state.conversation.messages].reverse().find((message) => message.role === 'user' && message.text === text) || null;
-  }
-  if (!question) question = postUserMessage(text);
+  if (!text || state.inFlight.has(conversationId)) return;
+  // The chat and its history are fixed now: the answer, and the read-only
+  // fallback's request, stay with this chat even if another is opened.
+  const context = { conversationId, history: recentHistory() };
+  const question = (options.questionId && state.conversation.messages.find((message) => message.id === options.questionId)) || postUserMessage(text);
   if (!options.keepInput) {
     $('text-input').value = '';
     resizeInput();
   }
-  setComposerBusy(true);
-  const loading = showThinking();
+  state.inFlight.add(conversationId);
+  updateSendButton();
+  state.textThinking.set(conversationId, showThinking());
 
   try {
     let data;
     try {
-      data = await askAgent(text);
+      data = await askAgent(text, null, context);
     } catch (error) {
       if (error.status !== 503 && error.status !== 403) throw error;
-      data = await askReadOnlyAssistant(text);
+      data = await askReadOnlyAssistant(text, context);
     }
-    loading.remove();
+    clearTextThinking(conversationId);
     showAnswer(data, { command: text, conversationId, answers: question.id });
   } catch (error) {
-    loading.remove();
-    if (state.conversation.id === conversationId) showError(error.message, text);
+    clearTextThinking(conversationId);
+    if (state.conversation.id === conversationId) showError(error.message, question.id);
     showToast(error.message);
   } finally {
-    setComposerBusy(false);
-    if (!narrowScreen.matches) $('text-input').focus();
+    state.inFlight.delete(conversationId);
+    updateSendButton();
+    if (!narrowScreen.matches && state.conversation.id === conversationId) $('text-input').focus();
   }
 }
 
 // Asks the question behind an answer again, in place of that answer.
+// Only the latest answer is asked again, so the chat keeps its order.
 function retry(message) {
-  if (state.requestInFlight) return;
-  const messages = state.conversation.messages;
+  const conversation = state.conversation;
+  if (state.inFlight.has(conversation.id)) return;
+  const messages = conversation.messages;
   const index = messages.findIndex((item) => item.id === message.id);
-  const question = [...messages.slice(0, Math.max(index, 0))].reverse().find((item) => item.role === 'user');
-  if (index < 0 || !question) return;
+  if (index < 0) return;
+  if (index !== messages.length - 1) {
+    showToast('Only the latest answer can be asked again.');
+    return;
+  }
+  const question = [...messages.slice(0, index)].reverse().find((item) => item.role === 'user');
+  if (!question) return;
   messages.splice(index, 1);
   question.awaiting = true;
   $('thread').querySelector(`[data-id="${CSS.escape(message.id)}"]`)?.remove();
-  saveConversation(state.conversation).catch(() => {});
-  ask(question.text, { reuseQuestion: true, keepInput: true });
+  markLatest();
+  saveConversation(conversation).catch(() => {});
+  ask(question.text, { questionId: question.id, keepInput: true });
 }
 
 // ------------------------------------------------------------------ chats and sidebar
@@ -1132,7 +1261,7 @@ function startNewChat() {
   renderConversation();
   history.replaceState(null, '', window.location.pathname);
   closeDrawer();
-  $('text-input').focus();
+  if (!narrowScreen.matches) $('text-input').focus();
 }
 
 async function openConversation(id) {
@@ -1170,6 +1299,8 @@ function matchesQuery(conversation, query) {
 }
 
 function renderHistoryList() {
+  // Re-rendering would throw away the name being typed; it runs when that ends.
+  if (state.renaming) return;
   const list = $('history-list');
   const query = state.historyQuery.trim().toLowerCase();
   const rows = state.conversations.filter((conversation) => !query || matchesQuery(conversation, query));
@@ -1216,36 +1347,47 @@ function renameConversation(id) {
   input.maxLength = 120;
   input.setAttribute('aria-label', 'Chat name');
   item.replaceChildren(input);
+  state.renaming = id;
   input.focus();
   input.select();
   let finished = false;
   const finish = async (save) => {
     if (finished) return;
     finished = true;
-    const title = input.value.replace(/\s+/g, ' ').trim();
+    state.renaming = null;
+    const title = input.value.replace(/\s+/g, ' ').trim().slice(0, 120);
     if (save && title && title !== conversation.title) {
-      const record = state.conversation?.id === id ? state.conversation : await HistoryStore.get(id);
-      if (record) {
-        record.title = title.slice(0, 120);
+      const rename = (record) => {
+        record.title = title;
         record.titleEdited = true;
-        await HistoryStore.put(record);
-        if (state.conversation?.id === id) $('chat-title').textContent = record.title;
+      };
+      if (state.conversation?.id === id) {
+        rename(state.conversation);
+        await HistoryStore.put(state.conversation);
+        $('chat-title').textContent = title;
+      } else {
+        await HistoryStore.update(id, rename);
       }
     }
     await refreshHistory();
   };
   input.addEventListener('keydown', (event) => {
+    if (event.isComposing || event.keyCode === 229) return;
     if (event.key === 'Enter') finish(true);
     if (event.key === 'Escape') finish(false);
   });
   input.addEventListener('blur', () => finish(true));
 }
 
-function confirmDialog(title, text, okLabel) {
+function confirmDialog(title, text, okLabel, options = {}) {
   const dialog = $('confirm-dialog');
   $('confirm-title').textContent = title;
   $('confirm-text').textContent = text;
   $('confirm-ok').textContent = okLabel;
+  $('confirm-ok').className = `button${options.danger === false ? '' : ' danger'}`;
+  $('confirm-option').hidden = !options.check;
+  $('confirm-check').checked = false;
+  $('confirm-check-label').textContent = options.check || '';
   dialog.returnValue = '';
   dialog.showModal();
   return new Promise((resolve) => {
@@ -1347,8 +1489,19 @@ function openAccountMenu() {
     { separator: true },
     { label: 'Delete all chats on this device', icon: 'i-trash', danger: true, action: deleteAllConversations },
   ];
-  if (window.SaffronAuth.mode() === 'oidc') items.push({ label: 'Sign out', icon: 'i-signout', action: () => window.SaffronAuth.signOut() });
+  if (window.SaffronAuth.mode() === 'oidc') items.push({ label: 'Sign out', icon: 'i-signout', action: signOut });
   openMenu($('account-menu-button'), items);
+}
+
+// Chats stay on this device for the next sign-in; on a shared computer the
+// person can take them away as they sign out.
+async function signOut() {
+  const ok = await confirmDialog('Sign out?', 'Your chats stay on this device for your next sign-in unless you delete them now.', 'Sign out', {
+    danger: false, check: 'Also delete my chats from this device',
+  });
+  if (!ok) return;
+  if ($('confirm-check').checked) await Promise.all(state.conversations.map((conversation) => HistoryStore.remove(conversation.id)));
+  window.SaffronAuth.signOut();
 }
 
 // ------------------------------------------------------------------ sidebar layout
@@ -1970,6 +2123,8 @@ function handleVoiceMessage(event) {
       return;
     }
     removeThinking(message.client_message_id);
+    state.voiceTurns.delete(message.client_message_id);
+    state.voiceCommands.delete(message.client_message_id);
     return;
   }
   // Marks the end of a reply's speech; playback ends when its queue drains.
@@ -1985,11 +2140,14 @@ function handleVoiceMessage(event) {
     return;
   }
   if (message.type === 'error') {
+    const turn = message.client_message_id ? state.voiceTurns.get(message.client_message_id) : null;
     if (message.client_message_id) {
       removeThinking(message.client_message_id);
+      state.voiceTurns.delete(message.client_message_id);
+      state.voiceCommands.delete(message.client_message_id);
       if (message.client_message_id === state.activeReplyId) state.waitingForAnswer = false;
     }
-    if (message.code === 'turn_failed') showError(message.message, null, { voice: true });
+    if (message.code === 'turn_failed' && (!turn || turn.conversationId === state.conversation.id)) showError(message.message, null, { voice: true });
     renderVoiceState(message.message || 'Voice transport error.');
     startRecognition();
   }
@@ -2319,7 +2477,8 @@ $('text-form').addEventListener('submit', (event) => {
 $('text-input').addEventListener('keydown', (event) => {
   // Enter sends; Shift+Enter starts a new line. Enter that confirms an input
   // method's composition (Hindi, Kannada keyboards) is left to it.
-  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+  if (event.isComposing || event.keyCode === 229) return;
+  if (event.key === 'Enter' && !event.shiftKey) {
     event.preventDefault();
     ask(event.target.value);
   }
@@ -2440,7 +2599,13 @@ async function start() {
   state.conversation = freshConversation();
   await refreshHistory();
   const linked = window.location.hash.match(/^#chat\/(.+)$/);
-  if (linked) await openConversation(decodeURIComponent(linked[1]));
+  let linkedId = null;
+  try {
+    linkedId = linked ? decodeURIComponent(linked[1]) : null;
+  } catch {
+    // A mangled link: start a new chat instead.
+  }
+  if (linkedId) await openConversation(linkedId);
   else renderConversation();
   await loadApiStatus();
 }

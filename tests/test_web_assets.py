@@ -78,7 +78,8 @@ class WebAssetTests(unittest.TestCase):
         # A plain link to the report would reach the server without the signed-in
         # identity; only this server's report paths are ever fetched.
         js = (ASSISTANT / "app.js").read_text(encoding="utf-8")
-        self.assertIn("if (!path.startsWith('/v1/reports/'))", js)
+        self.assertIn("const REPORT_PATH = /^\\/v1\\/reports\\/[\\w-]+\\/download$/;", js)
+        self.assertIn("if (!REPORT_PATH.test(path))", js)
         self.assertIn("const response = await fetch(path, { headers: headers() });", js)
         self.assertIn("URL.createObjectURL(blob)", js)
         self.assertNotRegex(js, r"\.href = (?:file|item|artifact|report)\.download_path")
@@ -118,7 +119,7 @@ class WebAssetTests(unittest.TestCase):
         js = (ASSISTANT / "app.js").read_text(encoding="utf-8")
         self.assertIn("api('/v1/agent/commands'", js)
         self.assertIn("if (error.status !== 503 && error.status !== 403) throw error;", js)
-        self.assertIn("data = await askReadOnlyAssistant(text);", js)
+        self.assertIn("data = await askReadOnlyAssistant(text, context);", js)
         self.assertIn("error.status = response.status;", js)
         self.assertIn("mode: 'agent',", js)
 
@@ -126,7 +127,10 @@ class WebAssetTests(unittest.TestCase):
         js = (ASSISTANT / "app.js").read_text(encoding="utf-8")
         self.assertIn("answer.status === 'approval_required' && answer.approval", js)
         self.assertIn("/v1/agent/approvals/${encodeURIComponent(approval.approval_id)}", js)
-        self.assertIn("showAnswer(await askAgent(command, approval.approval_id), { command });", js)
+        # The confirmed command runs in the chat it was asked in, whatever chat is open by then.
+        self.assertIn("showAnswer(await askAgent(command, approval.approval_id, { conversationId, history: [] }), { command, conversationId });", js)
+        # The buttons come back with the chat, until the person decides.
+        self.assertIn("if (answer.status === 'approval_required' && answer.approval && !answer.decided) addApprovalControls(parts.article, message);", js)
         self.assertRegex((SHARED / "styles.css").read_text(encoding="utf-8"), r"\.approval-button\s*\{")
 
     def test_browser_reads_the_college_claims_the_server_accepts(self):

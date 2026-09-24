@@ -429,7 +429,8 @@ body.assistant-page { overflow: hidden; }
   .main.is-empty .composer-wrap { margin-bottom: auto; padding-bottom: 12vh; }
 }
 @media (max-width: 640px) {
-  .main.is-empty .chat-history { display: flex; flex-direction: column; justify-content: center; }
+  /* "safe" keeps the top of the greeting reachable when the keyboard leaves little room. */
+  .main.is-empty .chat-history { display: flex; flex-direction: column; justify-content: center; justify-content: safe center; }
 }
 
 /* ---------------------------------------------------------------- messages */
@@ -526,6 +527,9 @@ body.assistant-page { overflow: hidden; }
 .message-actions .icon-button { width: 32px; height: 32px; border-radius: 8px; }
 .message-actions .icon { width: 17px; height: 17px; }
 .message-actions .icon-button.done { color: var(--success); }
+/* Only the latest answer can be asked again, so the chat keeps its order. */
+.message-actions .retry-action { display: none; }
+.message.latest .message-actions .retry-action { display: inline-grid; }
 
 /* Files made for an answer. */
 .file-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; margin: 14px 0 4px; }
@@ -732,7 +736,7 @@ body.assistant-page { overflow: hidden; }
 .suggestion .icon { width: 17px; height: 17px; color: var(--accent); }
 
 .voice-bar { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 10px; }
-.voice-bar:has(> :not([hidden]):not(:empty)) { margin-bottom: 10px; }
+.voice-bar:has(> :not([hidden]):not(:empty):not(.sr-only)) { margin-bottom: 10px; }
 .voice-status-line { margin: 0; color: var(--accent-strong); font-size: 13px; font-weight: 550; text-align: center; }
 .voice-status-line:empty { display: none; }
 .interrupt-button {
@@ -803,6 +807,9 @@ body.assistant-page { overflow: hidden; }
 .dialog-title { margin: 0; font-size: 18px; font-weight: 650; }
 .dialog-text { margin: 0; color: var(--text-muted); font-size: 14px; }
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 8px; }
+.dialog-check { display: flex; align-items: center; gap: 8px; color: var(--text-soft); font-size: 14px; cursor: pointer; }
+.dialog-check[hidden] { display: none; }
+.dialog-check input { width: 17px; height: 17px; margin: 0; accent-color: var(--accent); }
 .files-list { display: flex; flex-direction: column; gap: 8px; max-height: 60vh; margin-top: 4px; overflow-y: auto; }
 .files-list .file-card { width: 100%; }
 .files-empty { margin: 14px 0; color: var(--text-muted); font-size: 14px; text-align: center; }
@@ -975,6 +982,8 @@ body.assistant-page { overflow: hidden; }
   .main-head { padding-left: max(8px, env(safe-area-inset-left, 0px)); padding-right: max(8px, env(safe-area-inset-right, 0px)); }
   .chat-title { text-align: center; }
   .main-head .status.ok { display: none; }
+  /* iOS zooms into any field under 16px, and the layout no longer fits after. */
+  .history-search input, .history-rename, .language-select, .mic-select { font-size: 16px; }
 }
 @media (max-width: 640px) {
   .thread { gap: 22px; }
