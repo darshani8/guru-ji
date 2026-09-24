@@ -43,6 +43,14 @@ def _origins_from_env(name: str, *extra: str | None) -> tuple[str, ...]:
     return tuple(origins)
 
 
+def _default_control_database_url() -> str:
+    """The local development database; the file made before the rename keeps being used."""
+
+    if not os.path.exists("./data/agentic_saffron.db") and os.path.exists("./data/guru_ji.db"):
+        return "sqlite:///./data/guru_ji.db"
+    return "sqlite:///./data/agentic_saffron.db"
+
+
 def _bool_env(name: str, default: bool) -> bool:
     raw = os.getenv(name)
     if raw is None:
@@ -289,7 +297,7 @@ class AppSettings:
     def from_env(cls) -> "AppSettings":
         adopt_legacy_names()
         environment = os.getenv("SAFFRON_ENVIRONMENT", "development").strip().lower()
-        control_url = os.getenv("CONTROL_DATABASE_URL", "sqlite:///./data/agentic_saffron.db")
+        control_url = os.getenv("CONTROL_DATABASE_URL") or _default_control_database_url()
         # An in-memory control plane is an ephemeral run (tests, CI); keep uploads in memory too.
         default_object_store = "memory" if control_url in {":memory:", "sqlite:///:memory:"} else "local"
         configured_origins = os.getenv("SAFFRON_ALLOWED_ORIGINS")

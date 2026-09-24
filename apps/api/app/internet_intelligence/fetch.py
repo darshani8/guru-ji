@@ -47,7 +47,7 @@ _ROBOTS_AGENT_VERSION = re.compile(r"^(\s*user-agent\s*:\s*[^/\s#]+)/[^\s#]*", r
 # The crawler's name before the product was renamed: a group a webmaster wrote
 # for it still binds the crawler, so the rename can never widen what it fetches.
 LEGACY_PRODUCT_TOKEN = "GuruJi-InstitutionIntelligence"
-_ROBOTS_LEGACY_AGENT = re.compile(rf"^(\s*user-agent\s*:\s*){re.escape(LEGACY_PRODUCT_TOKEN)}(?=[\s#]|$)", re.IGNORECASE | re.MULTILINE)
+_ROBOTS_AGENT_NAME = re.compile(r"^(\s*user-agent\s*:\s*)([^\s#]+)", re.IGNORECASE | re.MULTILINE)
 
 
 # Every host map/assets.py reads as a social platform, short links included (fb.me, youtu.be, t.me, wa.me),
@@ -163,7 +163,22 @@ def robots_lines(text: str) -> list[str]:
     """
 
     text = _ROBOTS_AGENT_VERSION.sub(r"\1", text)
-    return _ROBOTS_LEGACY_AGENT.sub(lambda match: match.group(1) + product_token(USER_AGENT), text).splitlines()
+    return _ROBOTS_AGENT_NAME.sub(_bind_legacy_group, text).splitlines()
+
+
+def _bind_legacy_group(match: re.Match[str]) -> str:
+    """Point a group written for the old crawler name at the current one.
+
+    urllib applies a group when its name appears anywhere in the crawler's
+    product token, so "GuruJi" or "guruji-institution" bound the old crawler;
+    each such name is rewritten, so the rename never widens what is fetched.
+    """
+
+    name = match.group(2).lower()
+    current = product_token(USER_AGENT).lower()
+    if name != "*" and name in LEGACY_PRODUCT_TOKEN.lower() and name not in current:
+        return match.group(1) + product_token(USER_AGENT)
+    return match.group(0)
 
 
 def resolve_host(hostname: str) -> tuple[str, ...]:

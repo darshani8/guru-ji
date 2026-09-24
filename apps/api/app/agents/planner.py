@@ -195,6 +195,50 @@ def _extract_change(text: str) -> tuple[str, Any] | None:
     return None
 
 
+# Word and PowerPoint are asked for by name, but the same words are everyday
+# college vocabulary ("attended the presentation", "attendance slides below
+# 75%", "submit their ppt"). A format word counts only where it names the file
+# to make: as the object of a making verb followed by what goes in it
+# ("create a PowerPoint of ..."), after "as"/"into" ("... as a Word document"),
+# after "in"/"to" for words that can only mean a file ("... in a PPT", "... to
+# Word"), or opening the request ("PowerPoint of ...").
+_DOCX_WORDS = r"(?:docx|(?:ms |microsoft )?word (?:doc|docs|document|documents|file|files|report|format)|(?:ms|microsoft) ?word)"
+_PPTX_WORDS = r"(?:pptx?s?|power ?points?(?: (?:presentation|deck|file|slides?))?|(?:slide ?)?decks?|slides?|presentations?)"
+_PPTX_FILE_WORDS = r"(?:pptx?s?|power ?points?(?: (?:presentation|deck|file|slides?))?|slide ?decks?)"
+_FILE_VERB = r"(?:make|create|prepare|generate|build|export|download|convert|produce|draft|want|need|get|send|share|email|mail|attach|put|give (?:me|us))"
+# "a", "the" or one describing word; never a possessive ("send their ppt" is not a request for a file).
+_FILE_OBJECT = r"(?:(?:me|us)\s+)?(?:(?:a|an|the|some|one)\s+)?(?:(?!(?:their|his|her|its|my|our|your)\b)[a-z]+\s+)?"
+_FILE_CONTENT = r"(?:\s+(?:of|on|for|with|about|listing|showing|covering)\b|\s*[.?!]?\s*$)"
+# A file-type phrase that names the output ("a Word document of ...", "as a PDF file"); "the Word document on leave" is a document to search.
+_OUTPUT_FILE_PHRASE = re.compile(r"(?:^\s*|\b(?:an?|as|in|into|to)\s+(?:an?\s+)?)(?:ms |microsoft )?(?:word|pdf|excel|pptx?|docx|powerpoint) (?:doc|docs|document|documents|file|files)\b")
+
+
+# Per format: the words that name it, those that may follow "as"/"into", and
+# those that may follow "in"/"to" ("in a presentation" is an event, "in a PPT"
+# a file; "in a word," is a figure of speech).
+_OFFICE_FORMATS = (
+    ("docx", _DOCX_WORDS, rf"(?:{_DOCX_WORDS}|(?:ms |microsoft )?word)", _DOCX_WORDS),
+    ("pptx", _PPTX_WORDS, _PPTX_WORDS, _PPTX_FILE_WORDS),
+)
+# "Export ... to Word"; without such a verb "to word" is the verb ("help me to word this notice").
+_TO_WORD = re.compile(r"\b(?:export|convert|save|put|move|copy|send)\b.*\bto\s+(?:ms |microsoft )?word\b")
+
+
+def requested_office_format(lowered: str) -> str | None:
+    """docx or pptx when the request names a Word or PowerPoint file to make, else None."""
+
+    for fmt, words, after_as, after_in in _OFFICE_FORMATS:
+        if (
+            re.search(rf"\b{_FILE_VERB}\s+{_FILE_OBJECT}{words}{_FILE_CONTENT}", lowered)
+            or re.search(rf"\b(?:as|into)\s+(?:(?:a|an)\s+)?{after_as}\b", lowered)
+            or re.search(rf"\b(?:in|to)\s+(?:(?:a|an)\s+)?{after_in}\b", lowered)
+            or re.match(rf"\s*(?:(?:a|an)\s+)?{words}\s+(?:of|on|for|with)\b", lowered)
+            or (fmt == "docx" and _TO_WORD.search(lowered))
+        ):
+            return fmt
+    return None
+
+
 def extract_entities(text: str, vocabulary: Vocabulary) -> ExtractedEntities:
     lowered = text.lower()
     program = _extract_program(text, vocabulary)
@@ -208,10 +252,8 @@ def extract_entities(text: str, vocabulary: Vocabulary) -> ExtractedEntities:
         entities.report_format = "pdf"
     elif re.search(r"\bcsv\b", lowered):
         entities.report_format = "csv"
-    elif re.search(r"\b(docx|word (?:doc|docs|document|documents|file|files|format)|ms ?word)\b", lowered):
-        entities.report_format = "docx"
-    elif re.search(r"\b(pptx?|power ?points?|presentations?|slides?|slide ?decks?)\b", lowered):
-        entities.report_format = "pptx"
+    elif office_format := requested_office_format(lowered):
+        entities.report_format = office_format
     entities.wants_report = bool(entities.report_format) or bool(re.search(r"\b(report|export|download|sheet)\b", lowered))
     entities.wants_email = bool(re.search(r"\b(email|e-mail|mail)\b", lowered)) or bool(re.search(r"\bsend\b.*\bto\b", lowered))
     entities.wants_notification = bool(re.search(r"\b(notify|notification|alert)\b", lowered))
@@ -276,7 +318,7 @@ class DeterministicPlanner:
             return AgentPlan(intent, steps, summary="Investigate public web sources about the institution.", planner=self.planner_name, entities=entities.as_dict())
         # -- 3. documents ---------------------------------------------------------
         # "a Word document of ..." names the file to make, not a document to search.
-        topic = re.sub(r"\b(?:word|pdf|excel|pptx?|docx|powerpoint) (?:doc|docs|document|documents|file|files)\b", " ", lowered)
+        topic = _OUTPUT_FILE_PHRASE.sub(" ", lowered)
         if re.search(r"\b(policy|policies|circular|rule|rules|regulation|guideline|guidelines|handbook|procedure|according to|what does the .* say|document|notice|syllabus|code of conduct)\b", topic) and not re.search(r"\battendance (?:below|under|less)", lowered):
             intent = "document_question"
             if (plan := missing("search_documents")):
@@ -573,4 +615,4 @@ def vocabulary_from_registry(registry: PlatformToolRegistry) -> list[str]:
     return list(registry.names())
 
 
-__all__ = ["DeterministicPlanner", "ExtractedEntities", "ModelPlanner", "Vocabulary", "extract_entities", "vocabulary_from_registry"]
+__all__ = ["DeterministicPlanner", "ExtractedEntities", "ModelPlanner", "Vocabulary", "extract_entities", "requested_office_format", "vocabulary_from_registry"]

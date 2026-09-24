@@ -16,7 +16,7 @@ MAX_REPORT_ROWS = 50_000
 
 # Characters XML 1.0 cannot carry at all; one in a cell would make Excel or Word
 # refuse the whole file, so they are dropped rather than escaped.
-_XML_ILLEGAL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ufffe\uffff]")
+_XML_ILLEGAL = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff\ufffe\uffff]")
 
 
 def _xml(text: str, *, attribute: bool = False) -> str:

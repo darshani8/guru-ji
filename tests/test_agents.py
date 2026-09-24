@@ -40,8 +40,19 @@ class PlannerTests(unittest.TestCase):
         # Without the open-task agent the report tool makes them from the records.
         cases = {
             "Make a Word document of MBA students below 75% attendance": "docx",
+            "Create a Word report of students with pending fees": "docx",
+            "Export MBA students below 75% attendance to Word": "docx",
+            "Put the list of MBA students below 75% attendance in a word document": "docx",
+            "Download MBA students below 75% attendance as a word document": "docx",
+            "Word document of students with pending fees": "docx",
+            "Put MBA students below 75% attendance in Microsoft Word": "docx",
             "Create a PowerPoint of students with pending fees": "pptx",
             "Prepare slides of MBA students below 75% attendance": "pptx",
+            "Export MBA students below 75% attendance as a PowerPoint": "pptx",
+            "I need a PowerPoint of MBA students below 75% attendance": "pptx",
+            "Export pending fees to a PowerPoint": "pptx",
+            "Make PPTs of MBA students below 75% attendance": "pptx",
+            "Make a deck of students with pending fees": "pptx",
             "Export an excel of MBA students below 75% attendance": "xlsx",
             "Give me a report of students with pending fees": "xlsx",
         }
@@ -51,6 +62,26 @@ class PlannerTests(unittest.TestCase):
             self.assertEqual(len(report), 1, text)
             self.assertEqual(report[0].arguments["format"], expected, text)
         self.assertIsNone(extract_entities("In a word, how are MBA students doing?", self.vocab).report_format)
+
+    def test_everyday_words_for_files_do_not_make_one(self):
+        # Presentations, slides and PPTs are college life, not only file types:
+        # a question that mentions them is answered as before.
+        cases = {
+            "How many students attended the presentation?": ["count_students"],
+            "How many students participated in a presentation?": ["count_students"],
+            "Which students have a presentation tomorrow?": ["find_students"],
+            "Show the students whose attendance slides below 75%": ["find_low_attendance"],
+            "List the MBA students who have not submitted their ppt": ["find_students"],
+            "Which students did not send their ppt?": ["find_students"],
+            "Make a list of students who have a presentation tomorrow": ["find_students"],
+            "List MBA students below 75% attendance for the PowerPoint session": ["find_low_attendance"],
+            # A named document is one to search, not the file to make.
+            "Summarize the Word document on maternity leave": ["search_documents"],
+            "Open the PDF document on anti-ragging": ["search_documents"],
+            "Download the Word document on maternity leave": ["search_documents"],
+        }
+        for text, expected in cases.items():
+            self.assertEqual([step.tool for step in self.planner.plan(text, self.tools, self.vocab).steps], expected, text)
 
     def test_plans_for_representative_commands(self):
         cases = {

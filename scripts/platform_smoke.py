@@ -13,9 +13,10 @@ import time
 import uuid
 from urllib.request import Request, urlopen
 
-BASE_URL = os.getenv("SAFFRON_BASE_URL", "http://127.0.0.1:8000")
+# The GURU_* spelling from before the rename still works.
+BASE_URL = os.getenv("SAFFRON_BASE_URL") or os.getenv("GURU_BASE_URL") or "http://127.0.0.1:8000"
 # Override on a persistent database so each run starts from an empty institution.
-INSTITUTION = os.getenv("SAFFRON_SMOKE_INSTITUTION", "college_a")
+INSTITUTION = os.getenv("SAFFRON_SMOKE_INSTITUTION") or os.getenv("GURU_SMOKE_INSTITUTION") or "college_a"
 HEADERS = {"Authorization": "Bearer dev-token", "X-Demo-Principal": "platform-smoke", "X-Demo-Role": "principal", "X-Demo-College": INSTITUTION}
 
 

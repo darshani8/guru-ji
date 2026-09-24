@@ -757,7 +757,7 @@ class RobotsCacheAndIdentityTests(unittest.IsolatedAsyncioTestCase):
         # the rename must not quietly let it fetch what they had shut off.
         from app.internet_intelligence.fetch import crawler_user_agent
 
-        for group in ("GuruJi-InstitutionIntelligence", "GuruJi-InstitutionIntelligence/1.0", "guruji-institutionintelligence"):
+        for group in ("GuruJi-InstitutionIntelligence", "GuruJi-InstitutionIntelligence/1.0", "guruji-institutionintelligence", "GuruJi", "guruji-institution"):
             def handler(request: httpx.Request, group=group) -> httpx.Response:
                 if request.url.path == "/robots.txt":
                     return httpx.Response(200, text=f"User-agent: *\nAllow: /\n\nUser-agent: {group}\nDisallow: /private\n", request=request)

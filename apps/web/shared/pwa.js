@@ -26,7 +26,7 @@
 
   function dismissed() {
     try {
-      return window.localStorage.getItem(DISMISS_KEY) === '1';
+      return window.localStorage.getItem(DISMISS_KEY) === '1' || window.localStorage.getItem('guru.install.dismissed') === '1';
     } catch {
       return false;
     }

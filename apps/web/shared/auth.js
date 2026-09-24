@@ -53,11 +53,21 @@
     }
   }
 
+  // Keys were "guru.auth.*" before the rename: a session or a sign-in in
+  // progress at that moment carries over once, under the new key.
   function readStored(key) {
     const s = store();
     if (!s) return null;
     try {
-      return s.getItem(key);
+      const value = s.getItem(key);
+      if (value !== null || !key.startsWith('saffron.')) return value;
+      const legacyKey = 'guru.' + key.slice('saffron.'.length);
+      const legacy = s.getItem(legacyKey);
+      if (legacy !== null) {
+        s.setItem(key, legacy);
+        s.removeItem(legacyKey);
+      }
+      return legacy;
     } catch {
       return null;
     }

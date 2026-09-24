@@ -151,6 +151,9 @@ class FileRendererTests(unittest.TestCase):
             content, content_type = render_report(fmt, "Low attendance", self.columns, self.rows)
             self.assertTrue(content, fmt)
             self.assertEqual(content_type, FORMAT_CONTENT_TYPES[fmt], fmt)
+        # A lone surrogate (JSON accepts "\\ud800") would make the file impossible to write.
+        for fmt in ("xlsx", "docx", "pptx"):
+            self.assertTrue(render_report(fmt, "Odd \ud800 title", self.columns, [{"student_id": "\ud800", "name": "x", "attendance_percent": 1}])[0], fmt)
         workbook = render_xlsx(self.columns, [{"student_id": "MBA009", "name": "Tab\x0bbed\x00", "attendance_percent": 1}])
         self.assertEqual(parse_xlsx("out.xlsx", workbook).tables[0].records[0].fields["name"], "Tabbed")
 
