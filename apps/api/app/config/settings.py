@@ -96,7 +96,7 @@ class AppSettings:
     environment: str = "development"
     allowed_origins: tuple[str, ...] = ("http://localhost:5173",)
     dev_bearer_token: str = field(default="dev-token", repr=False)
-    control_database_url: str | None = field(default="sqlite:///./data/agentic_saffron.db", repr=False)
+    control_database_url: str | None = field(default_factory=_default_control_database_url, repr=False)
     oidc_issuer_url: str | None = None
     oidc_audience: str | None = None
     oidc_jwks_url: str | None = None

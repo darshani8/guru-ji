@@ -164,7 +164,20 @@ def robots_lines(text: str) -> list[str]:
 
     # Line by line, split at every line ending urllib accepts, so no rewrite
     # can reach from an empty User-agent line into the next one.
-    return [_ROBOTS_AGENT_NAME.sub(_bind_legacy_group, _ROBOTS_AGENT_VERSION.sub(r"\1", line)) for line in text.splitlines()]
+    lines = [_ROBOTS_AGENT_VERSION.sub(r"\1", line) for line in text.splitlines()]
+    # urllib applies the first group that names the crawler. Where the site
+    # also wrote a group for the current name, that group is its rule for this
+    # crawler, and the old name's group must not come first and override it.
+    current = product_token(USER_AGENT).lower()
+    if any(name != "*" and name in current for name in _agent_names(lines)):
+        return lines
+    return [_ROBOTS_AGENT_NAME.sub(_bind_legacy_group, line) for line in lines]
+
+
+def _agent_names(lines: list[str]) -> list[str]:
+    """The User-agent names in robots.txt lines, decoded and lowercased as urllib compares them."""
+
+    return [unquote(match.group(2)).lower() for line in lines if (match := _ROBOTS_AGENT_NAME.match(line))]
 
 
 def _bind_legacy_group(match: re.Match[str]) -> str:

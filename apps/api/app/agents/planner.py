@@ -197,77 +197,224 @@ def _extract_change(text: str) -> tuple[str, Any] | None:
 
 # Word and PowerPoint are asked for by name, but the same words are everyday
 # college vocabulary: "attended the presentation", "students will make a
-# presentation", "send their ppt", "the PPT round", "trained in MS Word". A
-# format word counts only where the request is an instruction to make that
-# file, never in a question:
-# - a making verb that opens the request or a clause ("create a PowerPoint of
-#   ...", "can you prepare slides for ..."), or a sending verb with a word that
-#   can only mean a file and what goes in it ("email the HOD the PPT of ...");
-# - "as"/"into" a format, or "in"/"to" a word that can only mean a file, ending
-#   the phrase ("... as a Word document", "... in a PPT", "... to Word"), and
-#   not after a skill ("weak in PowerPoint");
-# - the request opening with the format ("PowerPoint of ..."), a "<format>
-#   format" phrase, or Hinglish ("PPT bana do", "word mein chahiye").
-# A miss only means an Excel file or no file; a false match would put records
-# into a file nobody asked for, so every rule leans towards missing.
-_DOCX_WORDS = r"(?:docx|(?:ms |microsoft )?word (?:doc|docs|document|documents|file|files|report|format)|(?:ms|microsoft) ?word)"
-_PPTX_WORDS = r"(?:pptx?s?|power ?points?(?: (?:presentation|deck|file|slides?))?|(?:slide ?)?decks?|slides?|presentations?)"
-_PPTX_FILE_WORDS = r"(?:pptx?s?|power ?points?(?: (?:presentation|deck|file|slides?))?|slide ?decks?)"
-_MAKE_VERB = r"(?:make|create|prepare|generate|build|export|convert|produce|draft|put together|draw up|turn)"
-_SEND_VERB = r"(?:send|share|email|e-mail|mail|attach|download|get|want|need|give)"
-# Opens the request or a clause, after at most a polite lead-in.
-_LEAD = r"(?:^|[,.;:!?-]\s*|\b(?:and|then)\s+)(?:(?:please|pls|kindly|can you|could you|would you|will you|i|we|just|also|now)\s+)*"
+# presentation", "send their ppt", "selected in PPT" (the paper-presentation
+# round), "new to MS Word", "the Word document of the fee structure". Each
+# sentence is read on its own, and a file is made only when the sentence is an
+# instruction to the assistant:
+# - a making or sending verb opens the sentence or a clause ("create", "send
+#   me", "can you share", "I need", "kindly provide") and its object is the file
+#   ("a PowerPoint of ...", "the HOD a Word file with ..."), or records put in,
+#   as or into the file ("the pending fee list as a PPT", "the list of MBA
+#   students in Word");
+# - a list named first ("Faculty list in Word please"), the file named first
+#   ("PPT of ...") or last ("... - PowerPoint please");
+# - Hinglish ("... ka PPT bana do", "... list word mein bhej dijiye").
+# Questions ("tell me which ...", "can we allow ... as a PPT?"), messages for
+# others ("remind faculty to upload in Word format"), skills, events and
+# existing documents never make a file. A miss only means an Excel file or no
+# file; a false match puts records into a file nobody asked for, so every rule
+# leans towards missing.
+_SALUTATION = re.compile(r"^(?:(?:hi|hello|hey|dear|respected|sir|madam|ma'?am|mam|good (?:morning|afternoon|evening)|namaste|namaskar|guru ?ji|agentic saffron|saffron|assistant)\b[\s,!.:-]*)+")
+# Polite openings that come before the verb.
+_LEAD = (
+    r"(?:(?:please|pls|plz|kindly|just|now|so|ok|okay|quickly|urgently|immediately|go ahead and|help me(?: to)?|you can"
+    r"|(?:can|could|would|will) (?:you|u|someone|anyone)|(?:i|we) (?:want|need|would like) you to|i'd like you to"
+    r"|(?:i|we) (?:want|need|would like) to|(?:i|we)'d like to|(?:can|could|may) (?:i|we)(?= (?:get|have|download|receive)\b)"
+    r"|(?:is|would) it (?:be )?possible (?:for you )?to|(?:would|do) you mind)\s+)*"
+)
+_MAKE_VERB = r"(?:make|create|prepare|generate|build|export|convert|produce|draft|compile|design|do|put together|draw up|turn|put|save)"
+_SEND_VERB = r"(?:send|share|email|e-mail|mail|forward|attach|download|get|give|provide|have|want|need|require|(?:i|we) (?:want|need|require|would like)|(?:i|we)'d like|would like)"
+_LOOKUP_VERB = r"(?:list|show|display|find|fetch|pull out|pull)"
+# The verb opens the sentence or a clause, after a salutation and polite lead.
+_VERB_AT_CLAUSE = re.compile(rf"(?:^|[,:;\u2013\u2014]\s*|\s-\s*|\b(?:and|then|also)(?:\s+(?:then|also))?\s+){_LEAD}(?P<verb>{_MAKE_VERB}|{_SEND_VERB}|{_LOOKUP_VERB})\b\s*")
+# Verbs that move records into a file named after "to" ("export ... to Word").
+_TO_VERB = re.compile(r"(?:export|convert|save|put|move|copy|change|transfer|turn|download)")
 # Who receives it, when named first ("email the HOD a PowerPoint of ..."). Not him/her/them: "send her ppt" is her own file.
 _RECIPIENT = r"(?:(?:me|us|(?:the|our)\s+(?:vice[- ]?)?(?:principal|hods?|deans?|chairman|chancellor|director|registrar|management|coordinators?))\s+)?"
-# "a", "the" and up to two describing words; never a possessive or a demonstrative.
-_FILE_OBJECT = r"(?:(?:a|an|the|some|one)\s+)?(?:(?!(?:their|his|her|its|my|our|your|the|this|that)\b)[\w-]+\s+){0,2}?"
-_FILE_CONTENT = r"(?:\s+(?:of|on|for|with|about|listing|showing|covering)\b|[.?!]?$)"
-_FILE_END = r"(?=[.,;:!?]|$|\s(?:and|to|for|with|of|please|format|file)\b)"
-_SKILL_BEFORE = re.compile(r"\b(?:weak|good|poor|strong|trained|training|skilled|skills?|expert|expertise|proficient|proficiency|certified|certification|course|workshop|fluent|typing|scored?|marks?)\s+(?:at\s+|with\s+)?$")
-_QUESTION = re.compile(r"^\s*(?:which|who|whom|whose|what|when|where|why|how|is|are|was|were|do|does|did|has|have|had|kya)\b|\?\s*$")
-# "Could you create a Word file of ...?" is a request, not a question.
-_POLITE_REQUEST = re.compile(r"^\s*(?:please\s+)?(?:can|could|would|will)\s+(?:you|i|we)\b|^\s*may\s+i\b")
-_HINGLISH_VERB = r"(?:banao|bana do|bana dijiye|banaiye|bana ke do|ready karo|taiyar karo|chahiye|bhejo|bhej do|(?:mein|me|main) (?:dena|de do|bhejo|bhej do|chahiye|convert|bana|banao|bana do|dijiye|do(?=\s*(?:[.!,]|please|$))))"
-_OFFICE_FORMATS = (
-    # format, its names, after "as"/"into", after "in"/"to", before a Hinglish verb
-    ("docx", _DOCX_WORDS, rf"(?:{_DOCX_WORDS}|(?:ms |microsoft )?word)", _DOCX_WORDS, r"(?:docx|(?:ms |microsoft )?word(?: (?:doc|docs|document|file|report))?)"),
-    ("pptx", _PPTX_WORDS, _PPTX_WORDS, _PPTX_FILE_WORDS, r"(?:pptx?s?|power ?points?|slides?|presentations?|(?:slide ?)?decks?)"),
+_ADJECTIVES = r"(?:(?:new|short|quick|simple|detailed|small|brief|neat|proper|separate|single|nice|good|professional|clean|formatted|editable|updated|latest|complete|full|final|official|consolidated|combined|printable|tabular|one-page|\d+[- ]?(?:slides?|pages?))\s+){0,2}"
+_FILE_SUFFIX = r"(?:\s+(?:file|files|document|documents|format|version|copy|form|export))?"
+# The file by name: Word needs "document", "file" or "MS" so that "send word to the HOD" is not one.
+_DOCX_FILE = r"(?:docx|(?:ms |microsoft )?word (?:doc|docs|document|documents|file|files|report)|(?:ms|microsoft) ?word)"
+_PPTX_FILE = r"(?:pptx?s?|power ?points?(?: (?:presentation|deck|file|slides?))?|slide ?decks?)"
+# Only a making verb makes "a presentation" or "slides".
+_PPTX_MADE = r"(?:(?:slide ?)?decks?|slides|presentations?(?: (?:decks?|slides))?)"
+_FILE_CONTENT = r"(?:\s+(?:of|on|with|about|listing|showing|covering|containing|having|including|regarding|from|(?:that|which) (?:shows?|lists?|has|have|contains?))\b|\s*[,.?!]?\s*$)"
+_FOR_CONTENT = r"(?:\s+for\b)"
+# After a sending verb "with" usually names who gets it ("share the PPT with BCA students"), unless records follow.
+_SEND_CONTENT = (
+    r"(?:\s+(?:of|on|about|listing|showing|covering|containing|having|including|regarding|from|(?:that|which) (?:shows?|lists?|has|have|contains?))\b"
+    r"|\s+with\s+(?:the\s+|a\s+|all\s+)?(?:[\w%-]+\s+){0,3}?(?:list|details|data|records|names|report)\b|\s*[,.?!]?\s*$)"
 )
-_BARE_IN_WORD = re.compile(r"\bin\s+(?:ms\s+|microsoft\s+)?word(?=\s*(?:[.,;:!]|$)|\s+(?:please|format|file)\b)")
-_TO_WORD = re.compile(r"\bto\s+(?:ms\s+|microsoft\s+)?word\b(?!\s+(?:it|this|that|the|these|those|them|a|an|my|our|your|his|her|their)\b)")
-_MOVE_VERB = re.compile(r"\b(?:export|convert|save|put|move|copy|send)\b")
+# After "as"/"into"/"in"/"to": the format may be bare ("in Word", "as a PPT").
+_DOCX_AFTER = r"(?:docx|(?:ms |microsoft )?word(?: (?:doc|docs|document|documents|file|files|report))?)"
+_PPTX_AFTER_AS = rf"(?:{_PPTX_FILE}|{_PPTX_MADE})"
+_PPTX_AFTER_IN = rf"(?:{_PPTX_FILE}|slides?(?=\s+format\b))"
+_AFTER_FILE = (
+    r"(?=\s*$|\s*[.,;:!?]|\s+(?:and|to|for|with|of|please|pls|plz|sir|madam|mam|ma'?am|thanks|thank you|today|tomorrow|tonight|by|before|asap|now"
+    r"|quickly|urgently|immediately|so|also|only|too|if possible|at|on|within|attached|via|through|and send|and share|and email|and mail)\b)"
+)
+# Between the verb and "in <format>": records, and nothing that makes it someone else's file.
+_RECORDS = re.compile(
+    r"\b(?:list|lists|details|data|records?|reports?|names|students?|faculty|faculties|staff|teachers?|professors?|lecturers?|hods?|defaulters?"
+    r"|attendance|fees?|dues|balances?|results?|marks|scores|grades|events?|summary|sheet|table|roster|register|directory|toppers?|admissions?"
+    r"|applicants?|placements?|contacts|numbers|everyone|pending|below)\b"
+)
+_NOT_OUR_FILE = re.compile(
+    r"\b(?:who|whom|whose|which|whether|if|where|when|while|because|since|should|must|shall|will|would|could|can|may|might|has to|have to|had to"
+    r"|are to|is to|remind|reminder|tell|ask|notify|inform|instruct|announce|message|notice|circular|sms|whatsapp|alert|invite|invitation|instructions?"
+    r"|their|his|her|its|them"
+    r"|to (?:upload|submit|bring|send|use|prepare|make|type|save|convert|export|copy|move|put|create|share|mail|email|write|present|keep|maintain"
+    r"|follow|give|attach|do|learn|practise|practice|work|edit|format|draft|finish|complete|redo|update|fill|print|join|attend|participate|register))\b"
+)
+# The word just before "in"/"as": an event, a skill or something someone did ("selected in PPT", "new to PowerPoint", "submitted as a PPT").
+_NOT_A_FILE_BEFORE = re.compile(
+    r"\b(?:\w+ed|won|part|sent|done|made|written|taken|given|shown|first|second|third|top|rank|winners?|participants?|participation|performance"
+    r"|good|weak|poor|strong|new|comfortable|confident|expert|experts|expertise|experience|knowledge|skills?|trained|training|proficient|proficiency"
+    r"|certified|certificate|certification|course|workshop|fdp|diploma|fluent|typing|type|interest|beginners?|excellent|basic|advanced|help"
+    r"|session|lab|test|exam|practical|assignment|quiz|class|classes|lecture|seminar|competition|contest|round|event)\s+(?:at\s+|with\s+)?$"
+)
+# A list named first ("Faculty list in Word please", "List of ... in PPT").
+_LIST_FIRST = re.compile(
+    r"^(?:the |a |an )?(?:(?!(?:who|which|whose|whom|what|remind|tell|ask|notify|inform)\b)[\w%-]+ ){0,5}?(?:list|lists|details|data|names|records)\b"
+    r"(?! (?:faculty|students|staff|all|the|them|those|every|mba|bca)\b)"
+)
+# A sentence naming a document ("the fee structure", "the anti-ragging affidavit") asks for that document, unless it names records too.
+_DOCUMENT_TOPIC = re.compile(
+    r"\b(?:structure|policy|policies|circular|rules?|regulations?|guidelines?|handbook|procedure|notice|syllabus|timetable|time table|calendar|forms?"
+    r"|affidavit|minutes|ssr|naac|nirf|aqar|brochure|prospectus|template|letter|certificate|agenda|manual|code of conduct|sop|mou|agreement|scheme"
+    r"|criteria|eligibility|question papers?|lesson plans?|notes|essay|assignments?|thesis|dissertation|resume|cvs?)\b"
+)
+# Records that are things, not people: "Pending fees PPT" asks for a file; "MBA students PPT" may be their own.
+_THING_RECORDS = re.compile(r"\b(?:list|lists|details|data|records|fees?|dues|balances?|attendance|results?|marks|summary|defaulters?|roster|directory|toppers?)\b")
+_NAMED_RECORDS = re.compile(r"\b(?:list|lists|details|data|records|names|roster|directory|defaulters)\b")
+# Someone else's question put to the assistant ("tell me which ...", "check whether ...") is still a question.
+_INDIRECT_QUESTION = re.compile(
+    r"\b(?:tell me|tell us|let me know|let us know|(?:i |we )?(?:want|wanna|would like|'d like) to know|may i know|can i know|could i know|do you know"
+    r"|check|find out|verify|confirm|see|know|wondering)\s+(?:which|who|whom|whose|what|when|where|why|how|whether|if)\b"
+)
+_POLITE_REQUEST = re.compile(
+    r"^(?:(?:please|pls|plz|kindly)\s+)*(?:(?:can|could|would|will) (?:you|u|someone|anyone)\b|(?:can|could|may) (?:i|we) (?:get|have|download|receive)\b"
+    r"|(?:is|would) it (?:be )?possible\b|(?:would|do) you mind\b|(?:kya )?(?:aap|ap|tum)\b.*\b(?:sakte|sakti|sakenge|sakoge|doge|dogi|denge|dijiyega)\b)"
+)
+_QUESTION = re.compile(r"^(?:which|who|whom|whose|what|when|where|why|how|is|are|was|were|am|do|does|did|has|have|had|can|could|should|shall|may|might|will|would|kya)\b|\?\s*$")
+_IMPERATIVE = re.compile(rf"^{_LEAD}(?:{_MAKE_VERB.replace('|do|', '|')}|do(?= (?:a|an|one|the) )|send|share|email|e-mail|mail|forward|attach|download|get|give|provide|export)\b")
+_HINGLISH_FILE = r"(?:pptx?|power ?point|docx|(?:ms )?word(?: (?:file|document|doc))?)"
+_HINGLISH_VERB = (
+    r"(?:(?:bana|banaa|bhej|share|send|ready|taiyar|tayyar|convert|de)\s*(?:do|dijiye|dijiyega|dena|doge|dogi|denge|sakte|sakti|sakenge|karo|kar do|kardo"
+    r"|kar dijiye|kar dena|ke do|ke bhejo|ke bhej do|ke dena|ke dijiye|ke de do)\b|(?:(?<=mein )|(?<=me )|(?<=main ))do(?=\s*(?:[.!,]|please|pls|$))|banao|banado|banaiye|banake|banani hai|banana hai|bhejo|bhejiye|chahiye|chaiye|chahie|chaahiye|dijiye|dena)"
+)
+_HINGLISH_REQUEST = re.compile(
+    rf"(?:\b{_HINGLISH_FILE}|(?<=\bka )(?:presentation|slides)|(?<=\bki )(?:presentation|slides)|(?<=\bke )(?:presentation|slides))(?:\s+(?:file|format|document|doc|form))?(?:\s+(?:mein|me|main|may|m))?\s+{_HINGLISH_VERB}"
+)
+# "... ko bolo ..." is a message for someone else; "students ko PPT bhejo" sends a file to them.
+_HINGLISH_FOR_OTHERS = re.compile(r"\b(?:(?:students?|bachch?on|faculty|staff|teachers?|hods?|principal|sir|madam|parents?|sab|sabko|unko|usko|inko|in|un)\s+ko|bolo|bol do|boliye|batao|bata do|bataiye|kaho|kahiye|samjhao)\b")
+_OFFICE_FORMATS = (
+    # format, the file by name, what only a making verb makes, after "as"/"into", after "in"/"to"
+    ("docx", _DOCX_FILE, None, _DOCX_AFTER, _DOCX_AFTER),
+    ("pptx", _PPTX_FILE, _PPTX_MADE, _PPTX_AFTER_AS, _PPTX_AFTER_IN),
+)
 # A Word or PowerPoint phrase naming the file to make, taken out of the document-question check.
 _OUTPUT_FILE_PHRASE = re.compile(r"\b(?:ms |microsoft )?(?:word|pptx?|docx|powerpoint) (?:doc|docs|document|documents|file|files)\b")
 
 
-def _not_after_skill(lowered: str, matches) -> bool:
-    return any(not _SKILL_BEFORE.search(lowered[max(0, match.start() - 40):match.start()]) for match in matches)
+def _is_question(sentence: str) -> bool:
+    if _INDIRECT_QUESTION.search(sentence):
+        return True
+    if _POLITE_REQUEST.match(sentence) or _IMPERATIVE.match(sentence):
+        return False
+    return bool(_QUESTION.search(sentence))
+
+
+def _records_put_in_file(verb: str, rest: str, after_as: str, after_in: str, earlier: str = "") -> bool:
+    """"<records> as/into/in/to <format>" after the verb, with nothing between saying the file is someone else's.
+
+    The records may come before the verb instead ("Students with pending fees, export as pptx").
+    """
+
+    as_file = re.finditer(rf"\b(?P<prep>as|into)\s+(?P<article>(?:a|an)\s+)?(?:{after_as})(?P<suffix>{_FILE_SUFFIX}){_AFTER_FILE}", rest)
+    in_file = re.finditer(rf"\b(?P<prep>in|to)\s+(?P<article>(?:a|an)\s+)?(?:{after_in})(?P<suffix>{_FILE_SUFFIX}){_AFTER_FILE}", rest)
+    for match in (*as_file, *in_file):
+        prep = match.group("prep")
+        if prep == "to" and not _TO_VERB.fullmatch(verb):
+            continue
+        if re.fullmatch(_LOOKUP_VERB, verb) and not (match.group("article") or match.group("suffix")):
+            continue
+        before = rest[: match.start()]
+        if not re.sub(r"\b(?:it|them|this|that|these|those|all|everything|me|us)\b", "", before).strip():
+            before = earlier + " " + before
+        if _RECORDS.search(before) and not _NOT_OUR_FILE.search(before) and not _NOT_A_FILE_BEFORE.search(before):
+            return True
+    return False
+
+
+def _records_follow(rest: str) -> bool:
+    """The file's content names records before any "to"/"for": "the PowerPoint of MBA students ... to the HOD", not "the slides of the orientation"."""
+
+    return bool(_RECORDS.search(re.split(r"\b(?:to|for)\b", rest, maxsplit=1)[0]))
+
+
+def _not_made_by_others(head: str) -> bool:
+    return not _NOT_OUR_FILE.search(head) and not re.match(
+        r"(?:arrange|organi[sz]e|schedule|conduct|plan|hold|train|teach|introduce|allow|invite|call|book|fix|check|count|group|assign|approve|reject"
+        r"|update|change|set|mark|add|remove|delete|remind|tell|ask|notify|inform|announce)\b",
+        head,
+    )
+
+
+def _sentence_format(sentence: str) -> str | None:
+    if _is_question(sentence) or _DOCUMENT_TOPIC.search(sentence) and not _NAMED_RECORDS.search(sentence):
+        return None
+    for fmt, named, made, after_as, after_in in _OFFICE_FORMATS:
+        for clause in _VERB_AT_CLAUSE.finditer(sentence):
+            # What the verb acts on is near it; the cap keeps a long request linear.
+            verb, rest = clause.group("verb"), sentence[clause.end() : clause.end() + 400]
+            making = re.fullmatch(_MAKE_VERB, verb) is not None
+            if not re.fullmatch(_LOOKUP_VERB, verb):
+                # "Send the Word document on maternity leave" is a document; "email the PowerPoint of MBA students ..." is records.
+                article = r"(?:(?:a|an|one|some|the)\s+)?" if making else r"(?:(?:a|an|one|some)\s+)?"
+                if re.match(rf"{_RECIPIENT}{article}{_ADJECTIVES}{named}{_FILE_SUFFIX}(?:{_FILE_CONTENT if making else _SEND_CONTENT}|{_FOR_CONTENT})", rest):
+                    return fmt
+                if not making and (file := re.match(rf"{_RECIPIENT}the\s+{_ADJECTIVES}{named}{_FILE_SUFFIX}(?=\s+(?:of|listing|showing|covering|containing|having)\b)", rest)):
+                    if _records_follow(rest[file.end():]):
+                        return fmt
+                if made and (file := re.match(rf"{_RECIPIENT}{article}{_ADJECTIVES}{made}(?={_FILE_CONTENT if making else _SEND_CONTENT})", rest)):
+                    if making or _records_follow(rest[file.end():]):
+                        return fmt
+            if _records_put_in_file(verb, rest, after_as, after_in, sentence[: clause.start()]):
+                return fmt
+        if _LIST_FIRST.match(sentence) and _records_put_in_file("", sentence, after_as, after_in):
+            return fmt
+        if re.match(rf"(?:(?:a|an)\s+)?{named}{_FILE_SUFFIX}\s+(?:of|with|on|for|containing|listing|showing|covering|having|including)\b", sentence) and not re.search(
+            r"\b(?:is|are|was|were|will|shall|scheduled|due|submitted|uploaded|presented|given|made|prepared)\b", sentence
+        ):
+            return fmt
+        # Named last: "Students with pending fees - PowerPoint please", "Pending fee list, word format please", "Pending fees PPT".
+        label = re.match(
+            rf"(?P<head>.+?)(?P<mark>\s*[-\u2013\u2014:,]\s*|\s+)(?P<prep>(?:as|in)\s+)?(?:(?:a|an)\s+)?(?:{after_in}){_FILE_SUFFIX}"
+            r"(?:\s+for\s+(?:the\s+)?(?:principal|hods?|dean|director|management|me|us|(?:review )?meeting))?(?:\s+(?:please|pls|plz))?\s*[.!]?$",
+            sentence,
+        )
+        if label and _not_made_by_others(label.group("head")) and not _NOT_A_FILE_BEFORE.search(label.group("head") + " "):
+            separated = label.group("mark").strip()
+            # Unmarked, it is only a short noun phrase: "Pending fees PPT", not "Create a list of students for the paper PPT"
+            # or "Students with attendance below 75% in PPT" (the PPT event).
+            unmarked_ok = not label.group("prep") and len(label.group("head").split()) <= 6 and not re.search(r"'s?\s*$|\b(?:ka|ki|ke)\s*$", label.group("head")) and not _VERB_AT_CLAUSE.match(label.group("head"))
+            if (_RECORDS if separated else _THING_RECORDS).search(label.group("head")) and (separated or unmarked_ok):
+                return fmt
+        hinglish = _HINGLISH_REQUEST.search(sentence)
+        if hinglish and not _HINGLISH_FOR_OTHERS.search(sentence) and (fmt == "docx") == bool(re.match(r"docx|(?:ms )?word", hinglish.group(0))):
+            return fmt
+    return None
 
 
 def requested_office_format(lowered: str) -> str | None:
-    """docx or pptx when the request is an instruction to make a Word or PowerPoint file, else None."""
+    """docx or pptx when a sentence of the request tells the assistant to make a Word or PowerPoint file, else None."""
 
     lowered = " ".join(lowered.split())
-    if _QUESTION.search(lowered) and not _POLITE_REQUEST.search(lowered):
-        return None
-    for fmt, words, after_as, after_in, hinglish in _OFFICE_FORMATS:
-        if (
-            re.search(rf"{_LEAD}{_MAKE_VERB}\s+{_RECIPIENT}{_FILE_OBJECT}{words}{_FILE_CONTENT}", lowered)
-            or re.search(rf"{_LEAD}{_SEND_VERB}\s+{_RECIPIENT}{_FILE_OBJECT}{after_in}\s+(?:of|listing|showing|covering)\b", lowered)
-            or re.search(rf"\b(?:as|into)\s+(?:(?:a|an)\s+)?{after_as}{_FILE_END}", lowered)
-            or _not_after_skill(lowered, re.finditer(rf"\b(?:in|to)\s+(?:(?:a|an)\s+)?{after_in}{_FILE_END}", lowered))
-            or re.match(rf"(?:(?:a|an)\s+)?{words}\s+(?:of|for|with)\b", lowered) and not re.search(r"\b(?:is|are|was|were|will be|scheduled)\b", lowered)
-            or re.search(rf"\s[-\u2013\u2014:]\s*(?:(?:as|in)\s+)?(?:(?:a|an)\s+)?{words}(?:\s+please)?[.!]?$", lowered)
-            or re.search(rf"\b{hinglish}\s+{_HINGLISH_VERB}", lowered)
-            or fmt == "docx" and (re.search(r"\b(?:ms |microsoft )?word format\b", lowered) or _not_after_skill(lowered, _BARE_IN_WORD.finditer(lowered)))
-            or fmt == "pptx" and re.search(r"\b(?:pptx?|power ?point|slides?) format\b", lowered)
-        ):
+    for sentence in re.split(r"(?<=[.;!?])\s+", lowered):
+        sentence = _SALUTATION.sub("", sentence.strip())
+        if sentence and (fmt := _sentence_format(sentence)):
             return fmt
-        if fmt == "docx":
-            for match in _TO_WORD.finditer(lowered):
-                clause = re.split(r"[,.;!?]", lowered[max(0, match.start() - 120):match.start()])[-1]
-                if _MOVE_VERB.search(clause):
-                    return fmt
     return None
 
 

@@ -58,6 +58,25 @@ class PlannerTests(unittest.TestCase):
             "Export pending fees to a PowerPoint": "pptx",
             "Make PPTs of MBA students below 75% attendance": "pptx",
             "Make a deck of students with pending fees": "pptx",
+            # Everyday ways of asking: greetings, "kindly provide", a trailing "?", chat endings, Hinglish.
+            "Hi, can you make a PPT of low attendance students in MBA?": "pptx",
+            "Sir can you prepare a Word document of all faculty?": "docx",
+            "Kindly provide a PPT of MBA students with low attendance": "pptx",
+            "Make a PPT of MBA students with low attendance?": "pptx",
+            "Is it possible to get the MBA student list in a Word document?": "docx",
+            "Send me the list of MBA students in word plz": "docx",
+            "Send the pending fees list as a PPT by tomorrow": "pptx",
+            "Create a PPT file of the low attendance students": "pptx",
+            "Prepare a Word document containing the list of MBA students": "docx",
+            "Email a PPT on low attendance students to the HOD": "pptx",
+            "Email the PowerPoint of MBA students below 75% attendance to the HOD": "pptx",
+            "Students with pending fees, export as pptx": "pptx",
+            "Pending fee list, word format please": "docx",
+            "Pending fees PPT": "pptx",
+            "Faculty list in PowerPoint": "pptx",
+            "Kya aap MBA students ki list word mein bana sakte ho?": "docx",
+            "MBA students ki list word file mein de dijiye": "docx",
+            "Pending fees list ko PPT mein convert karo": "pptx",
             "Export an excel of MBA students below 75% attendance": "xlsx",
             "Give me a report of students with pending fees": "xlsx",
         }
@@ -86,6 +105,11 @@ class PlannerTests(unittest.TestCase):
             "Download the Word document on maternity leave": ["search_documents"],
             "Is the leave policy available as a PDF document?": ["search_documents"],
             "Share the PDF document on anti-ragging with MBA students": ["search_documents"],
+            # "The Word document of ..." an existing document is that document, never records in a new file.
+            "Download the Word document of the fee structure": ["search_documents"],
+            "Fee structure ka word document chahiye": ["search_documents"],
+            "Send the Word document of the timetable to BCA students": ["search_documents"],
+            "Get me the Word document of the anti-ragging affidavit": ["search_documents"],
         }
         for text, expected in cases.items():
             self.assertEqual([step.tool for step in self.planner.plan(text, self.tools, self.vocab).steps], expected, text)
@@ -94,6 +118,20 @@ class PlannerTests(unittest.TestCase):
             "MBA students will make a presentation on Monday", "Send the slides of the orientation to MBA students", "Group MBA students into presentation batches",
             "List students who are weak in PowerPoint", "Which faculty are trained in MS Word?", "Ask Priya to send her ppt of the seminar",
             "Which students have not submitted the PPT?", "Presentation on AI is at 3 pm for MBA students", "Help me to word the message about exams",
+            # Questions, however they are put.
+            "Tell me which MBA students submitted their project as a PowerPoint", "Check whether BCA students uploaded their reports as Word documents",
+            "Can we allow MBA students to submit the project as a PPT?", "May I know whether faculty should upload notes in Word format?",
+            "Can I know which faculty are confident in PowerPoint?", "Could you tell me if the SSR draft was shared as a Word document?",
+            # Skills, training and events: the paper-presentation round is called "PPT".
+            "List faculty who are new to PowerPoint", "List MBA students with experience in MS Word.", "Introduce BCA semester 1 students to MS Word.",
+            "Arrange a hands-on session in MS Word for BCA students", "Schedule the BCA lab exam in PowerPoint for next Monday",
+            "List BCA students who participated in PPT and quiz", "Count BCA students in PPT.", "Students with attendance below 75% in PPT.",
+            # Messages for others: the file is theirs to make.
+            "Remind faculty to upload lesson plans in Word format", "Notify MBA students that assignments should be submitted as Word documents",
+            "Tell students to type their answers in MS Word, not by hand", "Remind faculty to export lesson plans to Word", "Please share the PPT with BCA students",
+            "BCA students ko bolo presentation taiyar karo", "List BCA students with low attendance and prepare them for presentations",
+            "Create a list of students for the paper presentation", "Presentations for MBA students next week",
+            "Download the sheet of MBA students selected in PPT.",
         ):
             self.assertNotIn(extract_entities(text, self.vocab).report_format, {"docx", "pptx"}, text)
 

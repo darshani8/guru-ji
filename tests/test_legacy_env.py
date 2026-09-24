@@ -36,6 +36,7 @@ class LegacyEnvironmentNameTests(unittest.TestCase):
                 os.mkdir("data")
                 open("data/guru_ji.db", "wb").close()
                 self.assertEqual(AppSettings.from_env().control_database_url, "sqlite:///./data/guru_ji.db")
+                self.assertEqual(AppSettings().control_database_url, "sqlite:///./data/guru_ji.db")
                 open("data/agentic_saffron.db", "wb").close()
                 self.assertEqual(AppSettings.from_env().control_database_url, "sqlite:///./data/agentic_saffron.db")
             finally:
