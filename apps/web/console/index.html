@@ -2,15 +2,24 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#102a43">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#ffffff">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="Guru Ji Console">
+  <meta name="format-detection" content="telephone=no">
+  <link rel="manifest" href="/console/manifest.json">
+  <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
+  <link rel="icon" href="/icons/icon-192.png" type="image/png" sizes="192x192">
+  <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
   <meta name="description" content="Guru Ji platform console for developers">
   <meta name="robots" content="noindex, nofollow">
   <title>Guru Ji — Platform console</title>
   <link rel="stylesheet" href="/shared/styles.css">
   <link rel="stylesheet" href="/console/console.css">
 </head>
-<body data-auth-return-path="/console/">
+<body data-auth-return-path="/console/" data-scrolls="page">
   <main class="app platform">
     <header class="topbar">
       <div class="brand">
@@ -178,6 +187,7 @@
   </main>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script src="/shared/pwa.js" defer></script>
   <script src="/shared/auth.js" defer></script>
   <script src="/console/console.js" defer></script>
 </body>

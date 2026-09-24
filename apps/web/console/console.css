@@ -45,7 +45,32 @@
 .stack-sm { margin-top: 8px; }
 .link-button { padding: 0; color: var(--teal-dark); background: none; border: 0; font: inherit; text-decoration: underline; cursor: pointer; }
 .link-button:disabled { cursor: wait; opacity: .68; }
+.stack, .result-box { overflow-x: auto; }
+.table { min-width: 520px; }
 @media (max-width: 760px) {
-  .platform-body { grid-template-columns: 1fr; }
-  .platform-nav { flex-direction: row; overflow-x: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+  /* On phones the console scrolls as one page rather than inside a panel. */
+  .app.platform { height: auto; min-height: 100vh; min-height: 100dvh; }
+  .platform-body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+  .platform-nav {
+    position: sticky;
+    top: 0;
+    z-index: 5;
+    flex-direction: row;
+    overflow-x: auto;
+    padding: 10px max(12px, env(safe-area-inset-left, 0px));
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+    scrollbar-width: none;
+  }
+  .platform-nav button { flex: none; min-height: 40px; white-space: nowrap; }
+  .platform-panel {
+    overflow: visible;
+    padding: 18px max(14px, env(safe-area-inset-right, 0px)) max(32px, env(safe-area-inset-bottom, 0px)) max(14px, env(safe-area-inset-left, 0px));
+  }
+  .card { padding: 14px; }
+  .field-row label { flex: 1 1 100%; }
+  /* 16px keeps iOS from zooming in on focus. */
+  .field-row input, .field-row select, .field-row textarea { width: 100%; min-width: 0; min-height: 44px; font-size: 16px; }
+  .btn { min-height: 44px; padding: 10px 16px; font-size: 14px; }
+  .mapping-grid { grid-template-columns: 1fr; }
 }

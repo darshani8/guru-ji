@@ -3,6 +3,7 @@ and the sign-in gate would otherwise only reveal in a browser, plus the
 separation between the client assistant and the developer console."""
 
 import importlib
+import json
 import importlib.util
 import os
 import pathlib
@@ -29,6 +30,39 @@ class WebAssetTests(unittest.TestCase):
     def test_hidden_containers_are_not_displayed(self):
         self.assertRegex((SHARED / "styles.css").read_text(encoding="utf-8"), r"\.chat-history\[hidden\][^{]*\{[^}]*display:\s*none")
         self.assertRegex((CONSOLE / "console.css").read_text(encoding="utf-8"), r"\.platform-body\[hidden\][^{]*\{[^}]*display:\s*none")
+
+    def test_pages_are_installable_on_iphone_and_desktop(self):
+        for page, manifest in ((ASSISTANT / "index.html", "/manifest.json"), (CONSOLE / "index.html", "/console/manifest.json")):
+            html = page.read_text(encoding="utf-8")
+            self.assertIn("viewport-fit=cover", html, page)
+            self.assertIn('<link rel="manifest" href="%s">' % manifest, html, page)
+            self.assertIn('<link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">', html, page)
+            self.assertIn('name="apple-mobile-web-app-capable" content="yes"', html, page)
+            self.assertIn('<script src="/shared/pwa.js" defer></script>', html, page)
+        self.assertIn("navigator.serviceWorker.register('/sw.js')", (SHARED / "pwa.js").read_text(encoding="utf-8"))
+        for manifest_path in (ASSISTANT / "manifest.json", CONSOLE / "manifest.json"):
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["display"], "standalone")
+            sizes = {icon["sizes"] for icon in manifest["icons"] if icon["type"] == "image/png"}
+            self.assertTrue({"192x192", "512x512"} <= sizes, manifest_path)
+            for icon in manifest["icons"]:
+                self.assertTrue((ASSISTANT / icon["src"].lstrip("/")).is_file(), icon["src"])
+
+    def test_service_worker_never_caches_api_or_sign_in(self):
+        # Answers, records and tokens must never land in the offline cache:
+        # only listed static files and the two pages are handled.
+        sw = (ASSISTANT / "sw.js").read_text(encoding="utf-8")
+        self.assertIn("if (request.method !== 'GET') return;", sw)
+        self.assertIn("if (url.origin !== self.location.origin) return;", sw)
+        self.assertNotIn("/v1", sw)
+        # The sign-in callback's `?code=` is not used as a cache key.
+        self.assertIn("event.respondWith(networkFirst(request, PAGE_KEY));", sw)
+        self.assertIn("const PAGE_KEY = '/';", sw)
+
+    def test_phone_fields_do_not_trigger_ios_zoom(self):
+        css = (SHARED / "styles.css").read_text(encoding="utf-8")
+        self.assertRegex(css, r"\.text-input \{[^}]*font-size: 16px")
+        self.assertIn("env(safe-area-inset-bottom", css)
 
     def test_auth_client_fails_closed_when_config_is_unavailable(self):
         auth = (SHARED / "auth.js").read_text(encoding="utf-8")
@@ -144,7 +178,9 @@ class AppSeparationTests(unittest.TestCase):
     page leads to the other, and each loads only its own app code."""
 
     def test_assistant_does_not_lead_clients_to_the_console(self):
-        for path in ASSISTANT.iterdir():
+        paths = [path for path in ASSISTANT.rglob("*") if path.suffix in {".html", ".js", ".css", ".json", ".svg"}]
+        self.assertTrue(paths)
+        for path in paths:
             text = path.read_text(encoding="utf-8")
             self.assertNotIn("/console", text, path.name)
             self.assertNotIn("platform.html", text, path.name)
@@ -157,8 +193,8 @@ class AppSeparationTests(unittest.TestCase):
     def test_each_page_loads_only_shared_assets_and_its_own_app(self):
         assistant = (ASSISTANT / "index.html").read_text(encoding="utf-8")
         console = (CONSOLE / "index.html").read_text(encoding="utf-8")
-        self.assertEqual(re.findall(r'<script src="([^"]+)"', assistant), ["/shared/auth.js", "/app.js"])
-        self.assertEqual(re.findall(r'<script src="([^"]+)"', console), ["/shared/auth.js", "/console/console.js"])
+        self.assertEqual(re.findall(r'<script src="([^"]+)"', assistant), ["/shared/pwa.js", "/shared/auth.js", "/app.js"])
+        self.assertEqual(re.findall(r'<script src="([^"]+)"', console), ["/shared/pwa.js", "/shared/auth.js", "/console/console.js"])
         self.assertEqual(re.findall(r'<link rel="stylesheet" href="([^"]+)"', assistant), ["/shared/styles.css"])
         self.assertEqual(re.findall(r'<link rel="stylesheet" href="([^"]+)"', console), ["/shared/styles.css", "/console/console.css"])
 
@@ -197,6 +233,12 @@ class AppServingTests(unittest.TestCase):
         self.assertIn("<title>Guru Ji — Assistant</title>", page.text)
         for path in ("/app.js", "/shared/auth.js", "/shared/styles.css"):
             self.assertEqual(client.get(path).status_code, 200, path)
+
+    def test_installable_app_files_are_served(self):
+        client = _client()
+        for path in ("/manifest.json", "/sw.js", "/shared/pwa.js", "/icons/icon-192.png", "/icons/icon-512.png", "/icons/apple-touch-icon.png", "/console/manifest.json"):
+            self.assertEqual(client.get(path).status_code, 200, path)
+        self.assertIn("javascript", client.get("/sw.js").headers["content-type"])
 
     def test_console_is_served_on_its_own_path(self):
         client = _client()
