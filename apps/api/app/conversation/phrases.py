@@ -63,6 +63,12 @@ _PHRASES: dict[str, dict[str, tuple[str, ...]]] = {
         "hi-Latn": ("Maaf kijiye, main samajh nahi paayi. Aap attendance, fees, results ya documents ke baare mein pooch sakte hain, ya kahiye 'internet par search karo'.",),
         "kn-IN": ("ಕ್ಷಮಿಸಿ, ನನಗೆ ಅರ್ಥವಾಗಲಿಲ್ಲ. ಹಾಜರಾತಿ, ಶುಲ್ಕ, ಫಲಿತಾಂಶ ಅಥವಾ ದಾಖಲೆಗಳ ಬಗ್ಗೆ ಕೇಳಬಹುದು, ಅಥವಾ 'ಇಂಟರ್ನೆಟ್‌ನಲ್ಲಿ ಹುಡುಕಿ' ಎಂದು ಹೇಳಿ.",),
     },
+    "model_unavailable": {
+        "en-IN": ("I can't answer that right now: the language model isn't responding. Questions about the college's records still work.",),
+        "hi-IN": ("मैं अभी इसका जवाब नहीं दे सकती: भाषा मॉडल जवाब नहीं दे रहा है। कॉलेज के रिकॉर्ड से जुड़े सवाल अभी भी पूछ सकते हैं।",),
+        "hi-Latn": ("Main abhi iska jawab nahi de sakti: language model jawab nahi de raha. College ke records ke sawaal abhi bhi pooch sakte hain.",),
+        "kn-IN": ("ಈಗ ಇದಕ್ಕೆ ಉತ್ತರಿಸಲು ಆಗುತ್ತಿಲ್ಲ: ಭಾಷಾ ಮಾದರಿ ಸ್ಪಂದಿಸುತ್ತಿಲ್ಲ. ಕಾಲೇಜಿನ ದಾಖಲೆಗಳ ಬಗ್ಗೆ ಪ್ರಶ್ನೆಗಳನ್ನು ಇನ್ನೂ ಕೇಳಬಹುದು.",),
+    },
     "web_filler": {
         "en-IN": ("One moment, let me check the internet.", "Give me a second, I'm searching the web."),
         "hi-IN": ("एक सेकंड, मैं इंटरनेट पर देखती हूँ।",),

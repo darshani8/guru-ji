@@ -177,7 +177,9 @@ class DialogueManager:
             return await self._web(turn, language, query, news=False, on_progress=on_progress, on_speech=on_speech)
         if text is None or (not text and query is None):
             warnings = [{"code": "model_unavailable", "message": "The conversation model is unavailable; a standard reply was given."}] if self.model is not None else []
-            reply = self._reply(turn, "conversation", language, fallback or phrase("not_understood", language), status="needs_input", intent="conversation", warnings=warnings, started=started)
+            # A configured model that failed is said so plainly; the agent's "could not map" would hide the outage.
+            standard = phrase("model_unavailable", language) if self.model is not None else (fallback or phrase("not_understood", language))
+            reply = self._reply(turn, "conversation", language, standard, status="needs_input", intent="conversation", warnings=warnings, started=started)
             reply.extras["retract_speech"] = retract
             return reply
         reply = self._reply(
@@ -191,8 +193,7 @@ class DialogueManager:
     async def _web(self, turn: Turn, language: DetectedLanguage, query: str, *, news: bool, on_progress: Progress | None, on_speech: Speech | None = None) -> Reply:
         started = monotonic()
         if self.web is None:
-            if self.model is not None:
-                return await self._converse(turn, language, on_speech=on_speech)
+            # An explicit look at the internet is never answered from the model's memory.
             return self._reply(turn, "web", language, phrase("web_off", language), status="refused", intent="web_search", refusal_reason="internet search is not configured", started=started)
         if on_progress is not None:
             await on_progress("web_search", phrase("web_filler", language), language)
