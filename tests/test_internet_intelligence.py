@@ -782,6 +782,23 @@ class RobotsCacheAndIdentityTests(unittest.IsolatedAsyncioTestCase):
                 fetcher = PublicPageFetcher(transport=httpx.MockTransport(handler), resolver=fake_resolver, user_agent=crawler_user_agent("webmaster@bgscet.ac.in"))
                 self.assertEqual((await fetcher.retrieve("https://news.example.com/x")).outcome, "robots", (legacy, current))
 
+    def test_the_rename_never_widens_what_the_crawler_may_fetch(self):
+        # Only a group urllib really applies to the new name, and not to the old
+        # one, turns the old name's groups off.
+        from urllib import robotparser
+
+        from app.internet_intelligence.fetch import USER_AGENT, product_token, robots_lines
+
+        cases = (
+            "User-agent: AgenticSaffron\n\nUser-agent: GuruJi\nDisallow: /\n",
+            "User-agent: GuruJi\nDisallow: /\n\nUser-agent: AgenticSaffron-InstitutionIntelligence/1.0 (+https://example.invalid/bot)\nDisallow: /\n",
+            "User-agent: GuruJi\nDisallow: /\n\nUser-agent: InstitutionIntelligence\nDisallow: /private\n",
+        )
+        for text in cases:
+            parser = robotparser.RobotFileParser()
+            parser.parse(robots_lines(text))
+            self.assertFalse(parser.can_fetch(product_token(USER_AGENT), "https://news.example.com/x"), text)
+
     def test_former_crawler_groups_bind_it_whatever_the_line_endings(self):
         from app.internet_intelligence.fetch import robots_lines
 

@@ -77,6 +77,20 @@ class PlannerTests(unittest.TestCase):
             "Kya aap MBA students ki list word mein bana sakte ho?": "docx",
             "MBA students ki list word file mein de dijiye": "docx",
             "Pending fees list ko PPT mein convert karo": "pptx",
+            # Relative clauses, titles, follow-ups, formal openings and other names for the file.
+            "Give me the list of students whose fees are due in PPT": "pptx",
+            "Send the list of MBA students with pending fees to Prof. Iyer in Word format": "docx",
+            "List MBA students with pending fees. I need it in Word.": "docx",
+            "Give me the faculty list of Computer Science. Make it a PPT.": "pptx",
+            "List students below 75% attendance. PPT please.": "pptx",
+            "I would request you to send the pending fees list as a Word document": "docx",
+            "Make a PPT presentation of MBA students with pending fees": "pptx",
+            "Send HOD a PPT of students with low attendance": "pptx",
+            "Prepare a PPT of Computer Science faculty for the NAAC visit": "pptx",
+            "Students with low attendance in a Word file please": "docx",
+            "Export as Word: students with pending fees": "docx",
+            "MBA students ki list ka PPT create karo": "pptx",
+            "HOD ko low attendance students ki list PPT mein bhej do": "pptx",
             "Export an excel of MBA students below 75% attendance": "xlsx",
             "Give me a report of students with pending fees": "xlsx",
         }
@@ -110,6 +124,8 @@ class PlannerTests(unittest.TestCase):
             "Fee structure ka word document chahiye": ["search_documents"],
             "Send the Word document of the timetable to BCA students": ["search_documents"],
             "Get me the Word document of the anti-ragging affidavit": ["search_documents"],
+            "Download the Word document of the annual report": ["search_documents"],
+            "Is the exam timetable available as a PDF document?": ["search_documents"],
         }
         for text, expected in cases.items():
             self.assertEqual([step.tool for step in self.planner.plan(text, self.tools, self.vocab).steps], expected, text)
@@ -132,6 +148,22 @@ class PlannerTests(unittest.TestCase):
             "BCA students ko bolo presentation taiyar karo", "List BCA students with low attendance and prepare them for presentations",
             "Create a list of students for the paper presentation", "Presentations for MBA students next week",
             "Download the sheet of MBA students selected in PPT.",
+            # Refusals, yes/no questions, statements and files handed over.
+            "Send me the list of MBA defaulters, not in Word", "Pending fee list, no PPT please", "Do the fee details appear in Word?",
+            "Student details are in Word only", "I have the student list in Word.", "Faculty list in Word attached, please check for duplicates",
+            "Got the low attendance list in Word, thanks", "Review the faculty list in Word and correct the spellings",
+            # Messages for others, however they are framed.
+            "Ask all HODs - send the faculty list in Word by Friday", "Tell BCA students: share your fee details in Word by Friday", "Dear students, do it in Word",
+            "Students must fill the form and send the details as a PPT", "Can I have faculty send the low attendance list in Word?", "BCA students: do a presentation on AI by Friday",
+            "Sabhi students apna PPT bhej dijiye kal tak", "MBA students jinko kal PPT dena hai unki list bhejo", "Send a mail to faculty requesting the low attendance list in Word format",
+            # Events, training, software and idioms.
+            "Send the scores of MBA students in PPT, quiz and debate to the dean", "Provide training to faculty in MS Word and PowerPoint", "Names of students in PPT on Friday",
+            "Students list for Wipro PPT", "Pending fees of students selected for PPT", "Orientation day plan for BCA students: registration, lunch, PPT",
+            "Get MS Word for the new faculty laptops", "Send the pending fee list to the HOD, in a word, everyone who has not paid", "Summarise BCA attendance shortage in one word",
+            "Pending fees ka status ek word mein de do", "Give a presentation on attendance shortage to parents at the PTM", "Find faculty who teach MBA and have a PPT on Monday",
+            # Existing decks and documents.
+            "Forward the PPT of the student welfare talk to the principal", "Email the HOD the Word document of the faculty orientation", "Faculty development programme ka PPT bhejo",
+            "Forward a Word document from the principal with the students list", "Get the fee structure details for BCA students in Word",
         ):
             self.assertNotIn(extract_entities(text, self.vocab).report_format, {"docx", "pptx"}, text)
 
