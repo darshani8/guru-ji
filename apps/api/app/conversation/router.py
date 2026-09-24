@@ -50,6 +50,8 @@ _SMALL_TALK_FILLERS = frozenset({
 
 _WEB_ANCHOR = re.compile(
     r"\b(internet|the web|web search|on the web|from the web|online|google|googling|net pe|net par|browse|wikipedia|youtube)\b"
+    # Social platforms: "what's on instagram about ..." is a look at the public web too.
+    r"|\b(instagram|insta|facebook|linkedin|linked in|twitter|threads|reddit|quora|social media|socials)\b"
     r"|इंटरनेट|इन्टरनेट|गूगल|ऑनलाइन|ऑन लाइन|वेब|ಇಂಟರ್ನೆಟ್|ಗೂಗಲ್|ಆನ್‌ಲೈನ್|ಆನ್ ಲೈನ್|ವೆಬ್"
 )
 _WEB_VERB = re.compile(

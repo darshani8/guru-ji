@@ -331,19 +331,36 @@ class DialogueTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((student.route, student.status), ("task", "needs_input"), "without intelligence:read the agent's answer stands")
         self.assertEqual(len(self.provider.calls), 1)
 
-    async def test_a_web_request_says_search_is_off_when_the_model_fails_too(self) -> None:
-        dialogue = self._dialogue(web=None, model=_Model(ValueError("down")), institution_names=lambda _college: ("ABC College",))
+    async def test_google_reviews_without_search_or_intelligence_are_told_search_is_off(self) -> None:
+        model = _Model(ValueError("down"))
+        dialogue = self._dialogue(web=None, model=model, institution_names=lambda _college: ("ABC College",))
         for text in ("Sure can you tell me about BGS Google reviews", "Okay go and search the Google reviews of our College"):
             reply = await dialogue.respond(_turn(text, who=principal(PrincipalType.FACULTY)))
-            self.assertEqual((reply.route, reply.status), ("conversation", "needs_input"), text)
+            self.assertEqual((reply.route, reply.status, reply.response.refusal_reason), ("web", "refused", "internet search is not configured"), text)
             self.assertIn("Internet search isn't switched on", reply.response.answer, text)
-            self.assertIn("model_unavailable", [item["code"] for item in reply.response.warnings], text)
+        self.assertEqual(model.prompts, [], "neither turn waits on the model")
 
     async def test_a_slow_model_falls_back(self) -> None:
         dialogue = self._dialogue(model=_SlowModel(None), timeout_seconds=0.05)
         reply = await dialogue.respond(_turn("tell me a joke", who=principal(PrincipalType.FACULTY)))
         self.assertEqual((reply.route, reply.status), ("conversation", "needs_input"))
         self.assertIn("model_unavailable", [item["code"] for item in reply.response.warnings])
+        self.assertIn("language model isn't responding", reply.response.answer)
+
+    async def test_an_unmapped_task_with_a_failed_model_says_so_instead_of_could_not_map(self) -> None:
+        dialogue = self._dialogue(model=_SlowModel(None), timeout_seconds=0.05)
+        reply = await dialogue.respond(_turn("plan a picnic menu for twenty people", who=principal(PrincipalType.PRINCIPAL)))
+        self.assertEqual(reply.route, "conversation")
+        self.assertNotIn("could not map", reply.response.answer)
+        self.assertIn("language model isn't responding", reply.response.answer)
+
+    async def test_social_media_questions_without_search_are_told_search_is_off(self) -> None:
+        model = _Model("Here is some made-up news.")
+        dialogue = self._dialogue(model=model, web=None)
+        for text in ("check yesterday updates on bgs in instagram", "check linkedin posts related to bgs posted yesterday"):
+            reply = await dialogue.respond(_turn(text, who=principal(PrincipalType.PRINCIPAL)))
+            self.assertEqual((reply.route, reply.status, reply.response.refusal_reason), ("web", "refused", "internet search is not configured"), text)
+        self.assertEqual(model.prompts, [], "a look at the internet is never answered from the model's memory")
 
     async def test_hindi_institutional_answers_are_reworded_keeping_numbers(self) -> None:
         def translate(prompt: str) -> str:
