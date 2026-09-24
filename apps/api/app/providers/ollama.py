@@ -8,12 +8,12 @@ from urllib.parse import urlparse
 
 import httpx
 
-from ..domain.errors import ErrorCode, GuruJiError, PublicError
+from ..domain.errors import ErrorCode, AgenticSaffronError, PublicError
 from .model_base import ModelEvent, ProviderCapabilities
 
 
-def _provider_error(message: str) -> GuruJiError:
-    return GuruJiError(PublicError(ErrorCode.SERVICE_UNAVAILABLE, message, "provider"))
+def _provider_error(message: str) -> AgenticSaffronError:
+    return AgenticSaffronError(PublicError(ErrorCode.SERVICE_UNAVAILABLE, message, "provider"))
 
 
 @dataclass(frozen=True, slots=True)

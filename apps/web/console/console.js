@@ -7,7 +7,7 @@
   const state = { entities: [], lastApproval: null, lastCommand: '' };
 
   function headers(json) {
-    return window.GuruAuth.headers(json);
+    return window.SaffronAuth.headers(json);
   }
 
   // `options.raw` returns the Response untouched (used for file downloads);
@@ -482,7 +482,7 @@ ${payload.headers.map((header) => `<div>${escapeHtml(header)}</div><div><select 
   $('notifications-refresh').addEventListener('click', loadNotifications);
 
   // ------------------------------------------------------------------- start
-  const DEMO_ROLE_KEY = 'guru.platform.demoRole';
+  const DEMO_ROLE_KEY = 'saffron.platform.demoRole';
 
   function showGate(message) {
     $('sign-in-gate').hidden = false;
@@ -493,7 +493,7 @@ ${payload.headers.map((header) => `<div>${escapeHtml(header)}</div><div><select 
   function installDemoRolePicker() {
     // Local development only: the server accepts X-Demo-Role, so the console
     // can be exercised as each institutional role. Production uses OIDC claims.
-    const session = window.GuruAuth.demoSession;
+    const session = window.SaffronAuth.demoSession;
     let saved = null;
     try { saved = window.sessionStorage.getItem(DEMO_ROLE_KEY); } catch { /* storage may be blocked */ }
     session.role = saved || 'principal';
@@ -521,7 +521,7 @@ ${payload.headers.map((header) => `<div>${escapeHtml(header)}</div><div><select 
   async function start() {
     let mode;
     try {
-      mode = await window.GuruAuth.init();
+      mode = await window.SaffronAuth.init();
     } catch (error) {
       showGate(error.message);
       setStatus('Signed out', 'bad');
@@ -532,14 +532,14 @@ ${payload.headers.map((header) => `<div>${escapeHtml(header)}</div><div><select 
       setStatus('Sign-in unavailable', 'bad');
       return;
     }
-    if (!window.GuruAuth.isAuthenticated()) {
+    if (!window.SaffronAuth.isAuthenticated()) {
       showGate();
       setStatus('Signed out', 'neutral');
       return;
     }
     if (mode === 'oidc') {
       $('account').hidden = false;
-      $('account-name').textContent = window.GuruAuth.currentUser();
+      $('account-name').textContent = window.SaffronAuth.currentUser();
     } else {
       installDemoRolePicker();
     }
@@ -554,7 +554,7 @@ ${payload.headers.map((header) => `<div>${escapeHtml(header)}</div><div><select 
     loadJobs();
   }
 
-  $('sign-in').addEventListener('click', () => window.GuruAuth.signIn().catch((error) => toast(error.message)));
-  $('sign-out').addEventListener('click', () => window.GuruAuth.signOut());
+  $('sign-in').addEventListener('click', () => window.SaffronAuth.signIn().catch((error) => toast(error.message)));
+  $('sign-out').addEventListener('click', () => window.SaffronAuth.signOut());
   document.addEventListener('DOMContentLoaded', start);
 })();

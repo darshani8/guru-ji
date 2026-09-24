@@ -74,6 +74,29 @@ class WebAssetTests(unittest.TestCase):
         self.assertNotRegex(js, re.compile(r'href="\$\{escapeHtml\((report|item)\.download_path\)\}'))
         self.assertIn("downloadReport(", js)
 
+    def test_assistant_files_download_through_the_authenticated_client(self):
+        # A plain link to the report would reach the server without the signed-in
+        # identity; only this server's report paths are ever fetched.
+        js = (ASSISTANT / "app.js").read_text(encoding="utf-8")
+        self.assertIn("if (!path.startsWith('/v1/reports/'))", js)
+        self.assertIn("const response = await fetch(path, { headers: headers() });", js)
+        self.assertIn("URL.createObjectURL(blob)", js)
+        self.assertNotRegex(js, r"\.href = (?:file|item|artifact|report)\.download_path")
+
+    def test_chat_history_stays_in_this_browser_for_each_account(self):
+        # The server keeps no transcript; chats live in IndexedDB, keyed by who
+        # is signed in, so two people on one computer never see each other's.
+        js = (ASSISTANT / "app.js").read_text(encoding="utf-8")
+        self.assertIn("window.indexedDB.open(HISTORY_DB, 1)", js)
+        self.assertIn("state.owner = window.SaffronAuth.userKey();", js)
+        self.assertIn("store.index('owner').getAll(owner)", js)
+        self.assertIn("if (!stored || stored.owner !== state.owner)", js)
+        self.assertIn("function userKey()", (SHARED / "auth.js").read_text(encoding="utf-8"))
+        self.assertNotIn("/v1/conversations", js)
+        page = (ASSISTANT / "index.html").read_text(encoding="utf-8")
+        for element in ('id="history-list"', 'id="new-chat"', 'id="history-search"', 'id="files-open"'):
+            self.assertIn(element, page)
+
     def test_voice_socket_follows_the_page_scheme_and_host(self):
         # Behind a TLS-terminating load balancer the server sees plain HTTP and
         # advertises ws://, which the browser refuses to open from an HTTPS page.
@@ -116,7 +139,7 @@ class WebAssetTests(unittest.TestCase):
         self.assertIn("rememberToken(parsed.idToken)", auth)
 
     def test_voice_is_a_two_way_conversation(self):
-        # The microphone stays on while Guru Ji speaks; talking over a reply
+        # The microphone stays on while Agentic Saffron speaks; talking over a reply
         # stops it and tells the server, which cancels what it was preparing.
         js = (ASSISTANT / "app.js").read_text(encoding="utf-8")
         self.assertIn("features: ['thinking', 'speech', 'interrupt']", js)
@@ -170,7 +193,7 @@ class WebAssetTests(unittest.TestCase):
     def test_voice_session_never_sends_an_empty_college(self):
         js = (ASSISTANT / "app.js").read_text(encoding="utf-8")
         self.assertIn("JSON.stringify(collegeId ? { college_id: collegeId } : {})", js)
-        self.assertNotIn("JSON.stringify({ college_id: window.GuruAuth.collegeId() })", js)
+        self.assertNotIn("JSON.stringify({ college_id: window.SaffronAuth.collegeId() })", js)
 
 
 class AppSeparationTests(unittest.TestCase):
@@ -213,11 +236,11 @@ def _client(**env: str):
     # needs a fresh module.
     from fastapi.testclient import TestClient
 
-    values = {"GURU_ENVIRONMENT": "development", "CONTROL_DATABASE_URL": ":memory:"}
+    values = {"SAFFRON_ENVIRONMENT": "development", "CONTROL_DATABASE_URL": ":memory:"}
     values.update(env)
     with patch.dict("os.environ", values, clear=False):
-        if "GURU_WEB_CONSOLE_ENABLED" not in env:
-            os.environ.pop("GURU_WEB_CONSOLE_ENABLED", None)
+        if "SAFFRON_WEB_CONSOLE_ENABLED" not in env:
+            os.environ.pop("SAFFRON_WEB_CONSOLE_ENABLED", None)
         import app.main
 
         module = importlib.reload(app.main)
@@ -230,7 +253,7 @@ class AppServingTests(unittest.TestCase):
         client = _client()
         page = client.get("/")
         self.assertEqual(page.status_code, 200)
-        self.assertIn("<title>Guru Ji — Assistant</title>", page.text)
+        self.assertIn("<title>Agentic Saffron — Assistant</title>", page.text)
         for path in ("/app.js", "/shared/auth.js", "/shared/styles.css"):
             self.assertEqual(client.get(path).status_code, 200, path)
 
@@ -244,7 +267,7 @@ class AppServingTests(unittest.TestCase):
         client = _client()
         page = client.get("/console/")
         self.assertEqual(page.status_code, 200)
-        self.assertIn("<title>Guru Ji — Platform console</title>", page.text)
+        self.assertIn("<title>Agentic Saffron — Platform console</title>", page.text)
         for path in ("/console/console.js", "/console/console.css"):
             self.assertEqual(client.get(path).status_code, 200, path)
         for path in ("/console", "/platform.html"):
@@ -255,7 +278,7 @@ class AppServingTests(unittest.TestCase):
         self.assertEqual(client.get("/console.js").status_code, 404)
 
     def test_disabled_console_is_not_served_but_the_assistant_is(self):
-        client = _client(GURU_WEB_CONSOLE_ENABLED="false")
+        client = _client(SAFFRON_WEB_CONSOLE_ENABLED="false")
         for path in ("/console", "/console/", "/console/console.js", "/console/console.css", "/platform.html"):
             self.assertEqual(client.get(path, follow_redirects=False).status_code, 404, path)
         self.assertEqual(client.get("/").status_code, 200)

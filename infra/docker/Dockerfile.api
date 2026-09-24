@@ -17,9 +17,9 @@ ENV UV_PROJECT_ENVIRONMENT=/app/.venv \
 # image gets exactly what CI tested and cannot drift when a bound is widened.
 # The aws extra (S3, SQS, SES, Textract) and the ingest extra (PDF and legacy
 # Excel readers) are what production settings require; the anthropic extra is
-# the Claude SDK behind GURU_MODEL_PROVIDER=anthropic, and the open-task extra
+# the Claude SDK behind SAFFRON_MODEL_PROVIDER=anthropic, and the open-task extra
 # is the Excel, PowerPoint, Word and chart libraries the open-task agent's
-# sandbox offers (GURU_OPEN_TASK_ENABLED).
+# sandbox offers (SAFFRON_OPEN_TASK_ENABLED).
 COPY pyproject.toml uv.lock README.md ./
 RUN uv sync --frozen --no-dev --no-install-project --extra aws --extra ingest --extra anthropic --extra open-task
 
@@ -29,7 +29,7 @@ WORKDIR /app
 
 # The open-task sandbox starts model-written code in its own namespaces with
 # unshare, which util-linux (essential in the Debian base) provides; the host
-# must allow unprivileged user namespaces for GURU_OPEN_TASK_SANDBOX=isolated.
+# must allow unprivileged user namespaces for SAFFRON_OPEN_TASK_SANDBOX=isolated.
 
 ENV PYTHONPATH=/app/apps/api \
     PYTHONDONTWRITEBYTECODE=1 \
@@ -39,10 +39,10 @@ COPY --from=builder /app/.venv /app/.venv
 COPY apps ./apps
 COPY migrations ./migrations
 COPY scripts ./scripts
-RUN useradd --system --create-home --uid 10001 guruji \
+RUN useradd --system --create-home --uid 10001 saffron \
     && mkdir -p /app/data/objects \
     && chown -R 10001:10001 /app/data
-USER guruji
+USER saffron
 
 EXPOSE 8000
 CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

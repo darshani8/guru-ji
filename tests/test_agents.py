@@ -36,6 +36,22 @@ class PlannerTests(unittest.TestCase):
         self.assertEqual(extract_entities("What happened online this month?", self.vocab).window_days, 30)
         self.assertEqual(extract_entities("Update the phone number of student MBA001 to 9999988888", self.vocab).field_change, ("phone", "9999988888"))
 
+    def test_word_and_powerpoint_requests_make_those_files(self):
+        # Without the open-task agent the report tool makes them from the records.
+        cases = {
+            "Make a Word document of MBA students below 75% attendance": "docx",
+            "Create a PowerPoint of students with pending fees": "pptx",
+            "Prepare slides of MBA students below 75% attendance": "pptx",
+            "Export an excel of MBA students below 75% attendance": "xlsx",
+            "Give me a report of students with pending fees": "xlsx",
+        }
+        for text, expected in cases.items():
+            plan = self.planner.plan(text, self.tools, self.vocab)
+            report = [step for step in plan.steps if step.tool == "generate_report"]
+            self.assertEqual(len(report), 1, text)
+            self.assertEqual(report[0].arguments["format"], expected, text)
+        self.assertIsNone(extract_entities("In a word, how are MBA students doing?", self.vocab).report_format)
+
     def test_plans_for_representative_commands(self):
         cases = {
             "How many MBA students have attendance below 75%?": ["find_low_attendance"],

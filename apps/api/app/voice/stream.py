@@ -1,6 +1,6 @@
 """One live voice conversation over a WebSocket, full duplex.
 
-The socket keeps reading while Guru Ji thinks and speaks, so the person can
+The socket keeps reading while Agentic Saffron thinks and speaks, so the person can
 talk over a reply: an ``interrupt`` (or a new utterance) stops the reply that
 is playing. Each turn runs as its own task and every send goes through one
 lock. A conversational or web turn is cancelled outright; a turn that reached
@@ -41,7 +41,7 @@ from .realtime_events import RealtimeEvent
 from .session_manager import VoiceSession
 from .speech_text import speech_chunks
 
-logger = logging.getLogger("guru.voice")
+logger = logging.getLogger("saffron.voice")
 
 MAX_EVENT_BYTES = 32_000
 # At most this many turns in flight on one socket (one being answered, one

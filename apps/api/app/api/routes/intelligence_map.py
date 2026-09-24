@@ -54,7 +54,7 @@ class SourceBody(BaseModel):
 def map_service(request: Request):
     platform = platform_from_request(request)
     if platform.intelligence_map is None:
-        raise HTTPException(status_code=503, detail="the internet map is not enabled (set GURU_INTELLIGENCE_MAP_ENABLED=true)")
+        raise HTTPException(status_code=503, detail="the internet map is not enabled (set SAFFRON_INTELLIGENCE_MAP_ENABLED=true)")
     return platform.intelligence_map
 
 

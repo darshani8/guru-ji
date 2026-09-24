@@ -52,7 +52,7 @@ class DisabledOcrEngine:
     engine_name = "disabled"
 
     def recognize(self, image_bytes: bytes, *, content_type: str = "image/png") -> OcrResult:
-        raise OcrUnavailable("OCR is not configured; set GURU_OCR_ENGINE to tesseract or textract")
+        raise OcrUnavailable("OCR is not configured; set SAFFRON_OCR_ENGINE to tesseract or textract")
 
 
 class TesseractCliOcrEngine:

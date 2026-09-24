@@ -27,20 +27,29 @@ APPROVED_TOOLS = frozenset({
 })
 
 
+def _env(name: str, default: str = "") -> str:
+    """SAFFRON_<name>, or the GURU_<name> spelling a connector configured before the rename still sets."""
+
+    value = os.getenv("SAFFRON_" + name)
+    if value is None:
+        value = os.getenv("GURU_" + name)
+    return default if value is None else value
+
+
 class ConnectorSettings:
     def __init__(self) -> None:
-        self.environment = os.getenv("GURU_CONNECTOR_ENVIRONMENT", os.getenv("GURU_ENVIRONMENT", "development")).strip().lower()
-        self.source_id = os.getenv("GURU_CONNECTOR_SOURCE_ID", "college_a_remote").strip()
-        self.institution_id = os.getenv("GURU_CONNECTOR_INSTITUTION_ID", "college_a").strip()
-        self.service_token = os.getenv("GURU_CONNECTOR_SERVICE_TOKEN", "connector-dev-token").strip()
-        self.database_url = os.getenv("GURU_CONNECTOR_DATABASE_URL", "").strip()
-        self.allowed_college_id = os.getenv("GURU_CONNECTOR_ALLOWED_COLLEGE_ID", self.institution_id).strip()
-        self.allowed_departments = frozenset(filter(None, (item.strip() for item in os.getenv("GURU_CONNECTOR_ALLOWED_DEPARTMENTS", "").split(","))))
-        self.allowed_batches = frozenset(filter(None, (item.strip() for item in os.getenv("GURU_CONNECTOR_ALLOWED_BATCHES", "").split(","))))
+        self.environment = _env("CONNECTOR_ENVIRONMENT", _env("ENVIRONMENT", "development")).strip().lower()
+        self.source_id = _env("CONNECTOR_SOURCE_ID", "college_a_remote").strip()
+        self.institution_id = _env("CONNECTOR_INSTITUTION_ID", "college_a").strip()
+        self.service_token = _env("CONNECTOR_SERVICE_TOKEN", "connector-dev-token").strip()
+        self.database_url = _env("CONNECTOR_DATABASE_URL", "").strip()
+        self.allowed_college_id = _env("CONNECTOR_ALLOWED_COLLEGE_ID", self.institution_id).strip()
+        self.allowed_departments = frozenset(filter(None, (item.strip() for item in _env("CONNECTOR_ALLOWED_DEPARTMENTS", "").split(","))))
+        self.allowed_batches = frozenset(filter(None, (item.strip() for item in _env("CONNECTOR_ALLOWED_BATCHES", "").split(","))))
         if not self.source_id or not self.institution_id or not self.service_token:
             raise ValueError("connector source, institution, and service token are required")
         if self.environment == "production" and not self.database_url:
-            raise ValueError("production connector requires GURU_CONNECTOR_DATABASE_URL")
+            raise ValueError("production connector requires SAFFRON_CONNECTOR_DATABASE_URL")
         if self.environment == "production" and self.service_token == "connector-dev-token":
             raise ValueError("production connector must not use the development service token")
 
@@ -162,13 +171,13 @@ def _authorize(settings: ConnectorSettings, body: ExecuteBody, authorization: st
 def create_app(settings: ConnectorSettings | None = None, repository: ReportingRepository | None = None) -> FastAPI:
     settings = settings or ConnectorSettings()
     repository = repository or settings.repository
-    app = FastAPI(title="Guru Ji Institution Connector", version="0.2.0")
+    app = FastAPI(title="Agentic Saffron Institution Connector", version="0.2.0")
     app.state.settings = settings
     app.state.repository = repository
 
     @app.get("/v1/health")
     def health() -> dict[str, object]:
-        return {"service": "guru-ji-institution-connector", "source_id": settings.source_id, **repository.health()}
+        return {"service": "agentic-saffron-institution-connector", "source_id": settings.source_id, **repository.health()}
 
     @app.post("/v1/execute")
     def execute(body: ExecuteBody, authorization: str | None = Header(default=None)) -> dict[str, object]:

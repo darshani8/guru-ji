@@ -344,15 +344,15 @@ class RetentionSettingsTests(unittest.TestCase):
         for days in (30, 365, 3650):
             AppSettings(intelligence_retention_days=days).ensure_safe_for_production()
         for days in (0, 29, 3651):
-            with self.assertRaisesRegex(ValueError, "GURU_INTELLIGENCE_RETENTION_DAYS", msg=str(days)):
+            with self.assertRaisesRegex(ValueError, "SAFFRON_INTELLIGENCE_RETENTION_DAYS", msg=str(days)):
                 AppSettings(intelligence_retention_days=days).ensure_safe_for_production()
 
     def test_it_is_read_from_the_environment(self):
-        with mock.patch.dict(os.environ, {"GURU_INTELLIGENCE_RETENTION_DAYS": "90"}):
+        with mock.patch.dict(os.environ, {"SAFFRON_INTELLIGENCE_RETENTION_DAYS": "90"}):
             self.assertEqual(AppSettings.from_env().intelligence_retention_days, 90)
 
     def test_the_example_environment_documents_it(self):
-        self.assertIn("GURU_INTELLIGENCE_RETENTION_DAYS=365", (REPO_ROOT / ".env.example").read_text(encoding="utf-8"))
+        self.assertIn("SAFFRON_INTELLIGENCE_RETENTION_DAYS=365", (REPO_ROOT / ".env.example").read_text(encoding="utf-8"))
 
 
 class Queue:

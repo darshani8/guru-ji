@@ -343,7 +343,7 @@ class OwnerOutageTests(OwnerBase):
         before = self.evidence_count()
         for name, fetcher, outcome in (
             ("503", web(status=503), "server_error"), ("403", web(status=403), "blocked"),
-            ("robots", web(robots="User-agent: GuruJi-InstitutionIntelligence/1.0\nDisallow: /\n"), "robots"), ("timeout", web(timeout=True), "timeout"),
+            ("robots", web(robots="User-agent: AgenticSaffron-InstitutionIntelligence/1.0\nDisallow: /\n"), "robots"), ("timeout", web(timeout=True), "timeout"),
         ):
             result = await self.check(fetcher=fetcher)
             self.assertTrue(result.failed, name)

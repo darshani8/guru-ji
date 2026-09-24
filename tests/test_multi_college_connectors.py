@@ -49,8 +49,8 @@ class MultiCollegeConnectorTests(unittest.TestCase):
         with patch.dict(
             os.environ,
             {
-                "GURU_ENVIRONMENT": "test",
-                "GURU_INSTITUTION_CONNECTORS": raw,
+                "SAFFRON_ENVIRONMENT": "test",
+                "SAFFRON_INSTITUTION_CONNECTORS": raw,
                 "COLLEGE_A_CONNECTOR_TOKEN": "a-secret",
                 "COLLEGE_B_CONNECTOR_TOKEN": "b-secret",
             },

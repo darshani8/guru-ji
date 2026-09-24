@@ -36,7 +36,7 @@ from app.policy.pdp import LocalPolicyDecisionPoint
 from app.storage.object_store import InMemoryObjectStore
 from test_intelligence_map_engine import CONTACT, HOME, NOW, PROFILE, PUBLIC_IP, Clock, Site
 
-POSTGRES_URL = os.environ.get("GURU_TEST_POSTGRES_URL", "")
+POSTGRES_URL = os.environ.get("SAFFRON_TEST_POSTGRES_URL", "")
 PARKED = "<html><head><title>acmbgs.org</title></head><body><p>This domain is for sale! Buy this domain.</p></body></html>"
 GAMBLING = "<html><head><title>Slot Gacor Maxwin Togel</title></head><body><p>situs slot gacor hari ini, togel, judi online, maxwin</p></body></html>"
 CSE = """<html><head><title>Department of CSE - BGS College of Engineering and Technology</title></head><body><p>CSE department</p>
@@ -134,7 +134,7 @@ class PolitenessTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.gaps(), [1.0, 1.0], "a second apart by default")
 
     async def test_a_crawl_delay_for_our_crawler_by_name_is_honoured(self):
-        fetcher = self.fetcher(robots="User-agent: GuruJi-InstitutionIntelligence/1.0\nCrawl-delay: 20\n\nUser-agent: *\nCrawl-delay: 5\n")
+        fetcher = self.fetcher(robots="User-agent: AgenticSaffron-InstitutionIntelligence/1.0\nCrawl-delay: 20\n\nUser-agent: *\nCrawl-delay: 5\n")
         for path in ("/a", "/b"):
             await fetcher.retrieve(f"https://bgscet.ac.in{path}")
         self.assertEqual(self.gaps(), [20.0, 20.0], "the group naming our product token (with or without a version) is the one that applies")
@@ -171,7 +171,7 @@ class HostSlotStoreTests(unittest.TestCase):
         self.assertEqual(store.claim_host_slot("bgscet.ac.in", 25, now=113.0), 0.0)
 
 
-@unittest.skipUnless(POSTGRES_URL, "set GURU_TEST_POSTGRES_URL to run the PostgreSQL tests")
+@unittest.skipUnless(POSTGRES_URL, "set SAFFRON_TEST_POSTGRES_URL to run the PostgreSQL tests")
 class PostgresHostSlotTests(unittest.TestCase):
     def test_one_worker_wins_each_slot(self):
         stores = [MapStore(POSTGRES_URL, suppression_key=b"k") for _ in range(4)]

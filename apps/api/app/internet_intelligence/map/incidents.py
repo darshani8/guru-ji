@@ -103,7 +103,7 @@ class IncidentDesk:
     # The site owner's security contacts (email addresses, from the profile) and how to email them.
     contacts: Callable[[str], Sequence[str]] = lambda institution_id: ()
     email: Email | None = None
-    # sweep group -> its IT office's addresses (GURU_INTELLIGENCE_AUTHORITY_CONTACTS)
+    # sweep group -> its IT office's addresses (SAFFRON_INTELLIGENCE_AUTHORITY_CONTACTS)
     authority_contacts: Mapping[str, Sequence[str]] = field(default_factory=dict)
 
     def record(self, institution_id: str, incidents: Sequence[Mapping[str, Any]], *, run_id: str | None = None) -> dict[str, int]:

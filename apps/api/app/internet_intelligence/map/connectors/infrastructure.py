@@ -8,7 +8,7 @@ nobody remembered. These connectors watch for that directly:
   transparency logs become leads (a live, healthy one is one step from its
   parent's grade, because only the domain's owner controls its DNS). The
   logs are read through SSLMate's Cert Spotter API (unauthenticated at a
-  low rate, or with GURU_INTELLIGENCE_CERTSPOTTER_TOKEN); crt.sh is not
+  low rate, or with SAFFRON_INTELLIGENCE_CERTSPOTTER_TOKEN); crt.sh is not
   used because its robots.txt disallows every path;
 * rdap: registration expiry and hold / redemption status, raised as an
   incident well before a domain lapses (urgent within two weeks);

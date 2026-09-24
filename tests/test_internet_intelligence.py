@@ -722,8 +722,8 @@ class RobotsCacheAndIdentityTests(unittest.IsolatedAsyncioTestCase):
         from app.internet_intelligence.fetch import USER_AGENT, crawler_user_agent
 
         self.assertEqual(crawler_user_agent(""), USER_AGENT)
-        self.assertEqual(crawler_user_agent("https://bgscet.ac.in/crawler"), "GuruJi-InstitutionIntelligence/1.0 (+https://bgscet.ac.in/crawler)")
-        self.assertEqual(crawler_user_agent("webmaster@bgscet.ac.in"), "GuruJi-InstitutionIntelligence/1.0 (+mailto:webmaster@bgscet.ac.in)")
+        self.assertEqual(crawler_user_agent("https://bgscet.ac.in/crawler"), "AgenticSaffron-InstitutionIntelligence/1.0 (+https://bgscet.ac.in/crawler)")
+        self.assertEqual(crawler_user_agent("webmaster@bgscet.ac.in"), "AgenticSaffron-InstitutionIntelligence/1.0 (+mailto:webmaster@bgscet.ac.in)")
         for bad in ("http://insecure.example", "not a contact", "https://x.example/(y)"):
             with self.assertRaises(ValueError):
                 crawler_user_agent(bad)
@@ -742,7 +742,7 @@ class RobotsCacheAndIdentityTests(unittest.IsolatedAsyncioTestCase):
     async def test_a_robots_group_names_the_crawler_by_product_token(self):
         from app.internet_intelligence.fetch import crawler_user_agent
 
-        for group in ("GuruJi-InstitutionIntelligence", "GuruJi-InstitutionIntelligence/1.0", "guruji-institutionintelligence/2.3"):
+        for group in ("AgenticSaffron-InstitutionIntelligence", "AgenticSaffron-InstitutionIntelligence/1.0", "agenticsaffron-institutionintelligence/2.3"):
             def handler(request: httpx.Request, group=group) -> httpx.Response:
                 if request.url.path == "/robots.txt":
                     return httpx.Response(200, text=f"User-agent: SomeOtherBot/1.0\nDisallow: /\n\nUser-agent: {group}\nDisallow: /private\n", request=request)
@@ -752,13 +752,28 @@ class RobotsCacheAndIdentityTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual((await fetcher.retrieve("https://news.example.com/private/x")).outcome, "robots", group)
             self.assertEqual((await fetcher.retrieve("https://news.example.com/x")).outcome, "ok", f"{group}: another bot's group does not apply")
 
+    async def test_a_robots_group_for_the_former_crawler_name_still_applies(self):
+        # Webmasters wrote rules for the crawler before the product was renamed;
+        # the rename must not quietly let it fetch what they had shut off.
+        from app.internet_intelligence.fetch import crawler_user_agent
+
+        for group in ("GuruJi-InstitutionIntelligence", "GuruJi-InstitutionIntelligence/1.0", "guruji-institutionintelligence"):
+            def handler(request: httpx.Request, group=group) -> httpx.Response:
+                if request.url.path == "/robots.txt":
+                    return httpx.Response(200, text=f"User-agent: *\nAllow: /\n\nUser-agent: {group}\nDisallow: /private\n", request=request)
+                return httpx.Response(200, headers={"content-type": "text/html"}, text=PAGE, request=request)
+
+            fetcher = PublicPageFetcher(transport=httpx.MockTransport(handler), resolver=fake_resolver, user_agent=crawler_user_agent("webmaster@bgscet.ac.in"))
+            self.assertEqual((await fetcher.retrieve("https://news.example.com/private/x")).outcome, "robots", group)
+            self.assertEqual((await fetcher.retrieve("https://news.example.com/x")).outcome, "ok", group)
+
     def test_settings_reject_a_malformed_contact(self):
         import os
         from unittest import mock
 
         from app.config.settings import AppSettings
 
-        with mock.patch.dict(os.environ, {"GURU_INTELLIGENCE_CRAWLER_CONTACT": "call me maybe"}):
+        with mock.patch.dict(os.environ, {"SAFFRON_INTELLIGENCE_CRAWLER_CONTACT": "call me maybe"}):
             with self.assertRaises(ValueError):
                 AppSettings.from_env().ensure_safe_for_production()
 

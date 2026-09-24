@@ -71,7 +71,7 @@ class MapService:
     seed_groups: Mapping[str, Sequence[str]] = field(default_factory=dict)
     desk: IncidentDesk | None = None
     # sweep group -> the principals who may decide for that group's entities
-    # (GURU_INTELLIGENCE_ENTITY_APPROVERS): the Math's or the trust's IT office
+    # (SAFFRON_INTELLIGENCE_ENTITY_APPROVERS): the Math's or the trust's IT office
     approvers: Mapping[str, Sequence[str]] = field(default_factory=dict)
 
     @staticmethod
@@ -99,7 +99,7 @@ class MapService:
             found = found or chain[0]
             if approves(self.approvers, chain, principal.principal_id) is None:
                 raise PermissionError(
-                    f"this concerns an entity under the authority of {chain[0]!r}; only its approvers (GURU_INTELLIGENCE_ENTITY_APPROVERS) can decide it, others can only dismiss it"
+                    f"this concerns an entity under the authority of {chain[0]!r}; only its approvers (SAFFRON_INTELLIGENCE_ENTITY_APPROVERS) can decide it, others can only dismiss it"
                 )
         return found
 
@@ -145,7 +145,7 @@ class MapService:
         """Import a sweep. Anything beyond the institution's own groups needs a named approval.
 
         Which sweep groups belong to an institution is operator configuration
-        (GURU_INTELLIGENCE_SEED_GROUPS), never the caller's say-so: a group
+        (SAFFRON_INTELLIGENCE_SEED_GROUPS), never the caller's say-so: a group
         label in a request, or in a sweep file the caller wrote, proves
         nothing. An import of the bundled sweep limited to the institution's
         configured groups needs no approval; anything else (other groups,
@@ -194,7 +194,7 @@ class MapService:
 
         self.guard(principal, institution_id, Capability.INTELLIGENCE_MANAGE)
         if self.fetcher is None:
-            raise ValueError("page fetching is disabled (GURU_INTELLIGENCE_FETCH_PAGES=false)")
+            raise ValueError("page fetching is disabled (SAFFRON_INTELLIGENCE_FETCH_PAGES=false)")
         if asset_ids:
             domains = [asset for asset in (self.store.get_asset(institution_id, asset_id) for asset_id in asset_ids) if asset and asset["kind"] == "domain"]
         else:
@@ -428,7 +428,7 @@ class MapService:
 
         self.guard(principal, institution_id, Capability.INTELLIGENCE_MANAGE)
         if self.fetcher is None:
-            raise ValueError("page fetching is disabled (GURU_INTELLIGENCE_FETCH_PAGES=false)")
+            raise ValueError("page fetching is disabled (SAFFRON_INTELLIGENCE_FETCH_PAGES=false)")
         connector = self.engine.registry.get("owner_claims") if self.engine else None
         connector = connector or OwnerClaimsConnector(key=self.store.suppression_key)
         wanted = set(asset_ids or ())

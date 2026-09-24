@@ -1,4 +1,4 @@
-# Guru Ji all-phase implementation status
+# Agentic Saffron all-phase implementation status
 
 ## Repository implementation completed
 
@@ -30,7 +30,7 @@ All six roadmap phases now have code, contracts, tests, and deployment reference
 
 - SQLite and PostgreSQL stores now share audit, source-health, briefing, answer-envelope, model-attempt, and outbox schemas.
 - Answer envelopes store counts and a SHA-256 correlation hash, not answer text. Model attempts store provider/model, outcome, latency, fallback, usage, and cost fields without prompts or completions.
-- Startup retention pruning is configured and bounded by `GURU_AUDIT_RETENTION_DAYS`.
+- Startup retention pruning is configured and bounded by `SAFFRON_AUDIT_RETENTION_DAYS`.
 - Outbox delivery is retry-safe: records are acknowledged only after the handler succeeds.
 - The PostgreSQL smoke script covers migration, persistence, outbox delivery, and retention against a real configured database URL.
 
@@ -47,6 +47,7 @@ All six roadmap phases now have code, contracts, tests, and deployment reference
 - Added an optional LiteLLM adapter with normalized async streaming events and usage metadata; it is enabled only by explicit configuration and optional dependency installation.
 - Added redaction-safe HTTP trace export for internal collectors. Export failures are best effort and never alter authorization or answer behavior.
 - Added provider capability declarations and runtime configuration guards for production model selection.
+- Renamed the product from Guru Ji to Agentic Saffron. Settings are read as `SAFFRON_*`; `app/config/legacy_env.py` copies each `GURU_*` variable to its unset `SAFFRON_*` name (a `SAFFRON_*` value always wins), and the connector falls back to `GURU_CONNECTOR_*`, so existing deployments keep working. Names that are contracts with outside systems keep the old spelling: OIDC claims (`guru_role`, `guru_capabilities`, `guru_scopes`, `guru_parental_consent`, `guru_revoked`), the reporting views `public.guru_student_overview` and `public.guru_attendance_summary`, the `guruji-verification` ownership protocol, the `X-Guru-*` headers and LMS identity paths, the Cerbos policy versions, and the development suppression key. The crawler User-Agent is `AgenticSaffron-InstitutionIntelligence/1.0`, and robots.txt groups for `GuruJi-InstitutionIntelligence` still apply to it.
 
 ### P6 — edge and full integration boundaries
 
@@ -67,6 +68,7 @@ All six roadmap phases now have code, contracts, tests, and deployment reference
 - Master agent with deterministic and model planners, data/action/internet specialists, step bindings, verification, audit, and background execution with notifications; voice can route transcripts through the agent.
 - Document intelligence (chunking, embeddings, classification-aware retrieval, cited answers) and internet intelligence (profiles, query generation, robots-aware fetching, entity resolution, relevance/date filters, evidence store, monitoring digests and alerts).
 - Routes, OpenAPI contract, Cerbos policy for platform tools, platform console page, worker and monitor scripts, compose services, and tests for every layer. See `docs/PLATFORM_BLUEPRINT.md`.
+- `generate_report` also writes Word (`.docx`) and PowerPoint (`.pptx`) files without extra dependencies, besides CSV, Excel and PDF; Word files hold up to 5,000 rows and decks up to 240 rows and 10 columns (12 rows per slide), and a larger result says how many rows it leaves out and suggests Excel. The client assistant page is a chat layout with light and dark themes, chat history kept per account in the browser's IndexedDB (up to 300 chats; the server stores no transcript), safely rendered Markdown, collapsible sources, file cards that download through the signed-in client, a "Your files" list (`GET /v1/reports`), and polling of background open-task jobs (`GET /v1/agent/jobs/{id}`).
 
 ### P8 — internet map
 
@@ -78,7 +80,7 @@ All six roadmap phases now have code, contracts, tests, and deployment reference
 - A shared public-web cache (`intel_shared_cache`, a global table outside row-level security): a search another institution already paid for is answered from it for 7 days at a cost of 0, and open-API answers (Wikidata, OpenStreetMap, RDAP, the certificate log) are shared for a day, keyed without any key or token; page validators stay per institution, YouTube and court records are never shared, and the daily digest prunes what expired.
 - Connectors: official-site harvest, lead pages, re-checks and owner claims (always on; public pages and the institution's own domains only), and search, spam probe, site feeds, English and Kannada news feeds (mentions go to review or the digest, never to grades), YouTube Data API (channel, last upload from the uploads playlist, identity changes; channel feeds are not read because youtube.com's robots.txt disallows them), Wikidata, IndianKanoon (review only), certificate transparency through SSLMate's Cert Spotter (crt.sh's robots.txt disallows crawling), look-alike domain registrations (review only), RDAP and DNS over HTTPS (nominated or B-and-better domains only), Wayback (healthy captures, archived contact pages, archived hosts), link hubs, directories (an exact regulator host allowlist; a regulator's first mention of an unsupported domain goes to review), OpenStreetMap (15 s between requests, cached place IDs, a required crawler contact, ODbL attribution), Google Play listings and Google Play search (each off until configured).
 - A manager-only review queue (one decision per item, expired items asked again, rejections that take back what a look-alike vouched for and prune its leads), incidents with guidance and severity routing (immediate email to the institution's security contacts, and a daily digest with memory), owner confirmation by a per-domain token that a lost domain voids, suppression of personal accounts, person-name redaction of stored text, reader restrictions on sensitive topics and on unpublished grades, a per-person investigation allowance, routes, a console card with a run series, freshness and cost per verified item, and a guide for institution web administrators.
-- A retention period for intelligence data (India's DPDP Act), `GURU_INTELLIGENCE_RETENTION_DAYS` (default 365, 30 to 3650), is applied at start-up and with each daily map digest. It deletes monitoring documents, events, runs and reports, and the map's closed review items, resolved incidents, runs, stale validators, abandoned sources and superseded observations. It blanks free-text evidence detail and keeps every row the grader reads, so no grade moves. Quota rows go after 30 days. Each institution is pruned in its own row-level-security tenant transaction.
+- A retention period for intelligence data (India's DPDP Act), `SAFFRON_INTELLIGENCE_RETENTION_DAYS` (default 365, 30 to 3650), is applied at start-up and with each daily map digest. It deletes monitoring documents, events, runs and reports, and the map's closed review items, resolved incidents, runs, stale validators, abandoned sources and superseded observations. It blanks free-text evidence detail and keeps every row the grader reads, so no grade moves. Quota rows go after 30 days. Each institution is pruned in its own row-level-security tenant transaction.
 - Every external service is exercised only through fake transports in the tests; no platform was logged in to and no real site or API was contacted by the test suite.
 
 ## Validation completed in this export

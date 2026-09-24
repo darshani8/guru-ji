@@ -13,10 +13,10 @@ from .language import DetectedLanguage
 
 _PHRASES: dict[str, dict[str, tuple[str, ...]]] = {
     "greeting": {
-        "en-IN": ("Namaste! I'm Guru Ji. What can I do for you today?", "Hello! Guru Ji here. How can I help you?", "Namaste! Tell me, how can I help?"),
-        "hi-IN": ("नमस्ते! मैं गुरु जी हूँ। बताइए, मैं आपकी क्या मदद कर सकती हूँ?", "नमस्ते! कहिए, आज मैं आपके लिए क्या करूँ?"),
-        "hi-Latn": ("Namaste! Main Guru Ji hoon. Bataiye, main aapki kya madad kar sakti hoon?", "Namaste ji! Kahiye, aaj main aapke liye kya karoon?"),
-        "kn-IN": ("ನಮಸ್ಕಾರ! ನಾನು ಗುರು ಜಿ. ನಾನು ನಿಮಗೆ ಹೇಗೆ ಸಹಾಯ ಮಾಡಲಿ?", "ನಮಸ್ಕಾರ! ಹೇಳಿ, ಇವತ್ತು ನಿಮಗೆ ಏನು ಬೇಕು?"),
+        "en-IN": ("Namaste! I'm Agentic Saffron. What can I do for you today?", "Hello! Agentic Saffron here. How can I help you?", "Namaste! Tell me, how can I help?"),
+        "hi-IN": ("नमस्ते! मैं एजेंटिक सैफ्रन हूँ। बताइए, मैं आपकी क्या मदद कर सकती हूँ?", "नमस्ते! कहिए, आज मैं आपके लिए क्या करूँ?"),
+        "hi-Latn": ("Namaste! Main Agentic Saffron hoon. Bataiye, main aapki kya madad kar sakti hoon?", "Namaste ji! Kahiye, aaj main aapke liye kya karoon?"),
+        "kn-IN": ("ನಮಸ್ಕಾರ! ನಾನು ಏಜೆಂಟಿಕ್ ಸ್ಯಾಫ್ರನ್. ನಾನು ನಿಮಗೆ ಹೇಗೆ ಸಹಾಯ ಮಾಡಲಿ?", "ನಮಸ್ಕಾರ! ಹೇಳಿ, ಇವತ್ತು ನಿಮಗೆ ಏನು ಬೇಕು?"),
     },
     "how_are_you": {
         "en-IN": ("I'm doing very well, thank you for asking! How are you? What can I help you with?", "All good here, thank you! How about you? Tell me what you need."),
@@ -31,10 +31,10 @@ _PHRASES: dict[str, dict[str, tuple[str, ...]]] = {
         "kn-IN": ("ಪರವಾಗಿಲ್ಲ! ಇನ್ನೇನಾದರೂ ಬೇಕಿದ್ದರೆ ಹೇಳಿ.",),
     },
     "identity": {
-        "en-IN": ("I'm Guru Ji, your institution's assistant. I can answer from the college's records, search the internet, and just chat. Ask me anything!",),
-        "hi-IN": ("मैं गुरु जी हूँ, आपके संस्थान की सहायक। मैं कॉलेज के रिकॉर्ड से जवाब दे सकती हूँ, इंटरनेट पर खोज सकती हूँ, और आपसे बात भी कर सकती हूँ।",),
-        "hi-Latn": ("Main Guru Ji hoon, aapke institution ki assistant. Main college ke records se jawab de sakti hoon, internet par search kar sakti hoon, aur aapse baat bhi kar sakti hoon.",),
-        "kn-IN": ("ನಾನು ಗುರು ಜಿ, ನಿಮ್ಮ ಸಂಸ್ಥೆಯ ಸಹಾಯಕಿ. ಕಾಲೇಜಿನ ದಾಖಲೆಗಳಿಂದ ಉತ್ತರ ಕೊಡಬಲ್ಲೆ, ಇಂಟರ್ನೆಟ್‌ನಲ್ಲಿ ಹುಡುಕಬಲ್ಲೆ, ಮತ್ತು ನಿಮ್ಮ ಜೊತೆ ಮಾತನಾಡಬಲ್ಲೆ.",),
+        "en-IN": ("I'm Agentic Saffron, your institution's assistant. I can answer from the college's records, search the internet, and just chat. Ask me anything!",),
+        "hi-IN": ("मैं एजेंटिक सैफ्रन हूँ, आपके संस्थान की सहायक। मैं कॉलेज के रिकॉर्ड से जवाब दे सकती हूँ, इंटरनेट पर खोज सकती हूँ, और आपसे बात भी कर सकती हूँ।",),
+        "hi-Latn": ("Main Agentic Saffron hoon, aapke institution ki assistant. Main college ke records se jawab de sakti hoon, internet par search kar sakti hoon, aur aapse baat bhi kar sakti hoon.",),
+        "kn-IN": ("ನಾನು ಏಜೆಂಟಿಕ್ ಸ್ಯಾಫ್ರನ್, ನಿಮ್ಮ ಸಂಸ್ಥೆಯ ಸಹಾಯಕಿ. ಕಾಲೇಜಿನ ದಾಖಲೆಗಳಿಂದ ಉತ್ತರ ಕೊಡಬಲ್ಲೆ, ಇಂಟರ್ನೆಟ್‌ನಲ್ಲಿ ಹುಡುಕಬಲ್ಲೆ, ಮತ್ತು ನಿಮ್ಮ ಜೊತೆ ಮಾತನಾಡಬಲ್ಲೆ.",),
     },
     "help": {
         "en-IN": (

@@ -26,7 +26,7 @@ class ToolDefinition:
             raise ValueError("tool name must not be blank")
         object.__setattr__(self, "source_ids", tuple(self.source_ids))
         if not self.read_only:
-            raise ValueError("Guru Ji only registers read-only tools")
+            raise ValueError("Agentic Saffron only registers read-only tools")
 
     def allows_source(self, source_id: str) -> bool:
         return source_id in self.source_ids

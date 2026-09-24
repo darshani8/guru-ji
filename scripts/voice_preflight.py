@@ -1,6 +1,6 @@
 """Check the real voice services before a demo: Polly, the conversation model and web search.
 
-A wrong key or a missing IAM permission does not break Guru Ji; it quietly
+A wrong key or a missing IAM permission does not break Agentic Saffron; it quietly
 falls back to the browser voice, fixed replies or no web search. Run this in
 the deployed task, with the same environment as the API, to see which one is
 in effect:
@@ -25,7 +25,7 @@ from app.conversation.streaming import stream_reply
 from app.internet_intelligence.search import IntelligenceSearchUnavailable, TavilyIntelligenceSearchProvider
 from app.voice.tts import build_synthesizer
 
-VOICE_SAMPLES = (("en-IN", "Hello, I am Guru Ji. How can I help you today?"), ("hi-IN", "नमस्ते, मैं गुरु जी हूँ।"))
+VOICE_SAMPLES = (("en-IN", "Hello, I am Agentic Saffron. How can I help you today?"), ("hi-IN", "नमस्ते, मैं एजेंटिक सैफ्रन हूँ।"))
 MODEL_PROMPT = "Greet a college student in one short, friendly sentence."
 WEB_QUERY = "weather in Bengaluru today"
 
@@ -39,7 +39,7 @@ class Check:
 
 async def check_voice(settings: AppSettings, synthesizer) -> list[Check]:
     if settings.voice_tts_provider != "polly":
-        return [Check("voice", "SKIP", "GURU_VOICE_TTS_PROVIDER is browser: the device's own voice speaks")]
+        return [Check("voice", "SKIP", "SAFFRON_VOICE_TTS_PROVIDER is browser: the device's own voice speaks")]
     checks = []
     for language, text in VOICE_SAMPLES:
         speech = await synthesizer.synthesize(text, language=language)
@@ -53,9 +53,9 @@ async def check_voice(settings: AppSettings, synthesizer) -> list[Check]:
 
 async def check_model(settings: AppSettings, model) -> Check:
     if not settings.conversation_enabled:
-        return Check("model", "WARN", "GURU_CONVERSATION_ENABLED is off: questions the agent cannot map get a fixed reply")
+        return Check("model", "WARN", "SAFFRON_CONVERSATION_ENABLED is off: questions the agent cannot map get a fixed reply")
     if model is None:
-        return Check("model", "WARN", f"GURU_MODEL_PROVIDER is {settings.model_provider}: conversation uses fixed replies")
+        return Check("model", "WARN", f"SAFFRON_MODEL_PROVIDER is {settings.model_provider}: conversation uses fixed replies")
     started = monotonic()
     first: list[float] = []
 
@@ -85,12 +85,12 @@ def web_provider(settings: AppSettings) -> TavilyIntelligenceSearchProvider | No
 async def check_web(settings: AppSettings, provider) -> Check:
     if provider is None:
         if not settings.assistant_web_search:
-            return Check("web", "WARN", "GURU_ASSISTANT_WEB_SEARCH is off: \"search the internet\" is answered without the web")
-        return Check("web", "WARN", "web search is off: set GURU_WEB_SEARCH_PROVIDER=tavily and GURU_WEB_SEARCH_API_KEY")
+            return Check("web", "WARN", "SAFFRON_ASSISTANT_WEB_SEARCH is off: \"search the internet\" is answered without the web")
+        return Check("web", "WARN", "web search is off: set SAFFRON_WEB_SEARCH_PROVIDER=tavily and SAFFRON_WEB_SEARCH_API_KEY")
     try:
         hits = await provider.search(WEB_QUERY, max_results=3)
     except IntelligenceSearchUnavailable as exc:
-        return Check("web", "FAIL", f"Tavily: {exc}; check GURU_WEB_SEARCH_API_KEY and outbound access to {settings.web_search_endpoint}")
+        return Check("web", "FAIL", f"Tavily: {exc}; check SAFFRON_WEB_SEARCH_API_KEY and outbound access to {settings.web_search_endpoint}")
     if not hits:
         return Check("web", "WARN", "Tavily answered but found nothing for a simple query")
     return Check("web", "OK", f"Tavily: {len(hits)} results")

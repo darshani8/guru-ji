@@ -4,7 +4,7 @@ import json
 import os
 from urllib.request import Request, urlopen
 
-BASE_URL = os.getenv("GURU_BASE_URL", "http://127.0.0.1:8000")
+BASE_URL = os.getenv("SAFFRON_BASE_URL", "http://127.0.0.1:8000")
 HEADERS = {
     "Authorization": "Bearer dev-token",
     "X-Demo-Principal": "smoke-script",

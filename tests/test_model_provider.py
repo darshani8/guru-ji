@@ -11,7 +11,7 @@ import httpx
 
 from app.api.dependencies import build_runtime
 from app.config.settings import AppSettings
-from app.domain.errors import ErrorCode, GuruJiError, PublicError
+from app.domain.errors import ErrorCode, AgenticSaffronError, PublicError
 from app.orchestration.answer_synthesizer import AssistantAnswer, apply_model_wording
 from app.providers.anthropic import BEDROCK_FALLBACK_MODEL, FALLBACK_BETA, LATENCY_SENSITIVE_SYSTEM, MIN_MAX_TOKENS, AnthropicProvider
 from app.providers.ollama import OllamaProvider
@@ -63,7 +63,7 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
             base_url="http://ollama.test:11434",
             transport=httpx.MockTransport(handler),
         )
-        with self.assertRaises(GuruJiError) as context:
+        with self.assertRaises(AgenticSaffronError) as context:
             await provider.complete("approved answer")
         self.assertEqual(context.exception.public_error.message, "The configured local model provider is unavailable.")
         self.assertNotIn("private provider internals", str(context.exception))
@@ -93,7 +93,7 @@ class ModelProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(item["code"] == "model_output_rejected" for item in result.warnings))
 
     async def test_provider_failure_returns_deterministic_answer(self):
-        model = _StaticModel(error=GuruJiError(PublicError(ErrorCode.SERVICE_UNAVAILABLE, "provider failed", "test")))
+        model = _StaticModel(error=AgenticSaffronError(PublicError(ErrorCode.SERVICE_UNAVAILABLE, "provider failed", "test")))
         answer = AssistantAnswer(request_id="req-model", status="complete", answer="Approved answer 1240.")
         result = await apply_model_wording(answer, model)
         self.assertEqual(result.generation_mode, "deterministic_fallback")
@@ -229,7 +229,7 @@ class ClaudeProviderTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_slow_answer_is_abandoned_at_the_deadline(self):
         provider = _claude(_FakeMessages(_message(("text", "late")), delay=1.0), timeout_seconds=0.05)
-        with self.assertLogs("app.providers.anthropic", "WARNING") as logs, self.assertRaises(GuruJiError):
+        with self.assertLogs("app.providers.anthropic", "WARNING") as logs, self.assertRaises(AgenticSaffronError):
             await provider.complete("approved answer")
         self.assertIn("no answer within 0.05s", logs.output[0])
 
@@ -247,7 +247,7 @@ class ClaudeProviderTests(unittest.IsolatedAsyncioTestCase):
         )
         for error, reason in cases:
             with self.subTest(reason=reason):
-                with self.assertLogs("app.providers.anthropic", "WARNING") as logs, self.assertRaises(GuruJiError) as context:
+                with self.assertLogs("app.providers.anthropic", "WARNING") as logs, self.assertRaises(AgenticSaffronError) as context:
                     await _claude(_FakeMessages(error=error)).complete("approved answer")
                 self.assertIn(reason, logs.output[0])
                 self.assertEqual(context.exception.public_error.message, "The configured Claude model is unavailable.")
@@ -285,7 +285,7 @@ class ClaudeProviderTests(unittest.IsolatedAsyncioTestCase):
     async def test_missing_sdk_is_a_provider_failure_not_a_crash(self):
         provider = AnthropicProvider()
         with patch.dict(sys.modules, {"anthropic": None}), self.assertLogs("app.providers.anthropic", "WARNING"):
-            with self.assertRaises(GuruJiError):
+            with self.assertRaises(AgenticSaffronError):
                 await provider.complete("approved answer")
 
     async def test_stream_yields_text_then_a_final_event_with_usage(self):
@@ -408,7 +408,7 @@ class ClaudeOnBedrockTests(unittest.IsolatedAsyncioTestCase):
             del request
             return httpx2.Response(403, json={"message": "anthropic.claude-opus-5 is not available for this account."})
 
-        with self.assertLogs("app.providers.anthropic", "WARNING") as logs, self.assertRaises(GuruJiError) as context:
+        with self.assertLogs("app.providers.anthropic", "WARNING") as logs, self.assertRaises(AgenticSaffronError) as context:
             await self._provider(handler).complete("approved answer")
         self.assertIn("access denied", logs.output[0])
         self.assertIn("not available for this account", logs.output[0])
@@ -417,7 +417,7 @@ class ClaudeOnBedrockTests(unittest.IsolatedAsyncioTestCase):
     def test_bedrock_needs_a_region_and_the_runtime_wires_both_roles(self):
         with self.assertRaises(ValueError):
             AppSettings(model_provider="bedrock").ensure_safe_for_production()
-        with patch.dict(os.environ, {"GURU_MODEL_PROVIDER": "bedrock", "AWS_REGION": "ap-south-1"}):
+        with patch.dict(os.environ, {"SAFFRON_MODEL_PROVIDER": "bedrock", "AWS_REGION": "ap-south-1"}):
             self.assertEqual(AppSettings.from_env().bedrock_region, "ap-south-1")
         settings = AppSettings(
             environment="test",

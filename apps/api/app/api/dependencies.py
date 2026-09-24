@@ -164,7 +164,7 @@ def _build_conversation_model(settings: AppSettings, model):
 
 
 def _build_open_web_search(settings: AppSettings, store, pdp: PolicyDecisionPoint) -> OpenWebSearchService | None:
-    """Open-web search for the assistant: needs the Tavily settings and GURU_ASSISTANT_WEB_SEARCH (on by default)."""
+    """Open-web search for the assistant: needs the Tavily settings and SAFFRON_ASSISTANT_WEB_SEARCH (on by default)."""
 
     if not settings.assistant_web_search or settings.web_search_provider != "tavily" or not settings.web_search_api_key:
         return None
@@ -379,7 +379,7 @@ def platform_from_request(request: Request) -> PlatformRuntime:
 
     platform = request.app.state.runtime.platform
     if platform is None:
-        raise HTTPException(status_code=503, detail="the institutional data platform is disabled (GURU_PLATFORM_ENABLED=false)")
+        raise HTTPException(status_code=503, detail="the institutional data platform is disabled (SAFFRON_PLATFORM_ENABLED=false)")
     return platform
 
 

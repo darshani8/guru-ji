@@ -3,85 +3,184 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta name="theme-color" content="#ffffff">
+  <meta name="theme-color" content="#faf7f2" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#1c1917" media="(prefers-color-scheme: dark)">
+  <meta name="color-scheme" content="light dark">
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="default">
-  <meta name="apple-mobile-web-app-title" content="Guru Ji">
+  <meta name="apple-mobile-web-app-title" content="Agentic Saffron">
   <meta name="format-detection" content="telephone=no">
   <link rel="manifest" href="/manifest.json">
   <link rel="icon" href="/icons/icon.svg" type="image/svg+xml">
   <link rel="icon" href="/icons/icon-192.png" type="image/png" sizes="192x192">
   <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png">
-  <meta name="description" content="Guru Ji institutional text and voice assistant">
-  <title>Guru Ji — Assistant</title>
+  <meta name="description" content="Agentic Saffron institutional text and voice assistant">
+  <title>Agentic Saffron — Assistant</title>
   <link rel="stylesheet" href="/shared/styles.css">
 </head>
-<body>
-  <main class="app">
-    <header class="topbar">
-      <div class="brand">
-        <div class="brand-mark">GJ</div>
-        <div>
-          <div class="brand-name">Guru Ji</div>
-          <span class="brand-subtitle">Institutional assistant</span>
-        </div>
-      </div>
-      <div class="topbar-end">
-        <div id="api-status" class="status neutral" role="status" aria-live="polite">
-          <span class="status-dot"></span>
-          <span id="api-status-label">Connecting…</span>
-        </div>
-        <div id="account" class="account" hidden>
-          <span id="account-name" class="account-name"></span>
-          <button id="sign-out" type="button" class="account-button">Sign out</button>
-        </div>
-      </div>
-    </header>
+<body class="assistant-page">
+  <svg class="icon-sprite" aria-hidden="true" focusable="false" xmlns="http://www.w3.org/2000/svg">
+    <symbol id="i-logo" viewBox="0 0 24 24"><g fill="currentColor"><circle cx="12" cy="12" r="2.6"/><rect x="11.15" y="1.6" width="1.7" height="5.2" rx=".85"/><rect x="11.15" y="17.2" width="1.7" height="5.2" rx=".85"/><rect x="1.6" y="11.15" width="5.2" height="1.7" rx=".85"/><rect x="17.2" y="11.15" width="5.2" height="1.7" rx=".85"/><rect x="11.25" y="3.6" width="1.5" height="3.9" rx=".75" transform="rotate(45 12 12)"/><rect x="11.25" y="16.5" width="1.5" height="3.9" rx=".75" transform="rotate(45 12 12)"/><rect x="11.25" y="3.6" width="1.5" height="3.9" rx=".75" transform="rotate(-45 12 12)"/><rect x="11.25" y="16.5" width="1.5" height="3.9" rx=".75" transform="rotate(-45 12 12)"/></g></symbol>
+    <symbol id="i-sidebar" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="16" rx="3"/><path d="M9.5 4v16"/></g></symbol>
+    <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+    <symbol id="i-new" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 5v14M5 12h14"/></g></symbol>
+    <symbol id="i-compose" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4H6a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-6"/><path d="M17.5 3.5a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4z"/></g></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round"><circle cx="11" cy="11" r="6.5"/><path d="m20 20-4.2-4.2"/></g></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><g fill="currentColor"><circle cx="6" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="18" cy="12" r="1.6"/></g></symbol>
+    <symbol id="i-pencil" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4z"/></g></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 7h16M10 11v6M14 11v6M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12M9 7V4h6v3"/></g></symbol>
+    <symbol id="i-mic" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21"/></g></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="M12 19V5M5.5 11.5 12 5l6.5 6.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><rect x="8" y="8" width="12" height="12" rx="2.5"/><path d="M16 8V6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v8a2 2 0 0 0 2 2h2"/></g></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="m5 12.5 4.5 4.5L19 7.5" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-retry" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12a8 8 0 0 1 14-5.3L20 9"/><path d="M20 4v5h-5M20 12a8 8 0 0 1-14 5.3L4 15"/><path d="M4 20v-5h5"/></g></symbol>
+    <symbol id="i-speaker" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M4 9.5v5h3.5L12 19V5L7.5 9.5z"/><path d="M15.5 9a4.2 4.2 0 0 1 0 6M18 6.5a7.8 7.8 0 0 1 0 11"/></g></symbol>
+    <symbol id="i-download" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11M7 10.5l5 5 5-5M5 20h14"/></g></symbol>
+    <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3.5 7.5A2.5 2.5 0 0 1 6 5h3.5l2 2.5H18a2.5 2.5 0 0 1 2.5 2.5v7.5A2.5 2.5 0 0 1 18 20H6a2.5 2.5 0 0 1-2.5-2.5z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+    <symbol id="i-signout" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 4h4a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-4M10 16l-4-4 4-4M6 12h10"/></g></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6 6 18" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+    <symbol id="i-table" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M3.5 9.5h17M3.5 14.5h17M9.5 9.5v10"/></g></symbol>
+    <symbol id="i-doc" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M14 3.5H7A2.5 2.5 0 0 0 4.5 6v12A2.5 2.5 0 0 0 7 20.5h10a2.5 2.5 0 0 0 2.5-2.5V9z"/><path d="M14 3.5V9h5.5M8.5 13h7M8.5 16.5h5"/></g></symbol>
+    <symbol id="i-slides" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="4" width="18" height="12.5" rx="2"/><path d="M12 16.5V20M8.5 20h7M7.5 12.5l3-3 2.5 2.5 3.5-4"/></g></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><g fill="none" stroke="currentColor" stroke-width="1.7"><circle cx="12" cy="12" r="8.5"/><path d="M3.5 12h17M12 3.5c2.4 2.3 3.6 5.1 3.6 8.5s-1.2 6.2-3.6 8.5c-2.4-2.3-3.6-5.1-3.6-8.5S9.6 5.8 12 3.5z"/></g></symbol>
+    <symbol id="i-spark" viewBox="0 0 24 24"><path d="M12 3.5l1.9 5.6 5.6 1.9-5.6 1.9L12 18.5l-1.9-5.6L4.5 11l5.6-1.9z" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></symbol>
+    <symbol id="i-chevron" viewBox="0 0 24 24"><path d="m7 10 5 5 5-5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+    <symbol id="i-stop" viewBox="0 0 24 24"><rect x="7" y="7" width="10" height="10" rx="2" fill="currentColor"/></symbol>
+  </svg>
 
-    <section id="sign-in-gate" class="sign-in-gate" hidden>
-      <h1 class="sign-in-title">Sign in to continue</h1>
+  <div id="shell" class="shell">
+    <aside id="sidebar" class="sidebar" aria-label="Chats">
+      <div class="sidebar-head">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"><svg class="icon"><use href="#i-logo"/></svg></span>
+          <span class="brand-name">Agentic Saffron</span>
+        </div>
+        <button id="sidebar-toggle" class="icon-button" type="button" aria-label="Close sidebar" title="Close sidebar"><svg class="icon"><use href="#i-sidebar"/></svg></button>
+      </div>
+
+      <button id="new-chat" class="new-chat" type="button">
+        <span class="new-chat-icon" aria-hidden="true"><svg class="icon"><use href="#i-new"/></svg></span>
+        <span>New chat</span>
+      </button>
+
+      <label class="history-search">
+        <svg class="icon" aria-hidden="true"><use href="#i-search"/></svg>
+        <span class="sr-only">Search chats</span>
+        <input id="history-search" type="search" autocomplete="off" placeholder="Search chats">
+      </label>
+
+      <nav id="history-list" class="history-list" aria-label="Chat history"></nav>
+
+      <div class="sidebar-foot">
+        <button id="files-open" class="sidebar-link" type="button">
+          <svg class="icon" aria-hidden="true"><use href="#i-folder"/></svg>
+          <span>Your files</span>
+        </button>
+        <div class="account-row">
+          <span id="account-avatar" class="account-avatar" aria-hidden="true">·</span>
+          <div class="account-text">
+            <span id="account-name" class="account-name">Signed in</span>
+            <span class="account-sub">This device keeps your chats</span>
+          </div>
+          <button id="account-menu-button" class="icon-button" type="button" aria-haspopup="menu" aria-label="Account options" title="Account options"><svg class="icon"><use href="#i-more"/></svg></button>
+        </div>
+      </div>
+    </aside>
+    <div id="scrim" class="scrim" hidden></div>
+
+    <main id="main" class="main is-empty">
+      <header class="main-head">
+        <button id="sidebar-open" class="icon-button sidebar-open" type="button" aria-label="Open sidebar" title="Open sidebar"><svg class="icon"><use href="#i-menu"/></svg></button>
+        <h1 id="chat-title" class="chat-title">New chat</h1>
+        <div class="head-end">
+          <div id="api-status" class="status neutral" role="status" aria-live="polite">
+            <span class="status-dot"></span>
+            <span id="api-status-label">Connecting…</span>
+          </div>
+          <button id="head-new-chat" class="icon-button head-new-chat" type="button" aria-label="New chat" title="New chat"><svg class="icon"><use href="#i-compose"/></svg></button>
+        </div>
+      </header>
+
+      <section id="chat-history" class="chat-history" aria-label="Conversation">
+        <div id="welcome" class="welcome">
+          <span class="welcome-mark" aria-hidden="true"><svg class="icon"><use href="#i-logo"/></svg></span>
+          <h2 id="welcome-title" class="welcome-title">Namaste</h2>
+          <p class="welcome-sub">Ask about the college’s records, make an Excel, Word or PowerPoint file, search the internet, or just talk.</p>
+        </div>
+        <div id="thread" class="thread"></div>
+      </section>
+
+      <section id="composer-wrap" class="composer-wrap" aria-label="Message Agentic Saffron">
+        <div class="voice-bar">
+          <p id="voice-status-line" class="voice-status-line" role="status" aria-live="polite"></p>
+          <span id="mic-meter" class="mic-meter" title="Microphone sound level" hidden><span id="mic-meter-fill" class="mic-meter-fill"></span></span>
+          <label class="sr-only" for="mic-select">Microphone</label>
+          <select id="mic-select" class="mic-select" title="Microphone" hidden></select>
+          <button id="interrupt-button" class="interrupt-button" type="button" hidden>Stop speaking</button>
+        </div>
+        <form id="text-form" class="composer">
+          <label class="sr-only" for="text-input">Message Agentic Saffron</label>
+          <textarea id="text-input" class="text-input" rows="1" autocomplete="off" maxlength="4000" enterkeyhint="send" placeholder="How can I help you today?"></textarea>
+          <div class="composer-row">
+            <div class="composer-tools">
+              <label class="sr-only" for="language-select">Language you speak</label>
+              <span class="select-wrap">
+                <select id="language-select" class="language-select" title="Language you speak">
+                  <option value="en-IN">English</option>
+                  <option value="hi-IN">हिन्दी</option>
+                  <option value="kn-IN">ಕನ್ನಡ</option>
+                </select>
+                <svg class="icon select-chevron" aria-hidden="true"><use href="#i-chevron"/></svg>
+              </span>
+              <button id="voice-button" class="voice-button" type="button" aria-pressed="false" title="Talk to Agentic Saffron">
+                <svg class="icon voice-icon" aria-hidden="true"><use href="#i-mic"/></svg>
+                <span id="voice-button-label">Voice</span>
+              </button>
+            </div>
+            <button id="send-button" class="send-button" type="submit" aria-label="Send message" title="Send message" disabled>
+              <svg class="icon" aria-hidden="true"><use href="#i-send"/></svg>
+            </button>
+          </div>
+        </form>
+        <div id="suggestions" class="suggestions" aria-label="Try asking"></div>
+        <p class="composer-hint">Agentic Saffron answers from your college’s records and can make mistakes. Check important figures.</p>
+      </section>
+    </main>
+  </div>
+
+  <section id="sign-in-gate" class="sign-in-gate" hidden>
+    <div class="sign-in-card">
+      <span class="welcome-mark" aria-hidden="true"><svg class="icon"><use href="#i-logo"/></svg></span>
+      <h1 class="sign-in-title">Agentic Saffron</h1>
       <p id="sign-in-message" class="sign-in-message">This portal is restricted to authorised accounts.</p>
       <button id="sign-in" type="button" class="sign-in-button">Sign in</button>
-    </section>
+    </div>
+  </section>
 
-    <section id="chat-history" class="chat-history" aria-label="Chat history">
-      <div class="empty-space"></div>
-      <article class="message assistant-message">
-        <div class="avatar">GJ</div>
-        <div class="message-body">
-          <span class="message-label">Guru Ji</span>
-          <div class="bubble">Namaste! I’m Guru Ji. Type, or start the Voice Assistant and just talk — you can interrupt me any time, ask about the college’s records, or say “search the internet for…”.</div>
-        </div>
-      </article>
-    </section>
+  <div id="menu" class="menu" role="menu" hidden></div>
 
-    <section id="composer-wrap" class="composer-wrap" aria-label="Assistant input">
-      <div class="voice-bar">
-        <p id="voice-status-line" class="voice-status-line" role="status" aria-live="polite"></p>
-        <span id="mic-meter" class="mic-meter" title="Microphone sound level" hidden><span id="mic-meter-fill" class="mic-meter-fill"></span></span>
-        <label class="sr-only" for="mic-select">Microphone</label>
-        <select id="mic-select" class="mic-select" title="Microphone" hidden></select>
-        <button id="interrupt-button" class="interrupt-button" type="button" hidden>Stop speaking</button>
+  <dialog id="confirm-dialog" class="dialog">
+    <form method="dialog" class="dialog-body">
+      <h2 id="confirm-title" class="dialog-title">Delete chat?</h2>
+      <p id="confirm-text" class="dialog-text"></p>
+      <div class="dialog-actions">
+        <button value="cancel" class="button secondary" type="submit">Cancel</button>
+        <button id="confirm-ok" value="ok" class="button danger" type="submit">Delete</button>
       </div>
-      <form id="text-form" class="composer">
-        <label class="sr-only" for="text-input">Type a message</label>
-        <input id="text-input" class="text-input" type="text" autocomplete="off" maxlength="4000" placeholder="Type or talk — in English, हिन्दी or ಕನ್ನಡ…">
-        <label class="sr-only" for="language-select">Language you speak</label>
-        <select id="language-select" class="language-select" title="Language you speak">
-          <option value="en-IN">English (India)</option>
-          <option value="hi-IN">हिन्दी</option>
-          <option value="kn-IN">ಕನ್ನಡ</option>
-        </select>
-        <button id="voice-button" class="voice-button" type="button" aria-pressed="false">
-          <span class="voice-icon" aria-hidden="true">◉</span>
-          <span id="voice-button-label">Voice Assistant</span>
-        </button>
-        <button id="send-button" class="send-button" type="submit">Send <span aria-hidden="true">↗</span></button>
-      </form>
-      <p class="composer-hint"><kbd>Enter</kbd> to send · talk any time, even while Guru Ji is speaking · your browser turns speech into text; only the text reaches the server</p>
-    </section>
-  </main>
+    </form>
+  </dialog>
+
+  <dialog id="files-dialog" class="dialog files-dialog">
+    <div class="dialog-body">
+      <div class="dialog-head">
+        <h2 class="dialog-title">Your files</h2>
+        <button id="files-close" class="icon-button" type="button" aria-label="Close"><svg class="icon"><use href="#i-close"/></svg></button>
+      </div>
+      <p class="dialog-text">Excel, Word, PowerPoint, PDF and CSV files Agentic Saffron made for you.</p>
+      <div id="files-list" class="files-list"></div>
+    </div>
+  </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
   <script src="/shared/pwa.js" defer></script>

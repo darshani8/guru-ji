@@ -29,7 +29,7 @@ from ..policy.pdp import PolicyDecisionPoint
 from ..web_research.untrusted_content import wrap_untrusted
 from .prompts import IST
 
-logger = logging.getLogger("guru.conversation.web")
+logger = logging.getLogger("saffron.conversation.web")
 
 MAX_SNIPPET_CHARS = 400
 _EMAIL = re.compile(r"[^@\s]+@[^@\s]+\.[A-Za-z]{2,}")

@@ -347,7 +347,7 @@ def postgres_numeric_columns() -> frozenset[tuple[str, str]]:
 
 
 def render_sql_migration() -> str:
-    lines = [f"-- Guru Ji institution data schema {SCHEMA_VERSION}", "-- Generated from app.normalization.canonical; edit the model, not this file."]
+    lines = [f"-- Agentic Saffron institution data schema {SCHEMA_VERSION}", "-- Generated from app.normalization.canonical; edit the model, not this file."]
     for statement in portable_statements():
         lines.append(" ".join(statement.split()) + ";")
     lines.append("-- PostgreSQL row-level security (skipped on SQLite)")

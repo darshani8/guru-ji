@@ -1,5 +1,5 @@
 [project]
-name = "guru-ji"
+name = "agentic-saffron"
 version = "0.1.0"
 description = "A federated, read-only institutional AI assistant with text and voice channels."
 readme = "README.md"
@@ -41,7 +41,7 @@ llm = [
     "litellm>=1.60,<2.0",
 ]
 # Claude through the official Anthropic SDK: the Claude API
-# (GURU_MODEL_PROVIDER=anthropic) or Amazon Bedrock (GURU_MODEL_PROVIDER=bedrock).
+# (SAFFRON_MODEL_PROVIDER=anthropic) or Amazon Bedrock (SAFFRON_MODEL_PROVIDER=bedrock).
 anthropic = [
     "anthropic[bedrock]>=1.8,<2.0",
 ]
@@ -57,7 +57,7 @@ aws = [
     "boto3>=1.35,<2.0",
 ]
 # Libraries the open-task agent's code sandbox offers the model for building
-# files (GURU_OPEN_TASK_ENABLED): Excel, PowerPoint, Word and charts.
+# files (SAFFRON_OPEN_TASK_ENABLED): Excel, PowerPoint, Word and charts.
 open-task = [
     "matplotlib>=3.9,<4.0",
     "openpyxl>=3.1,<4.0",

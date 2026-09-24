@@ -6,7 +6,7 @@ from fastapi import HTTPException, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
-from ..domain.errors import GuruJiError
+from ..domain.errors import AgenticSaffronError
 
 
 def _request_id(request: Request) -> str | None:
@@ -23,7 +23,7 @@ def _response(request: Request, status_code: int, code: str, message: str, *, de
     return JSONResponse(status_code=status_code, content={"error": error})
 
 
-async def guruji_error_handler(request: Request, exc: GuruJiError) -> JSONResponse:
+async def agentic_saffron_error_handler(request: Request, exc: AgenticSaffronError) -> JSONResponse:
     error = exc.public_error
     error_payload: dict[str, object] = {
         "code": error.code.value,
@@ -74,4 +74,4 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
     )
 
 
-__all__ = ["guruji_error_handler", "http_exception_handler", "validation_exception_handler"]
+__all__ = ["agentic_saffron_error_handler", "http_exception_handler", "validation_exception_handler"]

@@ -5,7 +5,7 @@
 
 Without --file the bundled 22 September 2026 sweep is used. The import goes
 through the same service and rules as the API: groups outside the
-institution's own (GURU_INTELLIGENCE_SEED_GROUPS), every group, or a custom
+institution's own (SAFFRON_INTELLIGENCE_SEED_GROUPS), every group, or a custom
 file need --approved-by. The run is written to the audit log as the operator
 who ran it, and the approval is kept with the baseline run.
 """
@@ -40,7 +40,7 @@ def main() -> None:
     runtime = build_runtime(AppSettings.from_env())
     platform = runtime.platform
     if platform is None or platform.intelligence_map is None:
-        raise SystemExit("the internet map is not enabled (GURU_INTELLIGENCE_MAP_ENABLED)")
+        raise SystemExit("the internet map is not enabled (SAFFRON_INTELLIGENCE_MAP_ENABLED)")
     operator = Principal(f"cli:{getpass.getuser()}", PrincipalType.SYSTEM, frozenset({Capability.INTELLIGENCE_MANAGE}), (InstitutionScope(args.institution),))
     outcome, metadata = AuditOutcome.SUCCESS, {"institution_id": args.institution, "all_groups": args.all_groups, "approved_by": args.approved_by, "source": args.file.name}
     try:

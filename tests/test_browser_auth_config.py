@@ -2,9 +2,9 @@ import unittest
 from unittest.mock import patch
 
 OIDC_ENV = {
-    "GURU_OIDC_ISSUER_URL": "https://issuer.example.test/pool",
-    "GURU_OIDC_AUDIENCE": "browser-client-id",
-    "GURU_OIDC_JWKS_URL": "https://issuer.example.test/pool/.well-known/jwks.json",
+    "SAFFRON_OIDC_ISSUER_URL": "https://issuer.example.test/pool",
+    "SAFFRON_OIDC_AUDIENCE": "browser-client-id",
+    "SAFFRON_OIDC_JWKS_URL": "https://issuer.example.test/pool/.well-known/jwks.json",
     "CONTROL_DATABASE_URL": ":memory:",
 }
 
@@ -15,7 +15,7 @@ def _client(environment: str, **extra: str):
 
     from fastapi.testclient import TestClient
 
-    env = {"GURU_ENVIRONMENT": environment, "CONTROL_DATABASE_URL": ":memory:"}
+    env = {"SAFFRON_ENVIRONMENT": environment, "CONTROL_DATABASE_URL": ":memory:"}
     env.update(extra)
     with patch.dict("os.environ", env, clear=False):
         import app.main
@@ -37,8 +37,8 @@ class BrowserAuthConfigTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         body = response.json()
         self.assertEqual(body["mode"], "oidc")
-        self.assertEqual(body["issuer"], OIDC_ENV["GURU_OIDC_ISSUER_URL"])
-        self.assertEqual(body["client_id"], OIDC_ENV["GURU_OIDC_AUDIENCE"])
+        self.assertEqual(body["issuer"], OIDC_ENV["SAFFRON_OIDC_ISSUER_URL"])
+        self.assertEqual(body["client_id"], OIDC_ENV["SAFFRON_OIDC_AUDIENCE"])
         self.assertIn("openid", body["scopes"])
         # Nothing secret may reach the browser.
         self.assertNotIn("dev_bearer_token", body)
@@ -86,7 +86,7 @@ class LoginContentSecurityPolicyTests(unittest.TestCase):
     provider, which silently breaks the whole login."""
 
     def test_connect_src_allows_the_configured_provider_origins(self):
-        client = _client("staging", GURU_OIDC_BROWSER_ORIGINS="https://idp.example.test", **OIDC_ENV)
+        client = _client("staging", SAFFRON_OIDC_BROWSER_ORIGINS="https://idp.example.test", **OIDC_ENV)
         policy = client.get("/v1/auth/config").headers["content-security-policy"]
         directives = {
             part.strip().split(" ")[0]: part.strip()
@@ -110,7 +110,7 @@ class LoginContentSecurityPolicyTests(unittest.TestCase):
     def test_malformed_origins_cannot_widen_the_policy(self):
         client = _client(
             "staging",
-            GURU_OIDC_BROWSER_ORIGINS="not-a-url, javascript:alert(1), https://ok.example.test/with/path",
+            SAFFRON_OIDC_BROWSER_ORIGINS="not-a-url, javascript:alert(1), https://ok.example.test/with/path",
             **OIDC_ENV,
         )
         policy = client.get("/v1/auth/config").headers["content-security-policy"]

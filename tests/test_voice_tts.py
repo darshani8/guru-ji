@@ -112,11 +112,11 @@ class PollyTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await polly.synthesize("ನಮಸ್ಕಾರ", language="kn-IN"))
         self.assertEqual(client.calls, [], "Polly has no Kannada voice, so it is never asked")
         throttled = PollySynthesizer(client=_FakePolly(error=_Throttled()))
-        with self.assertLogs("guru.voice.tts", "WARNING") as logs:
+        with self.assertLogs("saffron.voice.tts", "WARNING") as logs:
             self.assertIsNone(await throttled.synthesize("hello", language="en-IN"))
         self.assertIn("ThrottlingException", logs.output[0])
         oversized = PollySynthesizer(client=_FakePolly(audio=b"x" * 2_000_001))
-        with self.assertLogs("guru.voice.tts", "WARNING"):
+        with self.assertLogs("saffron.voice.tts", "WARNING"):
             self.assertIsNone(await oversized.synthesize("hello", language="en-IN"))
         for item in (polly, throttled, oversized):
             item.close()
@@ -131,7 +131,7 @@ class PollyTests(unittest.IsolatedAsyncioTestCase):
 
         polly = PollySynthesizer(client=_Slow(), timeout_seconds=0.05)
         polly.timeout_seconds = 0.05
-        with self.assertLogs("guru.voice.tts", "WARNING"):
+        with self.assertLogs("saffron.voice.tts", "WARNING"):
             started = asyncio.get_running_loop().time()
             self.assertIsNone(await polly.synthesize("hello", language="en-IN"))
         self.assertLess(asyncio.get_running_loop().time() - started, 0.4)
@@ -162,13 +162,13 @@ class SynthesizerSettingsTests(unittest.TestCase):
         polly.close()
 
     def test_polly_settings_are_validated(self) -> None:
-        with self.assertRaisesRegex(ValueError, "GURU_VOICE_POLLY_REGION"):
+        with self.assertRaisesRegex(ValueError, "SAFFRON_VOICE_POLLY_REGION"):
             AppSettings(voice_tts_provider="polly", voice_polly_region=None).ensure_safe_for_production()
-        with self.assertRaisesRegex(ValueError, "GURU_VOICE_POLLY_ENGINE"):
+        with self.assertRaisesRegex(ValueError, "SAFFRON_VOICE_POLLY_ENGINE"):
             AppSettings(voice_tts_provider="polly", voice_polly_region="ap-south-1", voice_polly_engine="turbo").ensure_safe_for_production()
-        with self.assertRaisesRegex(ValueError, "GURU_VOICE_TTS_PROVIDER"):
+        with self.assertRaisesRegex(ValueError, "SAFFRON_VOICE_TTS_PROVIDER"):
             AppSettings(voice_tts_provider="elevenlabs").ensure_safe_for_production()
-        with self.assertRaisesRegex(ValueError, "GURU_VOICE_IDLE_TIMEOUT_SECONDS"):
+        with self.assertRaisesRegex(ValueError, "SAFFRON_VOICE_IDLE_TIMEOUT_SECONDS"):
             AppSettings(voice_idle_timeout_seconds=5).ensure_safe_for_production()
         AppSettings(voice_tts_provider="polly", voice_polly_region="ap-south-1").ensure_safe_for_production()
 

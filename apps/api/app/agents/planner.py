@@ -208,6 +208,10 @@ def extract_entities(text: str, vocabulary: Vocabulary) -> ExtractedEntities:
         entities.report_format = "pdf"
     elif re.search(r"\bcsv\b", lowered):
         entities.report_format = "csv"
+    elif re.search(r"\b(docx|word (?:doc|docs|document|documents|file|files|format)|ms ?word)\b", lowered):
+        entities.report_format = "docx"
+    elif re.search(r"\b(pptx?|power ?points?|presentations?|slides?|slide ?decks?)\b", lowered):
+        entities.report_format = "pptx"
     entities.wants_report = bool(entities.report_format) or bool(re.search(r"\b(report|export|download|sheet)\b", lowered))
     entities.wants_email = bool(re.search(r"\b(email|e-mail|mail)\b", lowered)) or bool(re.search(r"\bsend\b.*\bto\b", lowered))
     entities.wants_notification = bool(re.search(r"\b(notify|notification|alert)\b", lowered))
@@ -271,7 +275,9 @@ class DeterministicPlanner:
                     add("get_institution_summary", {}, "combine internal indicators with public information")
             return AgentPlan(intent, steps, summary="Investigate public web sources about the institution.", planner=self.planner_name, entities=entities.as_dict())
         # -- 3. documents ---------------------------------------------------------
-        if re.search(r"\b(policy|policies|circular|rule|rules|regulation|guideline|guidelines|handbook|procedure|according to|what does the .* say|document|notice|syllabus|code of conduct)\b", lowered) and not re.search(r"\battendance (?:below|under|less)", lowered):
+        # "a Word document of ..." names the file to make, not a document to search.
+        topic = re.sub(r"\b(?:word|pdf|excel|pptx?|docx|powerpoint) (?:doc|docs|document|documents|file|files)\b", " ", lowered)
+        if re.search(r"\b(policy|policies|circular|rule|rules|regulation|guideline|guidelines|handbook|procedure|according to|what does the .* say|document|notice|syllabus|code of conduct)\b", topic) and not re.search(r"\battendance (?:below|under|less)", lowered):
             intent = "document_question"
             if (plan := missing("search_documents")):
                 return plan

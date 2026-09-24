@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from ..agents.contracts import AgentCommand, AgentResponse
 from ..domain.audit import AuditEvent, AuditOutcome
-from ..domain.errors import GuruJiError
+from ..domain.errors import AgenticSaffronError
 from ..domain.principals import Capability
 from ..domain.requests import ChatRequest, InteractionChannel
 from ..observability.tracing import TraceRecorder
@@ -35,7 +35,7 @@ from .router import classify, looks_institutional, name_the_institution
 from .streaming import StreamOutcome, stream_reply
 from .web_search import OpenWebSearchService, WebFindings, WebSearchRefused
 
-logger = logging.getLogger("guru.conversation")
+logger = logging.getLogger("saffron.conversation")
 
 Progress = Callable[[str, str, DetectedLanguage], Awaitable[None]]
 # Called with each finished sentence of a reply that is still being written,
@@ -119,7 +119,7 @@ class DialogueManager:
             return None
         try:
             text = await asyncio.wait_for(model.complete(prompt, max_tokens=self.max_tokens), timeout=self.timeout_seconds)
-        except (GuruJiError, TimeoutError, asyncio.TimeoutError, ValueError) as exc:
+        except (AgenticSaffronError, TimeoutError, asyncio.TimeoutError, ValueError) as exc:
             logger.warning("conversation model unavailable: %s", type(exc).__name__)
             return None
         except Exception:  # noqa: BLE001 - a provider bug must not end the conversation

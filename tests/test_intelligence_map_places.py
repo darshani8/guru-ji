@@ -40,7 +40,7 @@ class OpenStreetMapTests(Fixture):
         self.assertIsNone(self.store.find_asset(INSTITUTION, "linkedin:in:some-person-123"), "a person's profile is never taken from a tag")
         request = client.seen[-1]
         self.assertEqual((request.url.params["format"], request.url.params["extratags"]), ("jsonv2", "1"))
-        self.assertTrue(request.headers["user-agent"].startswith("GuruJi-"), "Nominatim requires an identifying User-Agent")
+        self.assertTrue(request.headers["user-agent"].startswith("AgenticSaffron-"), "Nominatim requires an identifying User-Agent")
         regrade(self.store, INSTITUTION)
         self.assertEqual(self.grade_of("instagram:bgscet_engg_coll"), "C", "community data alone is one channel")
         self.assertEqual(self.grade_of("web:bgscet.ac.in"), "A", "the configured domain stays A")

@@ -1,8 +1,8 @@
 """Behaviour only a real PostgreSQL shows: run-lock races, typed parameters, re-runnable migrations.
 
-Skipped unless GURU_TEST_POSTGRES_URL names a throwaway database the tests
+Skipped unless SAFFRON_TEST_POSTGRES_URL names a throwaway database the tests
 may create tables in, for example
-``GURU_TEST_POSTGRES_URL=postgresql://guru:guru@127.0.0.1:55432/guru``. Use a
+``SAFFRON_TEST_POSTGRES_URL=postgresql://saffron:saffron@127.0.0.1:55432/saffron``. Use a
 role without BYPASSRLS so row-level security applies as in production.
 """
 
@@ -14,11 +14,11 @@ import unittest
 from pathlib import Path
 from uuid import uuid4
 
-POSTGRES_URL = os.environ.get("GURU_TEST_POSTGRES_URL", "")
+POSTGRES_URL = os.environ.get("SAFFRON_TEST_POSTGRES_URL", "")
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
-@unittest.skipUnless(POSTGRES_URL, "set GURU_TEST_POSTGRES_URL to run the PostgreSQL tests")
+@unittest.skipUnless(POSTGRES_URL, "set SAFFRON_TEST_POSTGRES_URL to run the PostgreSQL tests")
 class PostgresRunLockTests(unittest.TestCase):
     def _race(self, first_store, second_store, start_run):
         """Start a run inside an open transaction, then try again from another connection.
@@ -53,7 +53,7 @@ class PostgresRunLockTests(unittest.TestCase):
         )
 
 
-@unittest.skipUnless(POSTGRES_URL, "set GURU_TEST_POSTGRES_URL to run the PostgreSQL tests")
+@unittest.skipUnless(POSTGRES_URL, "set SAFFRON_TEST_POSTGRES_URL to run the PostgreSQL tests")
 class PostgresMapStoreTests(unittest.TestCase):
     def test_observations_with_only_some_fields(self):
         from app.internet_intelligence.map.assets import asset_ref

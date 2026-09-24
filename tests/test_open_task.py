@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from app.agents.contracts import AgentCommand, AgentPlan, PlanStep
 from app.agents.planner import DeterministicPlanner, ModelPlanner, Vocabulary
 from app.config.settings import AppSettings
-from app.domain.errors import ErrorCode, GuruJiError, PublicError
+from app.domain.errors import ErrorCode, AgenticSaffronError, PublicError
 from app.domain.principals import InstitutionScope, PrincipalType
 from app.open_task.agent import RUN_PYTHON, SYSTEM_PROMPT, OpenTaskAgent, OpenTaskLimits
 from app.open_task.routing import asks_for_work, requested_format_beyond_tools, route_to_open_task
@@ -153,8 +153,8 @@ class SandboxTests(unittest.IsolatedAsyncioTestCase):
     MODES = ("guarded", "isolated") if namespaces_available() else ("guarded",)
 
     async def test_code_runs_in_its_workspace_and_cannot_reach_the_host(self):
-        os.environ["GURU_TEST_SECRET"] = "should-not-leak"
-        self.addCleanup(os.environ.pop, "GURU_TEST_SECRET", None)
+        os.environ["SAFFRON_TEST_SECRET"] = "should-not-leak"
+        self.addCleanup(os.environ.pop, "SAFFRON_TEST_SECRET", None)
         repository_file = str(Path(__file__).resolve())
         code = f"""
 import os, socket, subprocess
@@ -168,9 +168,9 @@ def attempt(name, action):
 attempt("network", lambda: socket.create_connection(("1.1.1.1", 80), timeout=2))
 attempt("process", lambda: subprocess.run(["true"]))
 attempt("read_repo", lambda: open({repository_file!r}).read())
-attempt("write_outside", lambda: open("/tmp/guru-sandbox-escape", "w").write("x"))
+attempt("write_outside", lambda: open("/tmp/saffron-sandbox-escape", "w").write("x"))
 attempt("fork", lambda: os.fork())
-checks["secret"] = os.environ.get("GURU_TEST_SECRET")
+checks["secret"] = os.environ.get("SAFFRON_TEST_SECRET")
 checks["home"] = os.environ.get("HOME") == os.getcwd()
 open("outputs/result.csv", "w").write("a,b\\n1,2\\n")
 open("outputs/page.html", "w").write("<p>no</p>")
@@ -186,7 +186,7 @@ print(__import__("json").dumps(checks))
                     self.assertNotEqual(checks[name], "allowed", f"{mode}: {name}")
                 self.assertIsNone(checks["secret"])
                 self.assertTrue(checks["home"])
-                self.assertFalse(Path("/tmp/guru-sandbox-escape").exists())
+                self.assertFalse(Path("/tmp/saffron-sandbox-escape").exists())
                 files, skipped = workspace.collect_outputs()
                 self.assertEqual([item.name for item in files], ["result.csv"])
                 self.assertTrue(any("page.html" in reason for reason in skipped))
@@ -290,7 +290,7 @@ class OpenTaskAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("today's 1 open tasks", second.answer)
 
     async def test_an_unavailable_model_or_a_refusal_creates_nothing(self):
-        error = GuruJiError(PublicError(ErrorCode.SERVICE_UNAVAILABLE, "down", "provider"))
+        error = AgenticSaffronError(PublicError(ErrorCode.SERVICE_UNAVAILABLE, "down", "provider"))
         failed = await _agent(self.fx, ScriptedModel(error)).run(_command("Make a chart"))
         self.assertEqual(failed.status, "failed")
         self.assertIn("Nothing was created", failed.answer)
@@ -462,10 +462,10 @@ class OpenTaskSettingsTests(unittest.TestCase):
         settings = self._settings(environment="production", open_task_sandbox="guarded")
         with self.assertRaises(ValueError) as caught:
             settings.ensure_safe_for_production()
-        self.assertTrue("GURU_OPEN_TASK_SANDBOX" in str(caught.exception) or "production" in str(caught.exception))
+        self.assertTrue("SAFFRON_OPEN_TASK_SANDBOX" in str(caught.exception) or "production" in str(caught.exception))
 
     def test_environment_variables_are_read(self):
-        names = {"GURU_OPEN_TASK_ENABLED": "true", "GURU_OPEN_TASK_EFFORT": "xhigh", "GURU_OPEN_TASK_SANDBOX": "auto", "GURU_OPEN_TASK_PER_PERSON_PER_DAY": "3"}
+        names = {"SAFFRON_OPEN_TASK_ENABLED": "true", "SAFFRON_OPEN_TASK_EFFORT": "xhigh", "SAFFRON_OPEN_TASK_SANDBOX": "auto", "SAFFRON_OPEN_TASK_PER_PERSON_PER_DAY": "3"}
         previous = {name: os.environ.get(name) for name in names}
         os.environ.update(names)
         try:

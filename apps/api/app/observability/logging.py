@@ -3,7 +3,7 @@
 import logging
 from ..policy.redaction import redact_mapping
 
-def get_logger(name: str = "guru-ji") -> logging.Logger:
+def get_logger(name: str = "agentic-saffron") -> logging.Logger:
     return logging.getLogger(name)
 
 def safe_event(logger: logging.Logger, event: str, **fields: object) -> None:

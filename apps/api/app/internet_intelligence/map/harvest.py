@@ -210,7 +210,7 @@ class OfficialSiteHarvester:
         whose = f"names the look-alike {other['name']}" if lookalike else f"belongs to {other['name']} ({chain[0] if chain else 'another authority'})"
         self.store.add_review_item(
             institution_id, kind="candidate_account", title=f"{host} links {ref.key} ({position}); it {whose}"[:300], url=ref.url, asset_id=target_id, entity_id=entity_id, connector="official_site", run_id=run_id,
-            detail="" if lookalike else f"Only an approver for {chain[0] if chain else other['name']} (GURU_INTELLIGENCE_ENTITY_APPROVERS) can confirm it; a link from {host} does not settle which accounts are theirs.",
+            detail="" if lookalike else f"Only an approver for {chain[0] if chain else other['name']} (SAFFRON_INTELLIGENCE_ENTITY_APPROVERS) can confirm it; a link from {host} does not settle which accounts are theirs.",
         )
         result.evidence += 1
         if ref.key not in result.held:

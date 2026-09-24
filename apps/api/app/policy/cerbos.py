@@ -1,6 +1,6 @@
 """HTTP Cerbos PDP adapter.
 
-Guru Ji keeps the policy decision point behind its own narrow protocol. This
+Agentic Saffron keeps the policy decision point behind its own narrow protocol. This
 adapter accepts the Cerbos HTTP check contract, validates the response instead
 of trusting an allow bit, and denies on timeout, malformed decisions, missing
 policy metadata, or stale policy status.
@@ -107,7 +107,7 @@ class CerbosPolicyDecisionPoint(PolicyDecisionPoint):
         if required_capability is not None:
             resource_attributes["required_capability"] = required_capability.value
         return {
-            "requestId": f"guru-{uuid4().hex}",
+            "requestId": f"saffron-{uuid4().hex}",
             "principal": {
                 "id": principal.principal_id,
                 "roles": [principal.principal_type.value],
