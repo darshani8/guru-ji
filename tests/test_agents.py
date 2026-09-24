@@ -72,7 +72,6 @@ class PlannerTests(unittest.TestCase):
             "Email the PowerPoint of MBA students below 75% attendance to the HOD": "pptx",
             "Students with pending fees, export as pptx": "pptx",
             "Pending fee list, word format please": "docx",
-            "Pending fees PPT": "pptx",
             "Faculty list in PowerPoint": "pptx",
             "Kya aap MBA students ki list word mein bana sakte ho?": "docx",
             "MBA students ki list word file mein de dijiye": "docx",
@@ -91,6 +90,15 @@ class PlannerTests(unittest.TestCase):
             "Export as Word: students with pending fees": "docx",
             "MBA students ki list ka PPT create karo": "pptx",
             "HOD ko low attendance students ki list PPT mein bhej do": "pptx",
+            # Everyday requests production already understood keep working.
+            "List all faculty and make a Word document": "docx",
+            "Prepare a Word document on students with pending fees": "docx",
+            "Check which students have pending fees and make a PPT": "pptx",
+            "List students who have pending fees and make a PPT": "pptx",
+            "Please provide the list of faculty along with their contact numbers in word format": "docx",
+            "PPT of MBA students whose fees are pending please": "pptx",
+            "Share the low attendance list in a PPT today": "pptx",
+            "MBA students below 75% attendance ka word document bana do": "docx",
             "Export an excel of MBA students below 75% attendance": "xlsx",
             "Give me a report of students with pending fees": "xlsx",
         }
@@ -126,6 +134,13 @@ class PlannerTests(unittest.TestCase):
             "Get me the Word document of the anti-ragging affidavit": ["search_documents"],
             "Download the Word document of the annual report": ["search_documents"],
             "Is the exam timetable available as a PDF document?": ["search_documents"],
+            "Download a Word document on maternity leave": ["search_documents"],
+            "Send me the fee structure as a PDF document": ["search_documents"],
+            "Please review the pending fees Word document": ["search_documents"],
+            "Download the Word document of the faculty induction talk": ["search_documents"],
+            # A PDF or Excel file of records is made, however the request opens.
+            "Send a PDF document of students with pending fees to the HOD": ["get_pending_fees", "generate_report", "find_hod", "send_email"],
+            "Hi, can you email the pending fees list to the HOD as a PDF document?": ["get_pending_fees", "generate_report", "find_hod", "send_email"],
         }
         for text, expected in cases.items():
             self.assertEqual([step.tool for step in self.planner.plan(text, self.tools, self.vocab).steps], expected, text)
@@ -164,6 +179,11 @@ class PlannerTests(unittest.TestCase):
             # Existing decks and documents.
             "Forward the PPT of the student welfare talk to the principal", "Email the HOD the Word document of the faculty orientation", "Faculty development programme ka PPT bhejo",
             "Forward a Word document from the principal with the students list", "Get the fee structure details for BCA students in Word",
+            # A deck or document someone already has, or other people's presentations.
+            "Please check the fees PPT", "Kindly review the pending fees PPT", "Thanks for the fees PPT", "Accounts has the fee defaulters list in Word",
+            "BCA students ke PPT bhejo", "Please forward the BCA student PPTs to the external examiner", "Group MBA students into presentation batches",
+            "List BCA students who will prepare a presentation on digital marketing", "MBA students who didn't send PPT", "Presentation on AI is at 3 pm for MBA students",
+            "Send a warning to MBA students below 75% attendance, help me to word the message", "Download the slides for today's faculty development programme",
         ):
             self.assertNotIn(extract_entities(text, self.vocab).report_format, {"docx", "pptx"}, text)
 
