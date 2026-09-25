@@ -21,7 +21,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime
 from urllib import robotparser
-from urllib.parse import urljoin, urlparse
+from urllib.parse import unquote, urljoin, urlparse
 
 import httpx
 
@@ -42,12 +42,12 @@ _CONTENT_FAMILIES = {
     "xml": ("application/xml", "text/xml"), "json": ("application/json", "application/ld+json", "application/sparql-results+json", "text/json"), "pdf": ("application/pdf",),
 }
 _LOGIN_PATH = re.compile(r"/(?:accounts/)?log[-_]?in\b|/authwall|/signin\b|/checkpoint\b", re.IGNORECASE)
-# The "/1.0" of a robots.txt User-agent line: groups match on the product token alone.
-_ROBOTS_AGENT_VERSION = re.compile(r"^(\s*user-agent\s*:\s*[^/\s#]+)/[^\s#]*", re.IGNORECASE | re.MULTILINE)
+# The "/1.0" and anything after it on a robots.txt User-agent line ("/1.0 (+https://...)"): groups match on the product token alone.
+_ROBOTS_AGENT_VERSION = re.compile(r"^(\s*user-agent\s*:\s*[^/\s#]+)[^#]*", re.IGNORECASE)
 # The crawler's name before the product was renamed: a group a webmaster wrote
 # for it still binds the crawler, so the rename can never widen what it fetches.
 LEGACY_PRODUCT_TOKEN = "GuruJi-InstitutionIntelligence"
-_ROBOTS_AGENT_NAME = re.compile(r"^(\s*user-agent\s*:\s*)([^\s#]+)", re.IGNORECASE | re.MULTILINE)
+_ROBOTS_AGENT_NAME = re.compile(r"^(\s*user-agent\s*:\s*)([^\s#]+)", re.IGNORECASE)
 
 
 # Every host map/assets.py reads as a social platform, short links included (fb.me, youtu.be, t.me, wa.me),
@@ -162,8 +162,24 @@ def robots_lines(text: str) -> list[str]:
     former name applies to it too.
     """
 
-    text = _ROBOTS_AGENT_VERSION.sub(r"\1", text)
-    return _ROBOTS_AGENT_NAME.sub(_bind_legacy_group, text).splitlines()
+    # Line by line, split at every line ending urllib accepts, so no rewrite
+    # can reach from an empty User-agent line into the next one.
+    lines = [_ROBOTS_AGENT_VERSION.sub(r"\1", line) for line in text.splitlines()]
+    # urllib applies the first group that names the crawler. A group that names
+    # the current crawler and not the old one is the site's rule for it, and an
+    # old-name group must not come first and override it. Otherwise every group
+    # that bound the old crawler binds this one, in the same order as before.
+    if any(not group.applies_to(LEGACY_PRODUCT_TOKEN) for group in _groups_for(lines, product_token(USER_AGENT))):
+        return lines
+    return [_ROBOTS_AGENT_NAME.sub(_bind_legacy_group, line) for line in lines]
+
+
+def _groups_for(lines: list[str], token: str) -> list:
+    """The robots.txt groups urllib would apply to a crawler with this product token (not the "*" group)."""
+
+    parser = robotparser.RobotFileParser()
+    parser.parse(lines)
+    return [group for group in parser.entries if group.applies_to(token)]
 
 
 def _bind_legacy_group(match: re.Match[str]) -> str:
@@ -174,7 +190,7 @@ def _bind_legacy_group(match: re.Match[str]) -> str:
     each such name is rewritten, so the rename never widens what is fetched.
     """
 
-    name = match.group(2).lower()
+    name = unquote(match.group(2)).lower()  # urllib decodes the name before matching
     current = product_token(USER_AGENT).lower()
     if name != "*" and name in LEGACY_PRODUCT_TOKEN.lower() and name not in current:
         return match.group(1) + product_token(USER_AGENT)

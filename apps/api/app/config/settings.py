@@ -96,7 +96,7 @@ class AppSettings:
     environment: str = "development"
     allowed_origins: tuple[str, ...] = ("http://localhost:5173",)
     dev_bearer_token: str = field(default="dev-token", repr=False)
-    control_database_url: str | None = field(default="sqlite:///./data/agentic_saffron.db", repr=False)
+    control_database_url: str | None = field(default_factory=_default_control_database_url, repr=False)
     oidc_issuer_url: str | None = None
     oidc_audience: str | None = None
     oidc_jwks_url: str | None = None
@@ -309,7 +309,7 @@ class AppSettings:
             environment=environment,
             allowed_origins=origins,
             dev_bearer_token=os.getenv("SAFFRON_DEV_BEARER_TOKEN", "dev-token"),
-            control_database_url=os.getenv("CONTROL_DATABASE_URL", "sqlite:///./data/agentic_saffron.db"),
+            control_database_url=os.getenv("CONTROL_DATABASE_URL", _default_control_database_url()),
             oidc_issuer_url=os.getenv("SAFFRON_OIDC_ISSUER_URL") or None,
             oidc_audience=os.getenv("SAFFRON_OIDC_AUDIENCE") or None,
             oidc_jwks_url=os.getenv("SAFFRON_OIDC_JWKS_URL") or None,

@@ -79,6 +79,9 @@
     try {
       if (value === null) s.removeItem(key);
       else s.setItem(key, value);
+      // Whatever is written or cleared under the new key retires the old one,
+      // so a sign-out can never leave a pre-rename token to be read back.
+      if (key.startsWith('saffron.')) s.removeItem('guru.' + key.slice('saffron.'.length));
     } catch {
       // A full or disabled store is not fatal; the user signs in again.
     }

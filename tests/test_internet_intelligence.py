@@ -757,7 +757,7 @@ class RobotsCacheAndIdentityTests(unittest.IsolatedAsyncioTestCase):
         # the rename must not quietly let it fetch what they had shut off.
         from app.internet_intelligence.fetch import crawler_user_agent
 
-        for group in ("GuruJi-InstitutionIntelligence", "GuruJi-InstitutionIntelligence/1.0", "guruji-institutionintelligence", "GuruJi", "guruji-institution"):
+        for group in ("GuruJi-InstitutionIntelligence", "GuruJi-InstitutionIntelligence/1.0", "guruji-institutionintelligence", "GuruJi", "guruji-institution", "Guru%4Ai"):
             def handler(request: httpx.Request, group=group) -> httpx.Response:
                 if request.url.path == "/robots.txt":
                     return httpx.Response(200, text=f"User-agent: *\nAllow: /\n\nUser-agent: {group}\nDisallow: /private\n", request=request)
@@ -766,6 +766,46 @@ class RobotsCacheAndIdentityTests(unittest.IsolatedAsyncioTestCase):
             fetcher = PublicPageFetcher(transport=httpx.MockTransport(handler), resolver=fake_resolver, user_agent=crawler_user_agent("webmaster@bgscet.ac.in"))
             self.assertEqual((await fetcher.retrieve("https://news.example.com/private/x")).outcome, "robots", group)
             self.assertEqual((await fetcher.retrieve("https://news.example.com/x")).outcome, "ok", group)
+
+    async def test_a_group_for_the_current_name_wins_over_the_former_name(self):
+        # urllib applies the first group naming the crawler; a group the site wrote
+        # for the new name must not be overridden by an earlier one for the old name.
+        from app.internet_intelligence.fetch import crawler_user_agent
+
+        for legacy in ("GuruJi", "Guru%4Ai", "GuruJi-InstitutionIntelligence/1.0"):
+            for current in ("AgenticSaffron", "AgenticSaffron-InstitutionIntelligence/1.0"):
+                def handler(request: httpx.Request, legacy=legacy, current=current) -> httpx.Response:
+                    if request.url.path == "/robots.txt":
+                        return httpx.Response(200, text=f"User-agent: {legacy}\nDisallow: /private\n\nUser-agent: {current}\nDisallow: /\n", request=request)
+                    return httpx.Response(200, headers={"content-type": "text/html"}, text=PAGE, request=request)
+
+                fetcher = PublicPageFetcher(transport=httpx.MockTransport(handler), resolver=fake_resolver, user_agent=crawler_user_agent("webmaster@bgscet.ac.in"))
+                self.assertEqual((await fetcher.retrieve("https://news.example.com/x")).outcome, "robots", (legacy, current))
+
+    def test_the_rename_never_widens_what_the_crawler_may_fetch(self):
+        # Only a group urllib really applies to the new name, and not to the old
+        # one, turns the old name's groups off.
+        from urllib import robotparser
+
+        from app.internet_intelligence.fetch import USER_AGENT, product_token, robots_lines
+
+        cases = (
+            "User-agent: AgenticSaffron\n\nUser-agent: GuruJi\nDisallow: /\n",
+            "User-agent: GuruJi\nDisallow: /\n\nUser-agent: AgenticSaffron-InstitutionIntelligence/1.0 (+https://example.invalid/bot)\nDisallow: /\n",
+            "User-agent: GuruJi\nDisallow: /\n\nUser-agent: InstitutionIntelligence\nDisallow: /private\n",
+        )
+        for text in cases:
+            parser = robotparser.RobotFileParser()
+            parser.parse(robots_lines(text))
+            self.assertFalse(parser.can_fetch(product_token(USER_AGENT), "https://news.example.com/x"), text)
+
+    def test_former_crawler_groups_bind_it_whatever_the_line_endings(self):
+        from app.internet_intelligence.fetch import robots_lines
+
+        for text in ("User-agent:\n\nUser-agent: GuruJi\nDisallow: /private\n", "User-agent: GuruJi\rDisallow: /private\r", "User-agent: GuruJi\u2028Disallow: /private"):
+            lines = robots_lines(text)
+            self.assertIn("User-agent: AgenticSaffron-InstitutionIntelligence", lines, repr(text))
+            self.assertIn("Disallow: /private", lines, repr(text))
 
     def test_settings_reject_a_malformed_contact(self):
         import os
