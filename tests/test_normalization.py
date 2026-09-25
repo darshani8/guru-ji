@@ -113,7 +113,13 @@ class MappingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(proposal.mapped()["Name"], "name")
 
     async def test_profile_headers_that_normalise_alike_do_not_share_a_field(self):
-        proposal = await MappingEngine().propose(["USN", "Name", "Sem", "Sem."], entity_hint="student", saved_profile={"USN": "student_id", "Name": "name", "Sem": "semester"})
+        engine = MappingEngine()
+        # The reviewer named one of the look-alikes: their choice stands and needs no new review.
+        proposal = await engine.propose(["USN", "Name", "Mobile No", "Mobile No."], entity_hint="student", saved_profile={"USN": "student_id", "Name": "name", "Mobile No.": "phone"})
+        self.assertEqual(proposal.mapped(), {"USN": "student_id", "Name": "name", "Mobile No.": "phone"})
+        self.assertEqual(proposal.review_required(), ())
+        # Neither was named exactly: they cannot both take the remembered field.
+        proposal = await engine.propose(["USN", "Name", "Sem", "Sem."], entity_hint="student", saved_profile={"USN": "student_id", "Name": "name", "SEM": "semester"})
         targets = [item.canonical_field for item in proposal.mappings if item.canonical_field]
         self.assertEqual(targets.count("semester"), 1)
         self.assertIn("Sem.", {item.source_header for item in proposal.review_required()})

@@ -154,6 +154,11 @@ class IngestionService:
         job = self._job(institution_id, job_id)
         if job["status"] not in {JOB_QUEUED, JOB_FAILED, JOB_PROCESSING}:
             return job
+        # A job that failed after its mapping was chosen (no row importable, or
+        # normalising broke) goes back to a person: the same mapping, remembered
+        # or automatic, would only fail the same way again.
+        remap = job["status"] == JOB_FAILED and job.get("stage") == STAGE_NORMALIZING
+        previous_error = job.get("error") if remap else None
         if job["status"] == JOB_PROCESSING:
             if not force and not self._heartbeat_stale(job):
                 return job
@@ -166,7 +171,7 @@ class IngestionService:
             records = self.store.job_records(institution_id, job_id, limit=self.max_rows)
             if not records:
                 raise IngestionError("no tabular rows were found; upload the file through the documents API if it is a policy or circular")
-            return await self._map(institution_id, job, records)
+            return await self._map(institution_id, job, records, force_review=remap, previous_error=previous_error)
         except CommitError:
             # commit() already recorded the error and returned the job to ready.
             return self._job(institution_id, job_id)
@@ -261,12 +266,14 @@ class IngestionService:
         return self.store.update_job(institution_id, job["job_id"], row_count=len(rows), sheet_name=table.name, report=report, stage=STAGE_MAPPING)
 
     # ----------------------------------------------------------------- mapping
-    async def _map(self, institution_id: str, job: dict[str, Any], records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    async def _map(self, institution_id: str, job: dict[str, Any], records: Sequence[Mapping[str, Any]], *, force_review: bool = False, previous_error: str | None = None) -> dict[str, Any]:
         headers = list(job.get("report", {}).get("selected_table", {}).get("headers") or list(records[0]["raw"].keys()))
         samples = {header: [row["raw"].get(header) for row in records[:50]] for header in headers}
         entity_hint = job.get("entity") or None
         signature = header_signature(headers)
-        if entity_hint:
+        if force_review:
+            profile = None
+        elif entity_hint:
             profile = self.store.find_mapping_profile(institution_id, entity_hint, signature)
         else:
             # A reviewer's earlier decision for these headers wins over detection,
@@ -285,7 +292,7 @@ class IngestionService:
         mapping_state["profile_incomplete"] = profile_incomplete
         entity_uncertain = not entity_hint and not proposal.profile_applied and proposal.entity_confidence < self.mapping.threshold
         mapping_state["entity_uncertain"] = entity_uncertain
-        needs_review = bool(proposal.review_required() or proposal.missing_required() or entity_uncertain)
+        needs_review = bool(force_review or proposal.review_required() or proposal.missing_required() or entity_uncertain)
         if needs_review:
             review_payload = {
                 "entity": proposal.entity,
@@ -298,6 +305,7 @@ class IngestionService:
                 "proposed_mapping": {item.source_header: item.canonical_field for item in proposal.mappings},
                 "headers": headers,
                 "samples": {header: [str(value)[:60] for value in values[:3] if value not in (None, "")] for header, values in samples.items()},
+                "previous_error": previous_error,
             }
             self.store.add_review_items(institution_id, job["job_id"], [{"kind": "mapping", "payload": review_payload}])
             return self.store.update_job(institution_id, job["job_id"], status=JOB_NEEDS_REVIEW, stage=STAGE_MAPPING_REVIEW, entity=proposal.entity, mapping=mapping_state)
@@ -410,7 +418,12 @@ class IngestionService:
             for key, value in people.items():
                 existing.setdefault(key, value)
         self._heartbeat(institution_id, job["job_id"])
-        candidates, actions, duplicate_warnings = find_duplicates(records, existing)
+        # A row that cannot be imported claims no key and matches no one: the
+        # first importable copy owns the key, and no question asks about a row
+        # that would not be imported whatever the answer.
+        importable = [index for index, record in enumerate(records) if not record.has_blocking_issues()]
+        candidates, found, duplicate_warnings = find_duplicates([records[index] for index in importable], existing)
+        actions = {importable[position]: action for position, action in found.items()}
         self._heartbeat(institution_id, job["job_id"])
         updated_rows: list[dict[str, Any]] = []
         for index, (row, record) in enumerate(prepared):
@@ -426,15 +439,9 @@ class IngestionService:
                 "status": status, "action": action, "record_key": record.record_key, "issues": list(record.issues),
             })
         self.store.replace_job_records(institution_id, job["job_id"], updated_rows)
-        status_by_locator = {item["locator"]: item["status"] for item in updated_rows}
-        review_items = []
-        for candidate in candidates:
-            if candidate.kind not in {"conflicting_key", "probable_person"}:
-                continue
-            # A row that cannot be imported creates no second record, whatever the reviewer decides.
-            if status_by_locator.get(candidate.left_locator) == "rejected" or (candidate.kind == "probable_person" and status_by_locator.get(candidate.right_locator or "") == "rejected"):
-                continue
-            review_items.append({"kind": "duplicate", "payload": candidate.as_dict()})
+        # Decisions count only for the questions of this run (see _locators_to_skip).
+        run_id = uuid4().hex
+        review_items = [{"kind": "duplicate", "payload": {**candidate.as_dict(), "normalization_run": run_id}} for candidate in candidates if candidate.kind in {"conflicting_key", "probable_person"}]
         issue_summary = summarize_issues([record.issues for record in records])
         actions_summary: dict[str, int] = {}
         for action in actions.values():
@@ -453,6 +460,7 @@ class IngestionService:
             "normalizations_applied": sorted({note.split(":", 1)[1] if ":" in note else note for record in records for note in record.normalizations}),
             "identifier_pattern": pattern,
             "warnings": list(duplicate_warnings),
+            "run_id": run_id,
         }
         if not any(item["status"] in {"ready", "review"} for item in updated_rows):
             # Finishing as an empty "imported" job would hide why nothing arrived.
@@ -534,7 +542,14 @@ class IngestionService:
         records and merging them is not an import decision.
         """
 
-        decided = [item for item in items if item["kind"] == "duplicate" and item["status"] in {"approved", "rejected"}]
+        # Only a person's decisions on this run's questions count: questions of an
+        # earlier, superseded run were closed by the system, not answered.
+        run_id = ((job.get("report") or {}).get("normalization") or {}).get("run_id")
+        decided = [
+            item for item in items
+            if item["kind"] == "duplicate" and item["status"] in {"approved", "rejected"} and item.get("resolved_by") != "system"
+            and (item.get("payload") or {}).get("normalization_run") == run_id
+        ]
         if not decided:
             return set()
         rows = {row["locator"]: row for row in self.store.job_records(institution_id, job["job_id"], limit=self.max_rows)}

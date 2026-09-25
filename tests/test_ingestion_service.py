@@ -402,6 +402,26 @@ class ApprovalTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((retried["status"], retried["stage"]), (JOB_NEEDS_REVIEW, STAGE_MAPPING_REVIEW))
         self.assertFalse(retried["mapping"]["profile_applied"])
 
+    async def test_retrying_a_job_that_imported_nothing_under_a_remembered_mapping_asks_again(self):
+        from app.normalization.mapping import header_signature
+
+        # A mapping remembered before it was known to import nothing (as approvals used to be).
+        headers = ["USN", "Student Name", "Subject Code", "Exam", "Total Marks", "Max Marks"]
+        self.store.save_mapping_profile("college_a", entity="exam", header_signature=header_signature(headers), mapping={"USN": "student_id", "Student Name": "student_name", "Subject Code": "course_code", "Exam": "exam_name", "Total Marks": "marks_obtained", "Max Marks": "max_marks"}, approved_by="staff-1")
+        job = await self._upload("ia.csv", b"USN,Student Name,Subject Code,Exam,Total Marks,Max Marks\n1MS23MBA001,Ravi,MBA101,IA1,42,25\n")
+        self.assertEqual((job["status"], job["stage"]), (JOB_FAILED, STAGE_NORMALIZING))
+        self.assertTrue(job["mapping"]["profile_applied"])
+        # Retry puts the mapping in front of a person, with the reason, instead of failing the same way.
+        retried = await self.service.process("college_a", job["job_id"])
+        self.assertEqual((retried["status"], retried["stage"]), (JOB_NEEDS_REVIEW, STAGE_MAPPING_REVIEW))
+        payload = self._mapping_review(retried)
+        self.assertIn("none of the 1 rows can be imported", payload["previous_error"])
+        # Swapping the two marks columns imports the row and replaces the remembered mapping.
+        mapping = dict(payload["proposed_mapping"], **{"Total Marks": "max_marks", "Max Marks": "marks_obtained"})
+        job = await self.service.apply_mapping("college_a", job["job_id"], mapping=mapping, entity="exam", approved_by="staff-1")
+        self.assertEqual(job["status"], JOB_IMPORTED)
+        self.assertEqual(self.store.find_mapping_profile("college_a", "exam", header_signature(headers))["mapping"]["Total Marks"], "max_marks")
+
     async def test_a_failed_approval_can_be_retried_back_to_review(self):
         from unittest import mock
 
@@ -437,6 +457,44 @@ class ApprovalTests(unittest.IsolatedAsyncioTestCase):
         broken = await self._upload("c.csv", b"Name,USN,Program,Semester,Phone\nIra Menon,1AB22CS012,BCA,1,9822222221\n,1AB22CS012,BCA,2,9822222222\n", entity_hint="student")
         self.assertEqual(broken["status"], JOB_IMPORTED)
         self.assertEqual(self.store.get_record("college_a", "student", "1ab22cs012")["semester"], 1)
+
+    async def test_only_decisions_on_the_current_run_count(self):
+        from datetime import datetime, timedelta, timezone
+
+        rows = b"Name,USN,Program,Semester,Phone\nIra Menon,1AB22CS020,BCA,1,9833333331\nIra Menon,1AB22CS020,BCA,2,9833333332\n"
+        job = await self._upload("a.csv", rows, entity_hint="student", options={"auto_commit": False})
+        self.assertEqual(job["stage"], STAGE_DUPLICATE_REVIEW)
+        job = await self._decide_duplicates(job, "approved")  # keep the earlier copy
+        self.assertEqual(job["status"], JOB_READY)
+        # The job is interrupted and restarted before the commit: the question is asked again and answered differently.
+        stale = (datetime.now(timezone.utc) - timedelta(seconds=self.service.restart_after_seconds + 60)).isoformat()
+        self.store.update_job("college_a", job["job_id"], status=JOB_PROCESSING, stage=STAGE_NORMALIZING)
+        self.store.backend.execute("UPDATE ingestion_jobs SET updated_at = ? WHERE job_id = ?", (stale, job["job_id"]))
+        job = await self.service.process("college_a", job["job_id"])
+        self.assertEqual(job["stage"], STAGE_DUPLICATE_REVIEW)
+        for item in self.store.list_review_items("college_a", job_id=job["job_id"]):
+            job = self.service.resolve_review("college_a", item["review_id"], decision="rejected", resolved_by="staff-1")  # use this row
+        job = self.service.commit("college_a", job["job_id"], committed_by="staff-1")
+        self.assertEqual(job["report"]["import"]["inserted"], 1)
+        self.assertEqual(self.store.get_record("college_a", "student", "1ab22cs020")["semester"], 2)
+
+    async def test_a_copy_that_cannot_be_imported_does_not_claim_the_identifier(self):
+        # The first copy has no name (a blocking error); the second is fine.
+        content = b"Name,USN,Program,Semester,Phone\n,1AB22CS030,BCA,1,9844444441\nIra Menon,1AB22CS030,BCA,2,9844444442\n"
+        job = await self._upload("a.csv", content, entity_hint="student")
+        self.assertEqual(job["status"], JOB_IMPORTED, "no question is asked about a row that cannot be imported")
+        self.assertEqual(self.store.get_record("college_a", "student", "1ab22cs030")["semester"], 2)
+
+    async def test_duplicate_questions_come_in_file_order(self):
+        lines = [b"Name,USN,Program,Semester,Phone"]
+        for i in range(12):
+            lines.append(f"Person {i} Rao,1AB22CS{i:03d},BCA,1,98555{i:05d}".encode())
+            lines.append(f"Person {i} Rao,1AB22CS{i:03d},BCA,2,98666{i:05d}".encode())
+        job = await self._upload("pairs.csv", b"\n".join(lines) + b"\n", entity_hint="student")
+        items = self.store.list_review_items("college_a", job_id=job["job_id"])
+        rows = [int(item["payload"]["left_locator"].split("row=")[1]) for item in items]
+        self.assertEqual(len(rows), 12)
+        self.assertEqual(rows, sorted(rows))
 
     async def test_same_person_decision_drops_every_copy_of_the_new_identity(self):
         await self._upload("students.csv", STUDENTS)

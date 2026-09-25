@@ -90,6 +90,10 @@ class WebAssetTests(unittest.TestCase):
         self.assertIn("are both mapped to", js)
         self.assertIn("select.classList.add('invalid')", js)
         self.assertIn(".mapping-grid select.invalid", (CONSOLE / "console.css").read_text(encoding="utf-8"))
+        # A job followed in the background never replaces a review card showing another job, and a late answer is dropped.
+        self.assertIn("settle(job, { background: true });", js)
+        self.assertIn("if (!background || $('review-card').hidden || state.reviewJob === job.job_id) openReview(job.job_id);", js)
+        self.assertIn("if (state.reviewJob !== jobId) return;", js)
 
     def test_confirm_and_run_keeps_a_second_prompt_and_reports_a_lost_answer(self):
         console = (CONSOLE / "console.js").read_text(encoding="utf-8")

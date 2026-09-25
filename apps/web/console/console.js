@@ -322,12 +322,14 @@
   }
 
   // After every step: show the job, then open what needs the person next, or
-  // follow the job while the server is still working on it.
-  function settle(job) {
+  // follow the job while the server is still working on it. A job followed in
+  // the background never takes over a review card that shows another job.
+  function settle(job, { background = false } = {}) {
     showJobResult(job);
     loadJobs();
     if (job.status === 'needs_review') {
-      openReview(job.job_id);
+      if (!background || $('review-card').hidden || state.reviewJob === job.job_id) openReview(job.job_id);
+      else toast(`Job ${job.job_id.slice(0, 12)} needs review: press Review in Recent jobs.`);
       return;
     }
     if (state.reviewJob === job.job_id) {
@@ -360,7 +362,7 @@
           continue;
         }
         following.delete(jobId);
-        settle(job);
+        settle(job, { background: true });
         return;
       }
       loadJobs();
@@ -448,15 +450,19 @@
     const block = document.createElement('div');
     block.className = 'result-box';
     const reasons = (payload.review_required || []).map((item) => `${item.source_header} (${item.reason || 'uncertain'})`).join('; ') || 'none';
-    const doubt = payload.entity_uncertain ? `The records were detected as ${payload.entity}, but not with certainty: check the kind of records. ` : '';
+    const doubt = (payload.previous_error ? `The last attempt failed: ${payload.previous_error}. ` : '')
+      + (payload.entity_uncertain ? `The records were detected as ${payload.entity}, but not with certainty: check the kind of records. ` : '');
     const entities = entityChoices(payload).map((name) => `<option value="${escapeHtml(name)}"${name === payload.entity ? ' selected' : ''}>${escapeHtml(name)}</option>`).join('');
     const rows = payload.headers.map((header) => `<div>${escapeHtml(header)}</div><div><select data-header="${escapeHtml(header)}">${fieldOptions(payload.entity, payload.proposed_mapping[header])}</select></div><div class="muted">${escapeHtml((payload.samples[header] || []).join(' | ').slice(0, 40))}</div>`).join('');
     block.innerHTML = `<strong>Column mapping</strong><div class="field-row stack-sm"><label>Records in this file <select data-entity>${entities}</select></label></div><div class="muted stack-sm">${escapeHtml(doubt)}Review required: ${escapeHtml(reasons)}. Missing required: <span data-missing></span>.</div><div class="mapping-grid stack-sm"><div class="muted">Source header</div><div class="muted">Canonical field</div><div class="muted">Sample</div>${rows}</div><div class="stack"><button class="btn" data-approve type="button">Approve mapping</button></div>`;
     const entitySelect = block.querySelector('select[data-entity]');
     const selects = [...block.querySelectorAll('select[data-header]')];
     const showMissing = () => {
-      const missing = missingRequired(entitySelect.value, selects.map((select) => select.value).filter(Boolean));
-      block.querySelector('[data-missing]').textContent = missing.join(', ') || 'none';
+      // Without the entity's field list the choices cannot be checked (or even offered): say so rather than "none".
+      const known = entityFields(entitySelect.value).length > 0;
+      const missing = known ? missingRequired(entitySelect.value, selects.map((select) => select.value).filter(Boolean)) : [];
+      block.querySelector('[data-missing]').textContent = known ? (missing.join(', ') || 'none') : 'unknown (the field list could not be loaded; reload the page)';
+      block.querySelector('[data-approve]').disabled = !known;
     };
     entitySelect.addEventListener('change', () => {
       // Keep each choice the new entity also has; the rest start unmapped.
@@ -488,6 +494,7 @@
         settle(job);
       } catch (error) {
         setBusy(block, false);
+        showMissing();
         toast(error.message);
         refreshJob(jobId, { keepMappingReview: true });
       }
@@ -531,13 +538,16 @@
     try {
       const data = await api(`/v1/ingestion/jobs/${encodeURIComponent(jobId)}`);
       const reviews = data.pending_reviews || [];
+      if (reviews.some((review) => review.kind === 'mapping') && !state.entities.length) await loadEntities();
+      // A later openReview owns the card; this answer is stale.
+      if (state.reviewJob !== jobId) return;
       if (!reviews.length) {
         body.innerHTML = `<p class="muted">Nothing to review. ${escapeHtml(jobSummary(data.job))}</p>`;
         return;
       }
       body.replaceChildren(...reviews.map((review) => (review.kind === 'mapping' ? mappingReview(jobId, review) : duplicateReview(jobId, review))));
     } catch (error) {
-      body.innerHTML = `<p class="muted">${escapeHtml(error.message)}</p>`;
+      if (state.reviewJob === jobId) body.innerHTML = `<p class="muted">${escapeHtml(error.message)}</p>`;
     }
   }
 

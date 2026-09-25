@@ -700,8 +700,9 @@ class InstitutionDataStore:
         ids: list[str] = []
         stamp = now_iso()
         rows = []
-        for item in items:
-            review_id = f"review-{uuid4().hex}"
+        for position, item in enumerate(items):
+            # Items added together share created_at; the position keeps them in the order given (file order).
+            review_id = f"review-{position:06d}{uuid4().hex}"
             ids.append(review_id)
             rows.append((review_id, institution_id, job_id, str(item["kind"]), "pending", _json(dict(item.get("payload", {}))), stamp))
         if rows:

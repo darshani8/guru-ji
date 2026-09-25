@@ -339,10 +339,23 @@ class MappingEngine:
             # Profiles are found by normalised header signature, so they must be
             # applied the same way: "NAME" and "Name" are the same column.
             valid = set(entity.field_names())
-            by_normalized = {normalize_header(header): target for header, target in saved_profile.items() if target in valid}
-            # Two headers that normalise alike ("Sem", "Sem.") would both take the one remembered field.
+            by_normalized: dict[str, str] = {}
+            for header, target in saved_profile.items():
+                if target in valid:
+                    by_normalized.setdefault(normalize_header(header), target)
+            # A header the reviewer named exactly keeps their choice, and its
+            # look-alike ("Mobile No" beside "Mobile No.") stays as they left it.
+            named = {normalize_header(header) for header in headers if header in saved_profile}
+
+            def remembered(header: str) -> str | None:
+                if header in saved_profile:
+                    target = saved_profile[header]
+                    return target if target in valid else None
+                return None if normalize_header(header) in named else by_normalized.get(normalize_header(header))
+
+            # Look-alikes neither of which was named exactly would both take the one remembered field.
             mappings = tuple(self._resolve_conflicts([
-                FieldMapping(header, by_normalized.get(normalize_header(header)), 1.0 if normalize_header(header) in by_normalized else 0.0, "approved_profile", "reused an approved mapping profile")
+                FieldMapping(header, remembered(header), 1.0 if remembered(header) else 0.0, "approved_profile", "reused an approved mapping profile")
                 for header in headers
             ]))
             return MappingProposal(entity_name, entity_confidence, mappings, self.threshold, alternatives, profile_applied=True)
