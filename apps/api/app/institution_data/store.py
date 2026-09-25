@@ -711,7 +711,7 @@ class InstitutionDataStore:
                 )
         return ids
 
-    def list_review_items(self, institution_id: str, *, job_id: str | None = None, status: str | None = "pending", limit: int = 200) -> list[dict[str, Any]]:
+    def list_review_items(self, institution_id: str, *, job_id: str | None = None, status: str | None = "pending", limit: int = 200, offset: int = 0) -> list[dict[str, Any]]:
         clauses = ["institution_id = ?"]
         params: list[Any] = [institution_id]
         if job_id:
@@ -720,9 +720,10 @@ class InstitutionDataStore:
         if status:
             clauses.append("status = ?")
             params.append(status)
+        # Items added together share created_at; the id keeps pages stable.
         with self._tenant(institution_id):
             rows = self.backend.fetchall(
-                f"SELECT * FROM review_items WHERE {' AND '.join(clauses)} ORDER BY created_at LIMIT ?", (*params, _clamp_limit(limit, 2000)),
+                f"SELECT * FROM review_items WHERE {' AND '.join(clauses)} ORDER BY created_at, review_id LIMIT ? OFFSET ?", (*params, _clamp_limit(limit, 2000), max(0, offset)),
             )
         for row in rows:
             row["payload"] = _loads(row.pop("payload_json", "{}"), {})
@@ -772,6 +773,18 @@ class InstitutionDataStore:
         with self._tenant(institution_id):
             row = self.backend.fetchone(
                 "SELECT * FROM mapping_profiles WHERE institution_id = ? AND entity = ? AND header_signature = ?", (institution_id, entity, header_signature),
+            )
+        if row is None:
+            return None
+        row["mapping"] = _loads(row.pop("mapping_json", "{}"), {})
+        return row
+
+    def find_latest_mapping_profile(self, institution_id: str, header_signature: str) -> dict[str, Any] | None:
+        """The most recently approved profile for these headers, whichever entity the reviewer chose."""
+
+        with self._tenant(institution_id):
+            row = self.backend.fetchone(
+                "SELECT * FROM mapping_profiles WHERE institution_id = ? AND header_signature = ? ORDER BY created_at DESC, profile_id DESC LIMIT 1", (institution_id, header_signature),
             )
         if row is None:
             return None

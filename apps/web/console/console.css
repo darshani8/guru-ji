@@ -37,6 +37,9 @@
 .source-list a { color: var(--accent-strong); }
 .mapping-grid { display: grid; grid-template-columns: 1fr 1fr 80px; gap: 6px 10px; align-items: center; font-size: 12px; }
 .mapping-grid select { padding: 6px 8px; border: 1px solid var(--border-strong); border-radius: 8px; font-size: 12px; }
+/* Two columns mapped to one field: the reviewer keeps it on one of them. */
+.mapping-grid select.invalid { color: var(--danger); background: var(--danger-soft); border-color: var(--danger); }
+.btn:disabled { cursor: wait; opacity: .6; }
 .muted { color: var(--text-muted); }
 /* Layout helpers that replace inline style attributes (the CSP has no
    style-src 'unsafe-inline', so element styles are refused). */

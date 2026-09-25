@@ -158,6 +158,9 @@ def _probable_people(records: Sequence[CanonicalRecord], keyed: Sequence[int], e
         record = records[index]
         left = views[index]
         locator = record.lineage.source_locator or f"row={index + 1}"
+        # A row that updates a record already on file creates no new identity:
+        # asking whether it is someone else could only drop the update.
+        updates_existing = record.record_key in existing
         batch_hits: dict[int, tuple[float, dict[str, Any]]] = {}
         existing_hits: dict[str, tuple[float, dict[str, Any]]] = {}
         for block in _block_keys(left):
@@ -166,13 +169,13 @@ def _probable_people(records: Sequence[CanonicalRecord], keyed: Sequence[int], e
             for kind, other in blocks.get(block, ()):
                 if kind == "batch":
                     # Each in-batch pair is scored once, from the earlier row.
-                    if other <= index or other in batch_hits:
+                    if other <= index or other in batch_hits or (updates_existing and records[other].record_key in existing):
                         continue
                     score, evidence = _person_signals(left, views[other], ignored)
                     if score >= NAME_SIMILARITY_THRESHOLD:
                         batch_hits[other] = (score, evidence)
                 else:
-                    if other == record.record_key or other in existing_hits:
+                    if updates_existing or other == record.record_key or other in existing_hits:
                         continue
                     score, evidence = _person_signals(left, existing_views[other], ignored)
                     if score >= NAME_SIMILARITY_THRESHOLD:

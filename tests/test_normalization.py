@@ -79,6 +79,45 @@ class MappingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(proposal.unmapped(), ("Other",))
         self.assertEqual(proposal.missing_required(), ())
 
+    async def test_similar_headers_never_share_a_field_so_the_proposal_can_be_approved_as_shown(self):
+        engine = MappingEngine()
+        for headers in (
+            ["Name", "USN", "Email", "Email ID", "Personal Email"],
+            ["Name", "USN", "Phone", "Mobile", "Contact No"],
+            ["Name", "USN", "Father Name", "Mother Name"],
+            ["Student Name", "Name", "USN", "Course", "Program"],
+            ["Name", "USN", "Address", "Permanent Address"],
+        ):
+            proposal = await engine.propose(headers, entity_hint="student")
+            targets = [item.canonical_field for item in proposal.mappings if item.canonical_field]
+            self.assertEqual(len(targets), len(set(targets)), f"{headers} proposes one field twice: {targets}")
+        # The weaker header falls back to a free field once; a second one finds none left.
+        proposal = await engine.propose(["Name", "USN", "Phone", "Mobile", "Contact No"], {"Phone": ["9876543210"], "Mobile": ["9876543211"], "Contact No": ["9876543212"]}, entity_hint="student")
+        by_header = {item.source_header: item for item in proposal.mappings}
+        self.assertEqual(by_header["Phone"].canonical_field, "phone")
+        self.assertEqual(by_header["Mobile"].canonical_field, "guardian_phone")
+        contact = by_header["Contact No"]
+        self.assertIsNone(contact.canonical_field)
+        self.assertEqual(contact.method, "conflict")
+        self.assertIn("already mapped from Phone", contact.reason)
+        self.assertEqual(contact.alternatives[0][0], "phone")
+        # A header left unmapped by a conflict is still shown to the reviewer.
+        self.assertEqual({item.source_header for item in proposal.review_required()}, {"Mobile", "Contact No"})
+        self.assertIn("Contact No", proposal.unmapped())
+
+    async def test_model_suggestions_cannot_take_a_field_another_header_holds(self):
+        model = _JsonModel('{"Prog": {"field": "name", "confidence": 0.99}}')
+        proposal = await MappingEngine(model=model).propose(["Name", "ID", "Prog"], entity_hint="student")
+        targets = [item.canonical_field for item in proposal.mappings if item.canonical_field]
+        self.assertEqual(len(targets), len(set(targets)), targets)
+        self.assertEqual(proposal.mapped()["Name"], "name")
+
+    async def test_profile_headers_that_normalise_alike_do_not_share_a_field(self):
+        proposal = await MappingEngine().propose(["USN", "Name", "Sem", "Sem."], entity_hint="student", saved_profile={"USN": "student_id", "Name": "name", "Sem": "semester"})
+        targets = [item.canonical_field for item in proposal.mappings if item.canonical_field]
+        self.assertEqual(targets.count("semester"), 1)
+        self.assertIn("Sem.", {item.source_header for item in proposal.review_required()})
+
     def test_apply_mapping_preserves_unmapped_columns_and_combines_names(self):
         canonical, extras = apply_mapping(STUDENT, {"First": "first_name", "Last": "last_name", "ID": "student_id"}, {"First": "Ravi", "Last": "Kumar", "ID": "X1", "Hobby": "chess", "Blank": ""})
         self.assertEqual(canonical["name"], "Ravi Kumar")
@@ -204,6 +243,24 @@ class DeduplicationTests(unittest.TestCase):
         candidates, _, warnings = find_duplicates(records, existing)
         self.assertEqual(warnings, [])
         self.assertEqual(len([item for item in candidates if item.kind == "probable_person"]), 3 + 3)
+
+
+    def test_a_row_updating_a_record_on_file_is_never_asked_about_as_a_new_identity(self):
+        # Two students already on file share a name and phone; an update to one of them creates no identity.
+        one = CanonicalRecord("student", {"student_id": "S1", "name": "Ravi Kumar", "phone": "9876543210", "semester": 2})
+        other = CanonicalRecord("student", {"student_id": "S2", "name": "Ravi Kumar", "phone": "9876543210", "semester": 1})
+        existing = {one.record_key: {"name": "Ravi Kumar", "phone": "9876543210"}, other.record_key: {"name": "Ravi Kumar", "phone": "9876543210"}}
+        candidates, actions, _ = find_duplicates([one], existing)
+        self.assertEqual(actions, {0: "update"})
+        self.assertEqual([item for item in candidates if item.kind == "probable_person"], [])
+        # Two updates in one file are separate records already: nothing to ask either.
+        candidates, actions, _ = find_duplicates([one, other], existing)
+        self.assertEqual(actions, {0: "update", 1: "update"})
+        self.assertEqual([item for item in candidates if item.kind == "probable_person"], [])
+        # A new identifier for the same person is still asked about.
+        new = CanonicalRecord("student", {"student_id": "S9", "name": "Ravi Kumar", "phone": "9876543210"})
+        candidates, _, _ = find_duplicates([new], existing)
+        self.assertEqual({item.record_key for item in candidates if item.kind == "probable_person"}, {one.record_key, other.record_key})
 
 
 class DegenerateBlockTests(unittest.TestCase):

@@ -74,6 +74,23 @@ class WebAssetTests(unittest.TestCase):
         self.assertNotRegex(js, re.compile(r'href="\$\{escapeHtml\((report|item)\.download_path\)\}'))
         self.assertIn("downloadReport(", js)
 
+    def test_console_follows_an_upload_through_review_to_its_result(self):
+        js = (CONSOLE / "console.js").read_text(encoding="utf-8")
+        # A queued or processing job is polled until it settles, so its review opens by itself.
+        self.assertIn("async function followJob(jobId", js)
+        self.assertIn("if (RUNNING.includes(job.status) && !stalled(job)) followJob(job.job_id);", js)
+        # Every step uses the job the server returned instead of assuming it went on.
+        for path in ("/mapping`", "/commit`", "/retry`", "/v1/ingestion/reviews/"):
+            self.assertRegex(js, r"const \{ job \} = await api\(`[^`]*" + re.escape(path), path)
+        # A failed or stalled job offers Retry; the reviewer can correct the entity.
+        self.assertIn("data-retry=", js)
+        self.assertIn("select[data-entity]", js)
+        self.assertIn("entity: entitySelect.value", js)
+        # Two columns on one field are caught before the request, and marked with a class (no inline style).
+        self.assertIn("are both mapped to", js)
+        self.assertIn("select.classList.add('invalid')", js)
+        self.assertIn(".mapping-grid select.invalid", (CONSOLE / "console.css").read_text(encoding="utf-8"))
+
     def test_assistant_files_download_through_the_authenticated_client(self):
         # A plain link to the report would reach the server without the signed-in
         # identity; only this server's report paths are ever fetched.
