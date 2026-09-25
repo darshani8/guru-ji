@@ -420,7 +420,8 @@ body.assistant-page { overflow: hidden; }
   letter-spacing: -.02em;
   line-height: 1.15;
 }
-.welcome-sub { max-width: 520px; margin: 12px 0 0; color: var(--text-muted); font-size: 15px; }
+.welcome-greeting { margin: 14px 0 0; color: var(--text); font-size: 20px; font-weight: 500; }
+.welcome-sub { max-width: 520px; margin: 6px 0 0; color: var(--text-muted); font-size: 15px; }
 
 /* A new chat keeps the greeting and the composer together in the middle of
    the screen, the way a fresh page starts; the first message docks it. */
