@@ -46,11 +46,6 @@ class PlannerTests(unittest.TestCase):
             "Download MBA students below 75% attendance as a word document": "docx",
             "Word document of students with pending fees": "docx",
             "Put MBA students below 75% attendance in Microsoft Word": "docx",
-            "Could you create a Word file of students with pending fees?": "docx",
-            "Can you make the pending fee list into a Word document?": "docx",
-            "Students with pending fees - PowerPoint please": "pptx",
-            "Email the HOD a PowerPoint of MBA students below 75% attendance": "pptx",
-            "MBA students below 75% attendance ka PPT bana do": "pptx",
             "Create a PowerPoint of students with pending fees": "pptx",
             "Prepare slides of MBA students below 75% attendance": "pptx",
             "Export MBA students below 75% attendance as a PowerPoint": "pptx",
@@ -58,43 +53,6 @@ class PlannerTests(unittest.TestCase):
             "Export pending fees to a PowerPoint": "pptx",
             "Make PPTs of MBA students below 75% attendance": "pptx",
             "Make a deck of students with pending fees": "pptx",
-            # Everyday ways of asking: greetings, "kindly provide", a trailing "?", chat endings, Hinglish.
-            "Hi, can you make a PPT of low attendance students in MBA?": "pptx",
-            "Sir can you prepare a Word document of all faculty?": "docx",
-            "Make a PPT of MBA students with low attendance?": "pptx",
-            "Is it possible to get the MBA student list in a Word document?": "docx",
-            "Send me the list of MBA students in word plz": "docx",
-            "Send the pending fees list as a PPT by tomorrow": "pptx",
-            "Create a PPT file of the low attendance students": "pptx",
-            "Prepare a Word document containing the list of MBA students": "docx",
-            "Email a PPT on low attendance students to the HOD": "pptx",
-            "Email the PowerPoint of MBA students below 75% attendance to the HOD": "pptx",
-            "Students with pending fees, export as pptx": "pptx",
-            "Pending fee list, word format please": "docx",
-            "Faculty list in PowerPoint": "pptx",
-            "Kya aap MBA students ki list word mein bana sakte ho?": "docx",
-            "MBA students ki list word file mein de dijiye": "docx",
-            "Pending fees list ko PPT mein convert karo": "pptx",
-            # Relative clauses, titles, follow-ups, formal openings and other names for the file.
-            "Give me the list of students whose fees are due in PPT": "pptx",
-            "Send the list of MBA students with pending fees to Prof. Iyer in Word format": "docx",
-            "I would request you to send the pending fees list as a Word document": "docx",
-            "Make a PPT presentation of MBA students with pending fees": "pptx",
-            "Send HOD a PPT of students with low attendance": "pptx",
-            "Prepare a PPT of Computer Science faculty for the NAAC visit": "pptx",
-            "Students with low attendance in a Word file please": "docx",
-            "Export as Word: students with pending fees": "docx",
-            "MBA students ki list ka PPT create karo": "pptx",
-            "HOD ko low attendance students ki list PPT mein bhej do": "pptx",
-            # Everyday requests production already understood keep working.
-            "List all faculty and make a Word document": "docx",
-            "Prepare a Word document on students with pending fees": "docx",
-            "Check which students have pending fees and make a PPT": "pptx",
-            "List students who have pending fees and make a PPT": "pptx",
-            "Please provide the list of faculty along with their contact numbers in word format": "docx",
-            "PPT of MBA students whose fees are pending please": "pptx",
-            "Share the low attendance list in a PPT today": "pptx",
-            "MBA students below 75% attendance ka word document bana do": "docx",
             "Export an excel of MBA students below 75% attendance": "xlsx",
             "Give me a report of students with pending fees": "xlsx",
         }
@@ -121,67 +79,9 @@ class PlannerTests(unittest.TestCase):
             "Summarize the Word document on maternity leave": ["search_documents"],
             "Open the PDF document on anti-ragging": ["search_documents"],
             "Download the Word document on maternity leave": ["search_documents"],
-            "Is the leave policy available as a PDF document?": ["search_documents"],
-            "Share the PDF document on anti-ragging with MBA students": ["search_documents"],
-            # "The Word document of ..." an existing document is that document, never records in a new file.
-            "Download the Word document of the fee structure": ["search_documents"],
-            "Fee structure ka word document chahiye": ["search_documents"],
-            "Send the Word document of the timetable to BCA students": ["search_documents"],
-            "Get me the Word document of the anti-ragging affidavit": ["search_documents"],
-            "Download the Word document of the annual report": ["search_documents"],
-            "Is the exam timetable available as a PDF document?": ["search_documents"],
-            "Download a Word document on maternity leave": ["search_documents"],
-            "Send me the fee structure as a PDF document": ["search_documents"],
-            "Please review the pending fees Word document": ["search_documents"],
-            "Download the Word document of the faculty induction talk": ["search_documents"],
-            # A PDF or Excel file of records is made, however the request opens.
-            "Send a PDF document of students with pending fees to the HOD": ["get_pending_fees", "generate_report", "find_hod", "send_email"],
-            "Hi, can you email the pending fees list to the HOD as a PDF document?": ["get_pending_fees", "generate_report", "find_hod", "send_email"],
         }
         for text, expected in cases.items():
             self.assertEqual([step.tool for step in self.planner.plan(text, self.tools, self.vocab).steps], expected, text)
-        # A talk someone gives, a deck someone sends, a skill, a question: never a Word or PowerPoint file.
-        for text in (
-            "MBA students will make a presentation on Monday", "Send the slides of the orientation to MBA students", "Group MBA students into presentation batches",
-            "List students who are weak in PowerPoint", "Which faculty are trained in MS Word?", "Ask Priya to send her ppt of the seminar",
-            "Which students have not submitted the PPT?", "Presentation on AI is at 3 pm for MBA students", "Help me to word the message about exams",
-            # Questions, however they are put.
-            "Tell me which MBA students submitted their project as a PowerPoint", "Check whether BCA students uploaded their reports as Word documents",
-            "Can we allow MBA students to submit the project as a PPT?", "May I know whether faculty should upload notes in Word format?",
-            "Can I know which faculty are confident in PowerPoint?", "Could you tell me if the SSR draft was shared as a Word document?",
-            # Skills, training and events: the paper-presentation round is called "PPT".
-            "List faculty who are new to PowerPoint", "List MBA students with experience in MS Word.", "Introduce BCA semester 1 students to MS Word.",
-            "Arrange a hands-on session in MS Word for BCA students", "Schedule the BCA lab exam in PowerPoint for next Monday",
-            "List BCA students who participated in PPT and quiz", "Count BCA students in PPT.",
-            # Messages for others: the file is theirs to make.
-            "Remind faculty to upload lesson plans in Word format", "Notify MBA students that assignments should be submitted as Word documents",
-            "Tell students to type their answers in MS Word, not by hand", "Remind faculty to export lesson plans to Word", "Please share the PPT with BCA students",
-            "BCA students ko bolo presentation taiyar karo", "List BCA students with low attendance and prepare them for presentations",
-            "Create a list of students for the paper presentation", "Presentations for MBA students next week",
-            "Download the sheet of MBA students selected in PPT.",
-            # Refusals, yes/no questions, statements and files handed over.
-            "Send me the list of MBA defaulters, not in Word", "Pending fee list, no PPT please", "Do the fee details appear in Word?",
-            "Student details are in Word only", "I have the student list in Word.", "Faculty list in Word attached, please check for duplicates",
-            "Got the low attendance list in Word, thanks", "Review the faculty list in Word and correct the spellings",
-            # Messages for others, however they are framed.
-            "Ask all HODs - send the faculty list in Word by Friday", "Tell BCA students: share your fee details in Word by Friday", "Dear students, do it in Word",
-            "Students must fill the form and send the details as a PPT", "Can I have faculty send the low attendance list in Word?", "BCA students: do a presentation on AI by Friday",
-            "Sabhi students apna PPT bhej dijiye kal tak", "MBA students jinko kal PPT dena hai unki list bhejo", "Send a mail to faculty requesting the low attendance list in Word format",
-            # Events, training, software and idioms.
-            "Send the scores of MBA students in PPT, quiz and debate to the dean", "Provide training to faculty in MS Word and PowerPoint", "Names of students in PPT on Friday",
-            "Students list for Wipro PPT", "Pending fees of students selected for PPT", "Orientation day plan for BCA students: registration, lunch, PPT",
-            "Get MS Word for the new faculty laptops", "Send the pending fee list to the HOD, in a word, everyone who has not paid", "Summarise BCA attendance shortage in one word",
-            "Pending fees ka status ek word mein de do", "Give a presentation on attendance shortage to parents at the PTM", "Find faculty who teach MBA and have a PPT on Monday",
-            # Existing decks and documents.
-            "Forward the PPT of the student welfare talk to the principal", "Email the HOD the Word document of the faculty orientation", "Faculty development programme ka PPT bhejo",
-            "Forward a Word document from the principal with the students list", "Get the fee structure details for BCA students in Word",
-            # A deck or document someone already has, or other people's presentations.
-            "Please check the fees PPT", "Kindly review the pending fees PPT", "Thanks for the fees PPT", "Accounts has the fee defaulters list in Word",
-            "BCA students ke PPT bhejo", "Please forward the BCA student PPTs to the external examiner", "Group MBA students into presentation batches",
-            "List BCA students who will prepare a presentation on digital marketing", "MBA students who didn't send PPT", "Presentation on AI is at 3 pm for MBA students",
-            "Send a warning to MBA students below 75% attendance, help me to word the message", "Download the slides for today's faculty development programme",
-        ):
-            self.assertNotIn(extract_entities(text, self.vocab).report_format, {"docx", "pptx"}, text)
 
     def test_plans_for_representative_commands(self):
         cases = {
