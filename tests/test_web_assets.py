@@ -91,6 +91,16 @@ class WebAssetTests(unittest.TestCase):
         self.assertIn("select.classList.add('invalid')", js)
         self.assertIn(".mapping-grid select.invalid", (CONSOLE / "console.css").read_text(encoding="utf-8"))
 
+    def test_confirm_and_run_keeps_a_second_prompt_and_reports_a_lost_answer(self):
+        console = (CONSOLE / "console.js").read_text(encoding="utf-8")
+        # The id is taken before any await, so a re-sent command's new confirmation keeps its buttons.
+        self.assertIn("const approvalId = state.lastApproval;\n    if (!approvalId) return;\n    state.lastApproval = null;", console)
+        self.assertNotRegex(console, r"finally \{\s*state\.lastApproval = null;")
+        self.assertIn("may or may not have been made", console)
+        assistant = (ASSISTANT / "app.js").read_text(encoding="utf-8")
+        self.assertIn("may or may not have been made", assistant)
+        self.assertIn("await settleControls('unusable');", assistant)
+
     def test_assistant_files_download_through_the_authenticated_client(self):
         # A plain link to the report would reach the server without the signed-in
         # identity; only this server's report paths are ever fetched.

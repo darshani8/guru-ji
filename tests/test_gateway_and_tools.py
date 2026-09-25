@@ -126,6 +126,28 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(ValueError):
             self.fx.reports.generate(pri, "college_a", title="x", columns=[], rows=[])
 
+    async def test_an_expired_confirmation_is_refused_and_an_unusable_one_is_explained(self):
+        pri = principal(PrincipalType.PRINCIPAL)
+        args = {"student_id": "MBA001", "changes": {"section": "B"}}
+        first = await self.fx.gateway.invoke("update_student_record", args, ToolCallContext("r1", pri, InstitutionScope("college_a")))
+        approval_id = first.approval["approval_id"]
+        self.fx.store.backend.execute("UPDATE approvals SET expires_at = ? WHERE approval_id = ?", ("2000-01-01T00:00:00+00:00", approval_id))
+        with self.assertRaises(ValueError) as raised:
+            self.fx.gateway.decide_approval(pri, "college_a", approval_id, approve=True)
+        self.assertIn("expired", str(raised.exception))
+        self.assertEqual(self.fx.store.get_approval("college_a", approval_id)["status"], "expired")
+        # Sending the command again with it asks afresh and says why.
+        again = await self.fx.gateway.invoke("update_student_record", args, ToolCallContext("r2", pri, InstitutionScope("college_a"), approval_id=approval_id))
+        self.assertEqual(again.status, "approval_required")
+        self.assertEqual(again.approval["note"], "the earlier confirmation expired")
+        self.fx.gateway.decide_approval(pri, "college_a", again.approval["approval_id"], approve=True)
+        done = await self.fx.gateway.invoke("update_student_record", args, ToolCallContext("r3", pri, InstitutionScope("college_a"), approval_id=again.approval["approval_id"]))
+        self.assertEqual(done.status, "success")
+        used = await self.fx.gateway.invoke("update_student_record", args, ToolCallContext("r4", pri, InstitutionScope("college_a"), approval_id=again.approval["approval_id"]))
+        self.assertEqual(used.approval["note"], "the earlier confirmation was already used")
+        other = await self.fx.gateway.invoke("update_student_record", {"student_id": "MBA001", "changes": {"section": "C"}}, ToolCallContext("r5", pri, InstitutionScope("college_a"), approval_id=again.approval["approval_id"]))
+        self.assertEqual(other.approval["note"], "the earlier confirmation was for a different change")
+
     async def test_handler_exceptions_are_audited_and_never_leak_details(self):
         async def boom(context, args):
             raise RuntimeError("connection to db-internal:5432 failed: password=hunter2")

@@ -162,9 +162,10 @@
     }
   }
 
+  // Returns the error when the command could not be run or answered.
   async function runCommand(approvalId) {
     const text = $('command-input').value.trim();
-    if (!text) return;
+    if (!text) return null;
     state.lastCommand = text;
     $('command-run').disabled = true;
     try {
@@ -173,28 +174,41 @@
         json: { command: text, channel: 'text', run_in_background: $('command-background').value === 'true', approval_id: approvalId || null, include_data: false },
       });
       renderCommandResult(data);
+      return null;
     } catch (error) {
       toast(error.message);
+      return error;
     } finally {
       $('command-run').disabled = false;
     }
   }
 
+  // The id is taken before any await: the re-sent command may ask for a new
+  // confirmation, whose id and buttons must survive this call returning.
   async function decideApproval(approve) {
-    if (!state.lastApproval) return;
+    const approvalId = state.lastApproval;
+    if (!approvalId) return;
+    state.lastApproval = null;
+    setBusy($('command-approval'), true);
     try {
-      await api(`/v1/agent/approvals/${state.lastApproval}`, { method: 'POST', json: { approve } });
-      if (approve) {
-        $('command-input').value = state.lastCommand;
-        await runCommand(state.lastApproval);
-      } else {
-        toast('Action cancelled.');
-        $('command-approval').hidden = true;
-      }
+      await api(`/v1/agent/approvals/${encodeURIComponent(approvalId)}`, { method: 'POST', json: { approve } });
     } catch (error) {
       toast(error.message);
-    } finally {
-      state.lastApproval = null;
+      // An expired or already decided confirmation cannot be used again: the command must be sent anew.
+      $('command-approval').hidden = true;
+      return;
+    }
+    if (!approve) {
+      toast('Action cancelled.');
+      $('command-approval').hidden = true;
+      return;
+    }
+    $('command-input').value = state.lastCommand;
+    const failed = await runCommand(approvalId);
+    if (failed) {
+      // The answer was lost, not necessarily the change (a timeout can come after it was made).
+      $('command-approval').hidden = true;
+      toast(`The confirmed change may or may not have been made (${failed.message}). Check the record before sending the command again.`);
     }
   }
 

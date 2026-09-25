@@ -57,7 +57,7 @@ def register_handlers(
             if notifications is not None:
                 body = response.answer[:3500]
                 notifications.system_notify(scope.college_id, recipient_ids=[principal.principal_id], title=f"Command finished: {response.status}", body=body, reference_type="agent_run", reference_id=response.request_id)
-            return {"status": response.status, "answer": response.answer[:2000], "artifacts": response.artifacts, "warnings": response.warnings[:20]}
+            return {"status": response.status, "answer": response.answer[:2000], "artifacts": response.artifacts, "warnings": response.warnings[:20], "approval": response.approval}
 
         queue.register("agent.command", run_command)
 

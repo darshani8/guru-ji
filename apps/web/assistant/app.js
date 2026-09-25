@@ -1093,6 +1093,13 @@ function addApprovalControls(article, message) {
   controls.append(confirm, cancel);
   article.querySelector('.bubble').append(controls);
 
+  async function settleControls(decided) {
+    controls.remove();
+    await updateMessage(conversationId, message.id, (stored) => {
+      stored.answer = { ...stored.answer, decided };
+    });
+  }
+
   async function decide(approve) {
     confirm.disabled = true;
     cancel.disabled = true;
@@ -1101,24 +1108,31 @@ function addApprovalControls(article, message) {
         method: 'POST',
         body: JSON.stringify({ approve }),
       });
-      controls.remove();
-      await updateMessage(conversationId, message.id, (stored) => {
-        stored.answer = { ...stored.answer, decided: approve ? 'confirmed' : 'cancelled' };
-      });
-      if (!approve || !command) {
-        addToConversation(conversationId, makeMessage('assistant', approve ? 'Confirmed.' : 'Cancelled. Nothing was changed.'));
+    } catch (error) {
+      if (error.status === 422 || error.status === 404) {
+        // An expired or already decided confirmation cannot be used again: say so where the buttons were.
+        await settleControls('unusable');
+        addToConversation(conversationId, makeMessage('assistant', `${error.message.charAt(0).toUpperCase()}${error.message.slice(1)}.`));
         return;
       }
-      const loading = state.conversation.id === conversationId ? showThinking() : null;
-      try {
-        showAnswer(await askAgent(command, approval.approval_id, { conversationId, history: [] }), { command, conversationId });
-      } finally {
-        loading?.remove();
-      }
-    } catch (error) {
       confirm.disabled = false;
       cancel.disabled = false;
       showToast(error.message);
+      return;
+    }
+    await settleControls(approve ? 'confirmed' : 'cancelled');
+    if (!approve || !command) {
+      addToConversation(conversationId, makeMessage('assistant', approve ? 'Confirmed.' : 'Cancelled. Nothing was changed.'));
+      return;
+    }
+    const loading = state.conversation.id === conversationId ? showThinking() : null;
+    try {
+      showAnswer(await askAgent(command, approval.approval_id, { conversationId, history: [] }), { command, conversationId });
+    } catch (error) {
+      // The answer was lost, not necessarily the change: a time limit can be reached after the change was made.
+      addToConversation(conversationId, makeMessage('assistant', `I could not get the result of the confirmed change (${error.message}). It may or may not have been made, so check the record before asking again.`));
+    } finally {
+      loading?.remove();
     }
   }
   confirm.addEventListener('click', () => decide(true));

@@ -978,8 +978,8 @@ class InstitutionDataStore:
         return self.get_approval(institution_id, approval_id) if claimed else None
 
     def decide_approval(self, institution_id: str, approval_id: str, *, status: str, decided_by: str) -> dict[str, Any] | None:
-        if status not in {"approved", "rejected", "consumed"}:
-            raise ValueError("approval status must be approved, rejected, or consumed")
+        if status not in {"approved", "rejected", "consumed", "expired"}:
+            raise ValueError("approval status must be approved, rejected, consumed, or expired")
         with self._tenant(institution_id):
             self.backend.execute(
                 "UPDATE approvals SET status = ?, decided_at = ?, decided_by = ? WHERE institution_id = ? AND approval_id = ?",

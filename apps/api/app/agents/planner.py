@@ -22,7 +22,7 @@ from .bindings import is_reference
 from .contracts import MAX_PLAN_STEPS, AgentPlan, PlanStep
 
 _ORDINAL_WORDS = {"first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5, "sixth": 6, "seventh": 7, "eighth": 8}
-_TOOL_GROUP_AGENT = {"students": "data", "attendance": "data", "fees": "data", "faculty": "data", "institution": "data", "exams": "data", "documents": "data", "ingestion": "data", "reports": "action", "email": "action", "notifications": "action", "records": "action", "internet": "internet"}
+TOOL_GROUP_AGENT = {"students": "data", "attendance": "data", "fees": "data", "faculty": "data", "institution": "data", "exams": "data", "documents": "data", "ingestion": "data", "reports": "action", "email": "action", "notifications": "action", "records": "action", "internet": "internet"}
 
 
 @dataclass(slots=True)
@@ -282,7 +282,7 @@ class DeterministicPlanner:
 
         def add(tool: str, arguments: dict[str, Any], purpose: str, *, depends_on: tuple[str, ...] = (), bindings: dict[str, str] | None = None) -> str:
             step_id = f"s{len(steps) + 1}"
-            steps.append(PlanStep(step_id, tool, {k: v for k, v in arguments.items() if v not in (None, "", [])}, purpose, depends_on, dict(bindings or {}), _TOOL_GROUP_AGENT.get(available[tool].group, "data")))
+            steps.append(PlanStep(step_id, tool, {k: v for k, v in arguments.items() if v not in (None, "", [])}, purpose, depends_on, dict(bindings or {}), TOOL_GROUP_AGENT.get(available[tool].group, "data")))
             return step_id
 
         def missing(tool: str) -> AgentPlan | None:
@@ -568,7 +568,7 @@ class ModelPlanner:
                 return None
             raw_depends = item.get("depends_on")
             depends = tuple(value for value in raw_depends if isinstance(value, str)) if isinstance(raw_depends, list) else ()
-            steps.append(PlanStep(str(item.get("step_id") or f"s{index}"), tool.name, static_arguments, str(item.get("purpose") or tool.description)[:200], depends, bindings, _TOOL_GROUP_AGENT.get(tool.group, "data")))
+            steps.append(PlanStep(str(item.get("step_id") or f"s{index}"), tool.name, static_arguments, str(item.get("purpose") or tool.description)[:200], depends, bindings, TOOL_GROUP_AGENT.get(tool.group, "data")))
         try:
             return AgentPlan(str(payload.get("intent") or "model_plan")[:60], steps, summary=" then ".join(step.purpose for step in steps), planner=self.planner_name, confidence=_confidence(payload.get("confidence"), 0.7))
         except ValueError:
@@ -615,4 +615,4 @@ def vocabulary_from_registry(registry: PlatformToolRegistry) -> list[str]:
     return list(registry.names())
 
 
-__all__ = ["DeterministicPlanner", "ExtractedEntities", "ModelPlanner", "Vocabulary", "extract_entities", "requested_office_format", "vocabulary_from_registry"]
+__all__ = ["TOOL_GROUP_AGENT", "DeterministicPlanner", "ExtractedEntities", "ModelPlanner", "Vocabulary", "extract_entities", "requested_office_format", "vocabulary_from_registry"]

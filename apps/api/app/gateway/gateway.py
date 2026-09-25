@@ -12,6 +12,7 @@ import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from time import monotonic
 from typing import Any
 from uuid import uuid4
@@ -93,23 +94,21 @@ class ToolGateway:
         ))
 
     # ------------------------------------------------------------- approvals
-    def _approval_state(self, context: ToolCallContext, tool: PlatformToolSpec, arguments: Mapping[str, Any]) -> dict[str, Any] | None:
-        """Return the matching approved approval record, or None when one must be created."""
+    def _approval_state(self, context: ToolCallContext, tool: PlatformToolSpec, arguments: Mapping[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
+        """The matching approved approval record, or why the one the caller named cannot be used."""
 
         if not context.approval_id:
-            return None
+            return None, None
         record = self.store.get_approval(context.institution_id, context.approval_id)
-        if record is None or record["status"] != "approved":
-            return None
-        if record["principal_id"] != context.principal.principal_id or record["tool_name"] != tool.name:
-            return None
-        if record["arguments_sha256"] != arguments_digest(arguments):
-            return None
-        from datetime import datetime, timezone
-
+        if record is None or record["principal_id"] != context.principal.principal_id:
+            return None, "the earlier confirmation was not found"
+        if record["tool_name"] != tool.name or record["arguments_sha256"] != arguments_digest(arguments):
+            return None, "the earlier confirmation was for a different change"
+        if record["status"] != "approved":
+            return None, _UNUSABLE_APPROVAL.get(record["status"], f"the earlier confirmation is {record['status']}")
         if datetime.fromisoformat(record["expires_at"]) < datetime.now(timezone.utc):
-            return None
-        return record
+            return None, _UNUSABLE_APPROVAL["expired"]
+        return record, None
 
     def _release_approval(self, context: ToolCallContext, approval: Mapping[str, Any] | None) -> None:
         """Return a claimed approval to ``approved`` after the handler failed, so a retry needs no new confirmation."""
@@ -117,13 +116,15 @@ class ToolGateway:
         if approval is not None:
             self.store.decide_approval(context.institution_id, approval["approval_id"], status="approved", decided_by=context.principal.principal_id)
 
-    def request_approval(self, context: ToolCallContext, tool: PlatformToolSpec, arguments: Mapping[str, Any], reason: str) -> dict[str, Any]:
+    def request_approval(self, context: ToolCallContext, tool: PlatformToolSpec, arguments: Mapping[str, Any], reason: str, *, note: str | None = None) -> dict[str, Any]:
+        """Ask for a confirmation; ``note`` says why an earlier one could not be used."""
+
         approval_id = f"apr-{uuid4().hex}"
         record = self.store.create_approval(
             context.institution_id, approval_id=approval_id, principal_id=context.principal.principal_id, tool_name=tool.name,
             arguments=dict(arguments), arguments_sha256=arguments_digest(arguments), reason=reason, ttl_seconds=self.approval_ttl_seconds,
         )
-        return {"approval_id": approval_id, "tool_name": tool.name, "status": record.get("status"), "expires_at": record.get("expires_at"), "reason": reason, "arguments": dict(arguments)}
+        return {"approval_id": approval_id, "tool_name": tool.name, "status": record.get("status"), "expires_at": record.get("expires_at"), "reason": reason, "arguments": dict(arguments), "note": note}
 
     def decide_approval(self, principal: Principal, institution_id: str, approval_id: str, *, approve: bool) -> dict[str, Any]:
         record = self.store.get_approval(institution_id, approval_id)
@@ -133,6 +134,10 @@ class ToolGateway:
             raise PermissionError("only the requesting user can decide this approval")
         if record["status"] != "pending":
             raise ValueError(f"approval is already {record['status']}")
+        if approve and datetime.fromisoformat(record["expires_at"]) < datetime.now(timezone.utc):
+            # Accepting it would only have the re-sent command ask again, without saying why.
+            self.store.decide_approval(institution_id, approval_id, status="expired", decided_by=principal.principal_id)
+            raise ValueError("this confirmation has expired; send the command again to get a new one")
         decided = self.store.decide_approval(institution_id, approval_id, status="approved" if approve else "rejected", decided_by=principal.principal_id)
         return decided or record
 
@@ -179,14 +184,15 @@ class ToolGateway:
                 return ToolInvocation(tool_name, "failed", denial_reason=HANDLER_FAILURE_MESSAGE, decision_id=decision.decision_id, risk=tool.risk.value)
         approval: dict[str, Any] | None = None
         if tool.risk is RiskLevel.HIGH_RISK:
-            approval = self._approval_state(context, tool, validated)
+            approval, unusable = self._approval_state(context, tool, validated)
             # Claiming is atomic (status approved -> executing), so concurrent calls
             # carrying the same approval id cannot both run the handler; the loser
             # sees no usable approval and is asked to confirm again.
             if approval is not None:
                 approval = self.store.claim_approval(context.institution_id, approval["approval_id"], principal_id=context.principal.principal_id)
+                unusable = None if approval is not None else _UNUSABLE_APPROVAL["executing"]
             if approval is None:
-                pending = self.request_approval(context, tool, validated, reason=f"{tool.name} changes institutional records and needs your confirmation")
+                pending = self.request_approval(context, tool, validated, reason=f"{tool.name} changes institutional records and needs your confirmation", note=unusable)
                 self._audit(context, tool_name, AuditOutcome.PARTIAL, started=started, decision=decision, extra={"reason": "approval_required", "approval_id": pending["approval_id"]})
                 return ToolInvocation(tool_name, "approval_required", summary=pending["reason"], approval=pending, decision_id=decision.decision_id, risk=tool.risk.value)
         try:
@@ -224,6 +230,15 @@ class ToolGateway:
             tool_name, "success", data=data, summary=output.summary, warnings=list(output.warnings), provenance=list(output.provenance),
             artifacts=list(output.artifacts), records_returned=output.records_returned, duration_ms=duration_ms, decision_id=decision.decision_id, risk=tool.risk.value,
         )
+
+
+_UNUSABLE_APPROVAL = {
+    "pending": "the earlier request was not confirmed",
+    "rejected": "the earlier request was cancelled",
+    "executing": "the earlier confirmation is already running",
+    "consumed": "the earlier confirmation was already used",
+    "expired": "the earlier confirmation expired",
+}
 
 
 def _explain(reason: str, tool: PlatformToolSpec) -> str:
