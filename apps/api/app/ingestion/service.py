@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 import hashlib
 import logging
 from collections import Counter
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 from uuid import uuid4
@@ -163,6 +163,14 @@ class IngestionService:
         # or automatic, would only fail the same way again.
         remap = job["status"] == JOB_FAILED and job.get("stage") == STAGE_NORMALIZING
         previous_error = job.get("error") if remap else None
+        mapping_state = dict(job.get("mapping") or {})
+        if remap and mapping_state.get("approved_mapping") and mapping_state.pop("approval_unscheduled", False):
+            # The reviewer's mapping was never applied (the queue refused it or
+            # its worker died), so nothing says it is wrong: apply it now.
+            job = self.store.update_job(institution_id, job_id, status=JOB_PROCESSING, mapping=mapping_state, error=None)
+            resumed = self._resume(institution_id, job)
+            if resumed is not None:
+                return resumed
         if job["status"] == JOB_PROCESSING:
             if not force and not self._heartbeat_stale(job):
                 return job
@@ -207,8 +215,17 @@ class IngestionService:
         """The job queue refused the job's next step: record why, so an import can be committed again and anything else retried."""
 
         job = self._job(institution_id, job_id)
+        if job["status"] not in {JOB_QUEUED, JOB_PROCESSING}:
+            # The job already finished or failed on its own: that outcome stands.
+            return job
         if job.get("stage") == STAGE_IMPORTING:
             return self.store.update_job(institution_id, job_id, status=JOB_READY, stage=STAGE_READY, error=error[:500])
+        mapping_state = dict(job.get("mapping") or {})
+        if job.get("stage") == STAGE_NORMALIZING and mapping_state.get("approved_mapping"):
+            # The approved mapping was never applied (not scheduled, or its
+            # worker kept dying): a retry applies it rather than asking again.
+            mapping_state["approval_unscheduled"] = True
+            return self.store.update_job(institution_id, job_id, status=JOB_FAILED, mapping=mapping_state, error=error[:500])
         return self.store.update_job(institution_id, job_id, status=JOB_FAILED, error=error[:500])
 
     def _resume(self, institution_id: str, job: dict[str, Any]) -> dict[str, Any] | None:
@@ -397,6 +414,7 @@ class IngestionService:
             if item["kind"] == "mapping":
                 self.store.resolve_review_item(institution_id, item["review_id"], status="approved", resolved_by=approved_by, resolution={"mapping": approved, "entity": entity_name})
         mapping_state = dict(job.get("mapping") or {})
+        mapping_state.pop("approval_unscheduled", None)
         mapping_state.update({"entity": entity_name, "approved_mapping": approved, "approved_by": approved_by, "remember": remember, "header_signature": signature, "review_required": [], "missing_required": [], "entity_uncertain": False})
         return self.store.update_job(institution_id, job_id, status=JOB_PROCESSING, stage=STAGE_NORMALIZING, entity=entity_name, mapping=mapping_state, error=None)
 
@@ -408,23 +426,31 @@ class IngestionService:
         approved = dict(state.get("approved_mapping") or {})
         entity_name, signature, approved_by = str(job.get("entity")), str(state.get("header_signature")), str(state.get("approved_by"))
         remember = bool(state.get("remember", True))
+        remembered = False
+
+        def remember_once() -> None:
+            nonlocal remembered
+            if remember and not remembered:
+                remembered = True
+                self._remember_mapping(institution_id, job_id, entity=entity_name, signature=signature, mapping=approved, approved_by=approved_by)
+
         try:
             # Questions an earlier, interrupted run raised are asked again if they still apply.
             self._close_pending_reviews(institution_id, job_id, note="superseded: the rows were normalised again")
-            job = self._normalize(institution_id, job, approved)
+            # Remembered before the auto-commit starts, so an import that is
+            # interrupted (and resumed at importing) does not lose it.
+            job = self._normalize(institution_id, job, approved, before_commit=remember_once)
         except CommitError:
             # The rows were fine and only the import failed; commit() already
             # returned the job to ready with the error.
-            if remember:
-                self._remember_mapping(institution_id, job_id, entity=entity_name, signature=signature, mapping=approved, approved_by=approved_by)
+            remember_once()
             raise
         except Exception as exc:  # noqa: BLE001 - a job must never stay processing after a stage fails
             logger.exception("ingestion job %s for institution %s failed while normalizing", job_id, institution_id)
             message = f"normalization failed unexpectedly ({type(exc).__name__}); retry the job or submit the mapping again once the cause is fixed"
             self.store.update_job(institution_id, job_id, status=JOB_FAILED, stage=STAGE_NORMALIZING, error=message)
             raise ProcessingError(message) from exc
-        if remember:
-            self._remember_mapping(institution_id, job_id, entity=entity_name, signature=signature, mapping=approved, approved_by=approved_by)
+        remember_once()
         return job
 
     def _remember_mapping(self, institution_id: str, job_id: str, *, entity: str, signature: str, mapping: Mapping[str, str], approved_by: str) -> None:
@@ -444,7 +470,7 @@ class IngestionService:
             logger.exception("could not remember the approved mapping of ingestion job %s for institution %s", job_id, institution_id)
 
     # ---------------------------------------------------------- normalization
-    def _normalize(self, institution_id: str, job: dict[str, Any], mapping: Mapping[str, str]) -> dict[str, Any]:
+    def _normalize(self, institution_id: str, job: dict[str, Any], mapping: Mapping[str, str], *, before_commit: Callable[[], None] | None = None) -> dict[str, Any]:
         entity = CANONICAL_ENTITIES[job["entity"]]
         staged = self.store.job_records(institution_id, job["job_id"], limit=self.max_rows)
         file_record = self.store.get_file(institution_id, job["file_id"]) if job.get("file_id") else None
@@ -463,9 +489,15 @@ class IngestionService:
             lineage = RecordLineage(source_file_id=source_file_id, source_file_name=source_name, source_locator=row["locator"], ingestion_job_id=job["job_id"])
             prepared.append((row, CanonicalRecord(entity.name, cleaned, extras, tuple(notes), tuple(issues), lineage)))
         pattern = identifier_pattern(id_values) if id_values else None
+        # The OCR flags staged with the parsed row are carried into the row
+        # rewritten below, so normalising it again validates the same way.
+        row_ocr: list[bool] = []
+        row_confidence: list[Any] = []
         for row, record in prepared:
-            ocr = bool(row["normalized"].get("_ocr")) if isinstance(row.get("normalized"), dict) else False
-            confidence = row["normalized"].get("_ocr_confidence") if isinstance(row.get("normalized"), dict) else None
+            flags = row["normalized"] if isinstance(row.get("normalized"), dict) else {}
+            ocr, confidence = bool(flags.get("_ocr", False)), flags.get("_ocr_confidence")
+            row_ocr.append(ocr)
+            row_confidence.append(confidence)
             record.issues = tuple(list(record.issues) + validate_record(entity, record.fields, ocr=ocr, ocr_confidence=confidence, id_pattern=pattern))
         records = [record for _, record in prepared]
         existing = self.store.existing_keys(institution_id, entity.name, [record.record_key for record in records if record.record_key.strip("|")])
@@ -496,7 +528,7 @@ class IngestionService:
                 status = "skipped" if action != "conflict_in_batch" else "review"
             updated_rows.append({
                 "row_number": row["row_number"], "locator": row["locator"], "raw": row["raw"],
-                "normalized": {"fields": record.fields, "attributes": record.attributes, "normalizations": list(record.normalizations)},
+                "normalized": {"fields": record.fields, "attributes": record.attributes, "normalizations": list(record.normalizations), "_ocr": row_ocr[index], "_ocr_confidence": row_confidence[index]},
                 "status": status, "action": action, "record_key": record.record_key, "issues": list(record.issues),
             })
         self.store.replace_job_records(institution_id, job["job_id"], updated_rows)
@@ -530,6 +562,8 @@ class IngestionService:
             self.store.add_review_items(institution_id, job["job_id"], review_items)
             return self.store.update_job(institution_id, job["job_id"], status=JOB_NEEDS_REVIEW, stage=STAGE_DUPLICATE_REVIEW, report=report)
         job = self.store.update_job(institution_id, job["job_id"], status=JOB_READY, stage=STAGE_READY, report=report)
+        if before_commit is not None:
+            before_commit()
         if (job.get("options") or {}).get("auto_commit"):
             return self.commit(institution_id, job["job_id"], committed_by=job["requested_by"])
         return job

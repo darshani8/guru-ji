@@ -1129,14 +1129,16 @@ class InstitutionDataStore:
         with self.backend.transaction():
             return self.backend.execute("UPDATE background_jobs SET status = 'queued', started_at = NULL, heartbeat_at = NULL WHERE job_id = ? AND status = 'running'", (job_id,)) > 0
 
-    def requeue_stale_background_jobs(self, *, older_than_seconds: float, max_attempts: int = 3) -> list[dict[str, Any]]:
+    def requeue_stale_background_jobs(self, *, older_than_seconds: float, max_attempts: int = 3, exhausted: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         """Return ``running`` jobs whose worker stopped reporting to ``queued`` so another worker resumes them.
 
         A running worker refreshes ``heartbeat_at`` while it works; a job whose
         last heartbeat (or claim) is older than ``older_than_seconds`` has no
         live worker and goes back to ``queued`` unless it has exhausted
         ``max_attempts``, in which case it is marked ``failed`` so nothing
-        loops forever. A job whose heartbeat is fresh is never touched.
+        loops forever (and appended to ``exhausted`` when a list is given, so
+        the caller can tell whoever waits on it). A job whose heartbeat is
+        fresh is never touched.
         """
 
         cutoff = (datetime.now(timezone.utc) - timedelta(seconds=max(0.001, float(older_than_seconds)))).isoformat()
@@ -1148,10 +1150,14 @@ class InstitutionDataStore:
             )
             for row in rows:
                 if int(row["attempts"] or 0) >= max_attempts:
-                    self.backend.execute(
+                    failed = self.backend.execute(
                         "UPDATE background_jobs SET status = 'failed', finished_at = ?, error = ? WHERE job_id = ? AND status = 'running'",
                         (now_iso(), "worker did not finish the job after repeated attempts", row["job_id"]),
                     )
+                    if failed and exhausted is not None:
+                        job = self.get_background_job(row["job_id"])
+                        if job:
+                            exhausted.append(job)
                     continue
                 updated = self.backend.execute(
                     "UPDATE background_jobs SET status = 'queued', started_at = NULL, heartbeat_at = NULL WHERE job_id = ? AND status = 'running'",

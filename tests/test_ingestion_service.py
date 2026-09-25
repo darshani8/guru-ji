@@ -589,6 +589,87 @@ class ApprovalTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("RuntimeError", job["error"])
         self.assertEqual(self.service.commit("college_a", job["job_id"], committed_by="staff-1")["status"], JOB_IMPORTED)
 
+    async def test_an_approval_whose_worker_keeps_dying_fails_the_job_and_retry_keeps_the_mapping(self):
+        from unittest import mock
+
+        from app.workers.handlers import register_handlers
+        from app.workers.queue import JobQueue
+
+        queue = JobQueue(self.store)
+        register_handlers(queue, ingestion=self.service)
+        job = await self._upload("list.csv", b"Name,ID,Contact,Prog,Semester,Remarks\nRavi Kumar,1MS23MBA001,9876543210,MBA,2,fine\n")
+        mapping = dict(self._mapping_review(job)["proposed_mapping"], Prog="department")
+        self.service.approve_mapping("college_a", job["job_id"], mapping=mapping, entity="student", approved_by="rev-1")
+        background = queue.enqueue("college_a", "ingestion.process", {"institution_id": "college_a", "job_id": job["job_id"], "requested_by": "rev-1", "resume": True})
+        old = (datetime.now(timezone.utc) - timedelta(seconds=3600)).isoformat()
+        for _ in range(3):
+            claimed = self.store.claim_background_jobs(10)
+            self.assertEqual([item["job_id"] for item in claimed], [background])
+            with mock.patch.object(IngestionService, "_normalize", side_effect=_WorkerDied), self.assertRaises(_WorkerDied):
+                await queue.run_job(claimed[0])
+            self.store.backend.execute("UPDATE background_jobs SET heartbeat_at = ?, started_at = ? WHERE job_id = ?", (old, old, background))
+            queue.recover_stale(older_than_seconds=60)
+        self.assertEqual(self.store.get_background_job(background)["status"], "failed")
+        failed = self.store.get_job("college_a", job["job_id"])
+        self.assertEqual((failed["status"], failed["stage"]), (JOB_FAILED, STAGE_NORMALIZING))
+        self.assertIn("after 3 attempts", failed["error"])
+        # Retry applies the reviewer's mapping instead of asking for it again.
+        retried = await self.service.process("college_a", job["job_id"])
+        self.assertEqual(retried["status"], JOB_IMPORTED, retried.get("error"))
+        self.assertEqual(self.store.get_record("college_a", "student", "1ms23mba001")["department"], "MBA")
+        self.assertNotIn("approval_unscheduled", retried["mapping"])
+
+    async def test_the_failure_hook_leaves_a_finished_job_alone(self):
+        job = await self._upload("students.csv", STUDENTS)
+        self.assertEqual(job["status"], JOB_IMPORTED)
+        after = self.service.record_unscheduled("college_a", job["job_id"], "processing could not be scheduled: late")
+        self.assertEqual((after["status"], after["stage"], after["error"]), (JOB_IMPORTED, job["stage"], job["error"]))
+
+    async def test_a_refused_approval_is_imported_under_the_reviewers_mapping_on_retry(self):
+        job = await self._upload("list.csv", b"Name,ID,Contact,Prog,Semester,Remarks\nRavi Kumar,1MS23MBA001,9876543210,MBA,2,fine\n")
+        mapping = dict(self._mapping_review(job)["proposed_mapping"], Prog="department")
+        self.service.approve_mapping("college_a", job["job_id"], mapping=mapping, entity="student", approved_by="rev-1")
+        self.service.record_unscheduled("college_a", job["job_id"], "processing could not be scheduled: SQS down")
+        self.assertEqual(self.store.get_job("college_a", job["job_id"])["status"], JOB_FAILED)
+        retried = await self.service.process("college_a", job["job_id"])
+        self.assertEqual(retried["status"], JOB_IMPORTED, retried.get("error"))
+        self.assertEqual(self.store.list_review_items("college_a", job_id=job["job_id"], status="pending"), [])
+        self.assertEqual(self.store.get_record("college_a", "student", "1ms23mba001")["department"], "MBA")
+
+    async def test_a_crash_during_the_auto_commit_still_remembers_the_approved_mapping(self):
+        from unittest import mock
+
+        from app.normalization.mapping import header_signature
+
+        job = await self._upload("list.csv", b"Name,ID,Contact,Prog,Semester,Remarks\nRavi Kumar,1MS23MBA001,9876543210,MBA,2,fine\n")
+        mapping = dict(self._mapping_review(job)["proposed_mapping"], Prog="program")
+        self.service.approve_mapping("college_a", job["job_id"], mapping=mapping, entity="student", approved_by="rev-1")
+        with mock.patch.object(type(self.store), "upsert_records", side_effect=_WorkerDied), self.assertRaises(_WorkerDied):
+            self.service.run_approved_mapping("college_a", job["job_id"])
+        interrupted = self.store.get_job("college_a", job["job_id"])
+        self.assertEqual((interrupted["status"], interrupted["stage"]), (JOB_PROCESSING, STAGE_IMPORTING))
+        profile = self.store.find_mapping_profile("college_a", "student", header_signature(["Name", "ID", "Contact", "Prog", "Semester", "Remarks"]))
+        self.assertEqual(profile["mapping"]["Prog"], "program")
+        resumed = await self.service.process("college_a", job["job_id"], force=True)
+        self.assertEqual(resumed["status"], JOB_IMPORTED, resumed.get("error"))
+
+    async def test_normalising_again_keeps_the_ocr_flags(self):
+        job = await self._upload("list.csv", b"Name,ID,Contact,Prog,Semester,Remarks\nRavi Kumar,1MS23MBA001,9876543210,MBA,2,fine\n")
+        rows = self.store.job_records("college_a", job["job_id"])
+        for row in rows:
+            row["normalized"] = {"_ocr": True, "_ocr_confidence": 0.5}
+        self.store.replace_job_records("college_a", job["job_id"], rows)
+        mapping = dict(self._mapping_review(job)["proposed_mapping"], Prog="program")
+        job = self.store.update_job("college_a", job["job_id"], options={"auto_commit": False})
+        self.service.approve_mapping("college_a", job["job_id"], mapping=mapping, entity="student", approved_by="rev-1")
+        codes = []
+        for _ in range(2):
+            self.service.run_approved_mapping("college_a", job["job_id"])
+            codes.append({issue["code"] for row in self.store.job_records("college_a", job["job_id"]) for issue in row["issues"]})
+            self.store.update_job("college_a", job["job_id"], status=JOB_PROCESSING, stage=STAGE_NORMALIZING)
+        self.assertIn("low_ocr_confidence", codes[0])
+        self.assertEqual(codes[0], codes[1])
+
 
 if __name__ == "__main__":
     unittest.main()

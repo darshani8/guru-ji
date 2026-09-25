@@ -104,12 +104,17 @@ class JobQueue:
         A job still ``running`` whose heartbeat is older than the stale window
         has no live worker (a crash or restart left it behind), so it goes back
         to ``queued`` and is re-dispatched the same way a fresh enqueue is. A
-        job that cannot be re-dispatched is marked failed rather than left
-        queued forever, and the failure hook for its type (if any) is told.
+        job that cannot be re-dispatched, or has used up ``max_attempts``, is
+        marked failed rather than left queued forever, and the failure hook for
+        its type (if any) is told.
         """
 
         window = self.stale_seconds if older_than_seconds is None else float(older_than_seconds)
-        requeued = self.worker_store.requeue_stale_background_jobs(older_than_seconds=window, max_attempts=max_attempts)
+        exhausted: list[dict[str, Any]] = []
+        requeued = self.worker_store.requeue_stale_background_jobs(older_than_seconds=window, max_attempts=max_attempts, exhausted=exhausted)
+        for job in exhausted:
+            # Failed by the store for using up its attempts: whoever waits on it is told too.
+            self._notify_failure(job, f"worker did not finish the job after {int(job.get('attempts') or max_attempts)} attempts")
         for job in requeued:
             job_id = str(job["job_id"])
             try:
