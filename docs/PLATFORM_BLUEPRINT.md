@@ -18,7 +18,7 @@ There is no `execute-sql` tool. `app/institution_data/store.py` is the only modu
 
 | Blueprint section | Implementation | Notes |
 | --- | --- | --- |
-| Data collection & ingestion API | `app/api/routes/ingestion.py`, `app/ingestion/service.py` | Multipart uploads, Google Sheets export, existing-database connector; jobs run through the job queue. |
+| Data collection & ingestion API | `app/api/routes/ingestion.py`, `app/ingestion/service.py` | Multipart uploads, Google Sheets export, existing-database connector; jobs run through the job queue, including the normalising and import that follow an approved mapping, a commit or the last duplicate decision (the request only checks and records the step, so with the thread or SQS queue a large import is not bound by the request time limit). |
 | Excel / CSV / JSON | `app/ingestion/parsers/csv_parser.py`, `excel_parser.py`, `json_parser.py` | The XLSX reader is dependency-free (zip + XML); `openpyxl`/`xlrd` are optional extras. |
 | PDF (text, table, scanned, mixed) | `app/ingestion/parsers/pdf_parser.py` | Page-by-page decision; PyMuPDF/pdfplumber/pypdf when installed, OCR fallback per page, explicit `needs_ocr` warnings otherwise. |
 | Word | `app/ingestion/parsers/docx_parser.py` | Paragraphs, headings, tables from `word/document.xml`. |

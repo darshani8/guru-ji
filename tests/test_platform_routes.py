@@ -1,5 +1,6 @@
 import asyncio
 import importlib.util
+import time
 import unittest
 from unittest import mock
 
@@ -190,6 +191,123 @@ class PlatformRouteTests(unittest.TestCase):
         self.assertEqual(approved.json()["job"]["report"]["import"]["inserted"], 2)
         self.assertEqual(self.client.get(f"/v1/ingestion/jobs/{job_id}", headers=self.principal).json()["pending_reviews"], [])
 
+    def test_a_slow_approval_is_answered_at_once_and_the_job_finishes_on_the_queue(self):
+        from fastapi import FastAPI
+
+        from app.api.routes.ingestion import router as ingestion_router
+        from app.ingestion.service import IngestionService
+        from app.middleware.timeout import RequestTimeoutMiddleware
+        from app.workers.handlers import register_handlers
+        from app.workers.queue import ThreadJobQueue
+
+        platform = app.state.runtime.platform
+        headers = {**self.principal, "X-Demo-College": "route_queue_college"}  # imports stay out of the shared institution
+        content = b"Name,USN,Email,Email ID\nKiran Rao,1MS23MBA201,kiran@x.com,kiran.r@x.com\n"
+        job_id = self.client.post("/v1/ingestion/uploads", headers=headers, files={"file": ("slow.csv", content, "text/csv")}).json()["job"]["job_id"]
+        payload = self.client.get(f"/v1/ingestion/jobs/{job_id}", headers=headers).json()["pending_reviews"][0]["payload"]
+        mapping = {header: payload["proposed_mapping"].get(header) or None for header in payload["headers"]}
+        # The real routes behind a one-second request limit, with the thread queue a deployment runs.
+        limited = FastAPI()
+        limited.state.runtime = app.state.runtime
+        limited.add_middleware(RequestTimeoutMiddleware, timeout_seconds=1.0)
+        limited.include_router(ingestion_router)
+        client = TestClient(limited)
+        queue = ThreadJobQueue(platform.store, poll_seconds=0.05)
+        register_handlers(queue, ingestion=platform.ingestion)
+        real_normalize = IngestionService._normalize
+
+        def slow_normalize(service, *args, **kwargs):
+            time.sleep(2.0)
+            return real_normalize(service, *args, **kwargs)
+
+        try:
+            with mock.patch.object(platform, "jobs", queue), mock.patch.object(IngestionService, "_normalize", slow_normalize):
+                approved = client.post(f"/v1/ingestion/jobs/{job_id}/mapping", headers=headers, json={"mapping": mapping, "entity": payload["entity"]})
+                self.assertEqual(approved.status_code, 200, approved.text)
+                job = approved.json()["job"]
+                self.assertEqual((job["status"], job["stage"]), ("processing", "normalizing"))
+                deadline = time.monotonic() + 15
+                while time.monotonic() < deadline and job["status"] == "processing":
+                    time.sleep(0.1)
+                    job = client.get(f"/v1/ingestion/jobs/{job_id}", headers=headers).json()["job"]
+        finally:
+            queue.stop()
+        self.assertEqual(job["status"], "imported", job.get("error"))
+        self.assertEqual(job["report"]["import"]["inserted"], 1)
+        self.assertEqual(queue.status(approved.json()["job"]["background_job_id"])["status"], "succeeded")
+
+    def test_the_last_duplicate_decision_and_a_commit_are_handed_to_the_job_queue(self):
+        from app.workers.handlers import register_handlers
+        from app.workers.queue import JobQueue
+
+        platform = app.state.runtime.platform
+        headers = {**self.principal, "X-Demo-College": "route_queue_college"}  # imports stay out of the shared institution
+        # Jobs are only recorded until the test runs them, the way a worker picks them up later.
+        queue = JobQueue(platform.store)
+        register_handlers(queue, ingestion=platform.ingestion)
+        copies = b"Name,USN,Program,Semester,Phone\nNeha Shah,1AB22CS910,BCA,1,9811111111\nNeha Shah,1AB22CS910,BCA,2,9811111112\n"
+        students = b"Student Name,USN,Course,Sem,Phone\nVinay Gowda,1MS23MBA401,MBA,1,9876500401\n"
+        with mock.patch.object(platform, "jobs", queue):
+            job_id = self.client.post("/v1/ingestion/uploads", headers=headers, files={"file": ("copies.csv", copies, "text/csv")}, data={"entity": "student"}).json()["job"]["job_id"]
+            queue.run_pending_blocking()
+            review = self.client.get(f"/v1/ingestion/jobs/{job_id}", headers=headers).json()["pending_reviews"][0]
+            decided = self.client.post(f"/v1/ingestion/reviews/{review['review_id']}", headers=headers, json={"decision": "approved"})
+            self.assertEqual(decided.status_code, 200, decided.text)
+            self.assertEqual((decided.json()["job"]["status"], decided.json()["job"]["stage"]), ("processing", "importing"))
+            self.assertEqual(queue.run_pending_blocking(), 1)
+            job = self.client.get(f"/v1/ingestion/jobs/{job_id}", headers=headers).json()["job"]
+            self.assertEqual((job["status"], job["report"]["import"]["inserted"]), ("imported", 1))
+            # A manual commit: a queue that refuses it leaves the job committable, with the reason.
+            job_id = self.client.post("/v1/ingestion/uploads", headers=headers, files={"file": ("manual.csv", students, "text/csv")}, data={"entity": "student", "auto_commit": "false"}).json()["job"]["job_id"]
+            queue.run_pending_blocking()
+            with mock.patch.object(queue, "enqueue", side_effect=RuntimeError("queue unavailable")):
+                refused = self.client.post(f"/v1/ingestion/jobs/{job_id}/commit", headers=headers)
+            self.assertEqual(refused.status_code, 503, refused.text)
+            job = self.client.get(f"/v1/ingestion/jobs/{job_id}", headers=headers).json()["job"]
+            self.assertEqual(job["status"], "ready")
+            self.assertIn("could not be scheduled", job["error"])
+            committed = self.client.post(f"/v1/ingestion/jobs/{job_id}/commit", headers=headers)
+            self.assertEqual(committed.status_code, 200, committed.text)
+            self.assertEqual(committed.json()["job"]["status"], "processing")
+            self.assertEqual(queue.run_pending_blocking(), 1)
+        job = self.client.get(f"/v1/ingestion/jobs/{job_id}", headers=headers).json()["job"]
+        self.assertEqual(job["status"], "imported")
+        self.assertEqual(job["report"]["import"]["committed_by"], "route-principal")
+
+    def test_mapping_and_commit_refusals_are_answered_in_the_request(self):
+        platform = app.state.runtime.platform
+        content = b"Name,USN,Email,Email ID,Blood Group\nMeera Iyer,1MS23MBA301,meera@x.com,meera.i@x.com,O+\n"
+        job_id = self.client.post("/v1/ingestion/uploads", headers=self.principal, files={"file": ("refused.csv", content, "text/csv")}).json()["job"]["job_id"]
+        detail = self.client.get(f"/v1/ingestion/jobs/{job_id}", headers=self.principal).json()
+        payload = detail["pending_reviews"][0]["payload"]
+        mapping = {header: payload["proposed_mapping"].get(header) or None for header in payload["headers"]}
+        copies = b"Name,USN,Program,Semester,Phone\nIra Menon,1AB22CS920,BCA,1,9822222221\nIra Menon,1AB22CS920,BCA,2,9822222222\n"
+        in_review = self.client.post("/v1/ingestion/uploads", headers=self.principal, files={"file": ("copies.csv", copies, "text/csv")}, data={"entity": "student"}).json()["job"]["job_id"]
+        path = f"/v1/ingestion/jobs/{job_id}"
+        refusals = [
+            (f"{path}/mapping", {"mapping": {**mapping, "Roll No": "student_id"}, "entity": "student"}, "unknown header"),
+            (f"{path}/mapping", {"mapping": {**mapping, "Email ID": "email"}, "entity": "student"}, "two headers were mapped to email"),
+            (f"{path}/mapping", {"mapping": {"Email": "email"}, "entity": "student"}, "required fields are not mapped"),
+            (f"{path}/mapping", {"mapping": {**mapping, "Name": "shoe_size"}, "entity": "student"}, "shoe_size is not a field of student"),
+            (f"{path}/mapping", {"mapping": mapping, "entity": "unicorn"}, "unknown entity"),
+            (f"/v1/ingestion/jobs/{self.job_id}/mapping", {"mapping": mapping, "entity": "student"}, "not waiting for a mapping decision"),
+            (f"{path}/commit", None, "cannot be committed from stage mapping_review"),
+            (f"/v1/ingestion/jobs/{self.job_id}/commit", None, "cannot be committed from status imported"),
+            (f"/v1/ingestion/jobs/{in_review}/commit", None, "duplicate review item(s) are still pending"),
+            (f"/v1/ingestion/reviews/{detail['pending_reviews'][0]['review_id']}", {"decision": "approved"}, "resolved by submitting the mapping decision"),
+        ]
+        with mock.patch.object(platform.jobs, "enqueue") as enqueue:
+            for url, body, reason in refusals:
+                response = self.client.post(url, headers=self.principal, json=body)
+                self.assertEqual(response.status_code, 422, f"{url}: {response.text}")
+                self.assertIn(reason, response.text, url)
+            for url in ("/v1/ingestion/jobs/job-missing/commit", "/v1/ingestion/jobs/job-missing/mapping"):
+                self.assertEqual(self.client.post(url, headers=self.principal, json={"mapping": mapping, "entity": "student"}).status_code, 404, url)
+        enqueue.assert_not_called()
+        job = self.client.get(path, headers=self.principal).json()
+        self.assertEqual((job["job"]["status"], job["job"]["stage"]), ("needs_review", "mapping_review"))
+        self.assertEqual(len(job["pending_reviews"]), 1)
+
     def test_ingestion_reads_run_off_the_event_loop(self):
         # The console polls a job while an import holds the store: a read on the
         # event loop would stall every other request until the import finished.
@@ -216,28 +334,16 @@ class PlatformRouteTests(unittest.TestCase):
 
     def test_blocking_store_and_object_store_work_runs_off_the_event_loop(self):
         platform = app.state.runtime.platform
-        seen: dict[str, tuple[bool, asyncio.AbstractEventLoop | None]] = {}
+        seen: dict[str, bool] = {}
 
         def record(name):
             def _mark():
                 try:
-                    loop = asyncio.get_running_loop()
-                    on_loop = True
+                    asyncio.get_running_loop()
+                    seen[name] = True
                 except RuntimeError:
-                    loop = None
-                    on_loop = False
-                seen[name] = (on_loop, loop)
+                    seen[name] = False
             return _mark
-
-        # Captures the loop that handles each ingestion request, on the request loop itself.
-        from app.api.routes import ingestion as ingestion_routes
-
-        real_require = ingestion_routes.require_principal
-        request_loops: list[asyncio.AbstractEventLoop] = []
-
-        def require_probe(request, *args, **kwargs):
-            request_loops.append(asyncio.get_running_loop())
-            return real_require(request, *args, **kwargs)
 
         # Positive control: the notifications inbox is called synchronously by its
         # route, so the probe must observe a running loop there.
@@ -250,21 +356,26 @@ class PlatformRouteTests(unittest.TestCase):
             return True
 
         # The services are slots dataclasses, so their probes are patched on the class and take ``self``.
-        def commit_probe(service, institution_id, job_id, *, committed_by):
-            record("commit")()
-            return {"job_id": job_id, "institution_id": institution_id, "status": "imported"}
+        def request_commit_probe(service, institution_id, job_id, *, committed_by):
+            record("request_commit")()
+            return {"job_id": job_id, "institution_id": institution_id, "status": "processing", "stage": "importing"}
 
-        async def apply_mapping_probe(service, institution_id, job_id, **kwargs):
-            record("apply_mapping")()
-            return {"job_id": job_id, "institution_id": institution_id, "status": "imported"}
+        def approve_mapping_probe(service, institution_id, job_id, **kwargs):
+            record("approve_mapping")()
+            return {"job_id": job_id, "institution_id": institution_id, "status": "processing", "stage": "normalizing"}
+
+        # Handing the step to the job queue is a store write and, for SQS, a publish.
+        def enqueue_probe(institution_id, job_type, payload):
+            record("enqueue")()
+            return "bg-probe"
 
         def fetch_probe(service, principal, institution_id, report_id):
             record("report_fetch")()
             return {"object_key": f"{institution_id}/reports/{report_id}.csv", "format": "csv"}, b"a,b\n"
 
-        with mock.patch.object(platform.store, "ping", ping_probe), \
-                mock.patch.object(type(platform.ingestion), "commit", commit_probe), mock.patch.object(type(platform.ingestion), "apply_mapping", apply_mapping_probe), \
-                mock.patch.object(type(platform.reports), "fetch", fetch_probe), mock.patch.object(type(platform.notifications), "inbox", inbox_probe), mock.patch.object(ingestion_routes, "require_principal", require_probe):
+        with mock.patch.object(platform.store, "ping", ping_probe), mock.patch.object(platform.jobs, "enqueue", enqueue_probe), \
+                mock.patch.object(type(platform.ingestion), "request_commit", request_commit_probe), mock.patch.object(type(platform.ingestion), "approve_mapping", approve_mapping_probe), \
+                mock.patch.object(type(platform.reports), "fetch", fetch_probe), mock.patch.object(type(platform.notifications), "inbox", inbox_probe):
             self.assertEqual(self.client.get("/v1/notifications", headers=self.principal).status_code, 200)
             self.assertEqual(self.client.get("/v1/health/ready").json()["status"], "ready")
             self.assertEqual(self.client.post(f"/v1/ingestion/jobs/{self.job_id}/commit", headers=self.principal).status_code, 200)
@@ -273,14 +384,9 @@ class PlatformRouteTests(unittest.TestCase):
         # Thread identities are not compared: the test client runs each request's
         # event loop in a fresh thread, so identities get reused. A worker thread
         # never has a running loop, which is the property that matters.
-        self.assertTrue(seen["inbox"][0], "the control probe did not observe the event loop")
-        for name in ("ping", "commit", "report_fetch"):
-            on_loop, _ident = seen[name]
-            self.assertFalse(on_loop, f"{name} ran on the event loop")
-        # apply_mapping runs to completion on its own loop inside a pool thread, never on the request loop.
-        on_loop, loop = seen["apply_mapping"]
-        self.assertTrue(on_loop, "apply_mapping did not run under its own loop")
-        self.assertIsNot(loop, request_loops[-1], "apply_mapping ran on the request loop")
+        self.assertTrue(seen["inbox"], "the control probe did not observe the event loop")
+        for name in ("ping", "request_commit", "approve_mapping", "enqueue", "report_fetch"):
+            self.assertFalse(seen[name], f"{name} ran on the event loop")
 
 
 if __name__ == "__main__":

@@ -25,7 +25,7 @@ The client assistant (`apps/web/assistant/`, served at `/`) and the developer pl
 
 ## Platform surface
 
-- `POST /v1/ingestion/uploads`, `/v1/ingestion/sheets`, job inspection, mapping approval, duplicate review, commit, import reports.
+- `POST /v1/ingestion/uploads`, `/v1/ingestion/sheets`, job inspection, mapping approval, duplicate review, commit, import reports. Approving a mapping, committing and the last duplicate decision answer with the job as it stands and run on the job queue; follow it with `GET /v1/ingestion/jobs/{job_id}`.
 - `GET /v1/data/*` unified, minimised data access (students, attendance, fees, exams, faculty, programs, events, admissions).
 - `POST /v1/agent/commands` master agent (text or voice transcripts), `/v1/agent/tools`, approvals for high-risk actions, background jobs, run history.
 - `POST /v1/documents` and `/v1/documents/search` document intelligence with page-level citations.
