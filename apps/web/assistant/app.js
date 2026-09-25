@@ -1079,6 +1079,13 @@ function showAnswer(data, options = {}) {
   return article;
 }
 
+// A 422 that names the person's own earlier Confirm ("approved", "executing" or
+// "consumed"), which is not a reason to give up on the confirmation; '' otherwise.
+function earlierConfirmation(error) {
+  const match = error.status === 422 && /already (approved|executing|consumed)/.exec(error.message || '');
+  return match ? match[1] : '';
+}
+
 // An action that changes institutional records waits for the person to
 // confirm it; confirming records the decision and runs the same command again.
 function addApprovalControls(article, message) {
@@ -1109,6 +1116,18 @@ function addApprovalControls(article, message) {
         body: JSON.stringify({ approve }),
       });
     } catch (error) {
+      const earlier = approve ? earlierConfirmation(error) : '';
+      if (earlier === 'approved') {
+        // An earlier Confirm reached the server but its reply was lost: the command still has to be sent.
+        await carryOut(true);
+        return;
+      }
+      if (earlier) {
+        // The command already ran (or is running) with this confirmation; sending it again would do nothing.
+        await settleControls('confirmed');
+        addToConversation(conversationId, makeMessage('assistant', 'This change was already confirmed and sent.'));
+        return;
+      }
       if (error.status === 422 || error.status === 404) {
         // An expired or already decided confirmation cannot be used again: say so where the buttons were.
         await settleControls('unusable');
@@ -1120,6 +1139,11 @@ function addApprovalControls(article, message) {
       showToast(error.message);
       return;
     }
+    await carryOut(approve);
+  }
+
+  // The server has the decision: settle the buttons and, for a confirmation, send the command again.
+  async function carryOut(approve) {
     await settleControls(approve ? 'confirmed' : 'cancelled');
     if (!approve || !command) {
       addToConversation(conversationId, makeMessage('assistant', approve ? 'Confirmed.' : 'Cancelled. Nothing was changed.'));

@@ -286,7 +286,8 @@ def portable_statements() -> tuple[str, ...]:
             created_at TEXT NOT NULL,
             expires_at TEXT NOT NULL,
             decided_at TEXT,
-            decided_by TEXT
+            decided_by TEXT,
+            resume_json TEXT
         )
         """,
         "CREATE INDEX IF NOT EXISTS idx_approvals_institution ON approvals(institution_id, status, created_at)",
@@ -328,6 +329,7 @@ def postgres_row_level_security() -> tuple[str, ...]:
 ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("generated_reports", "required_capabilities_json", "TEXT"),
     ("background_jobs", "heartbeat_at", "TEXT"),
+    ("approvals", "resume_json", "TEXT"),
 )
 
 

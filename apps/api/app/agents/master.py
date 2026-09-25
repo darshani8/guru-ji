@@ -91,34 +91,49 @@ class MasterAgent:
             return None
         return record
 
-    def _resume(self, plan: AgentPlan, approved: Mapping[str, Any]) -> AgentPlan:
-        """Run the call the person confirmed, not what a fresh plan makes of the same words.
+    def _resume(self, approved: Mapping[str, Any]) -> tuple[AgentPlan, dict[str, Any]]:
+        """The plan a confirmed re-send runs, and the outputs of the steps that already ran.
 
-        Planning again can produce other arguments (a model's wording, or its
-        deterministic fallback), and their digest would never match the
-        confirmation, which would be asked for again without end. The
-        confirmed call takes the place of the plan's step for that tool.
-        Earlier steps already ran when the confirmation was asked for, so
-        only reads are kept (later steps may use them); later steps still
-        run, except another record change, which needs its own confirmation,
-        and anything that uses a dropped step.
+        It is the plan that asked for the confirmation, kept with it, from the
+        confirmed step on, with the confirmed call in place of that step:
+        planning the words again can give other arguments (a model's wording,
+        or its fallback) whose confirmation would be asked for without end,
+        other steps, or another order. Steps before it ran when the
+        confirmation was asked for; later ones use their kept outputs. A
+        confirmation kept without its plan runs the confirmed call alone.
         """
 
         tool = self.registry.get(str(approved["tool_name"]))
-        index = next((position for position, step in enumerate(plan.steps) if step.tool == tool.name), None)
-        confirmed = PlanStep(plan.steps[index].step_id if index is not None else "s1", tool.name, dict(approved["arguments"]), f"run the confirmed {tool.name}", agent=TOOL_GROUP_AGENT.get(tool.group, "data"))
-        if index is None:
-            return AgentPlan(tool.name, [confirmed], summary=confirmed.purpose, planner="approval", entities=plan.entities)
-        steps: list[PlanStep] = []
-        dropped: set[str] = set()
-        for position, step in enumerate(plan.steps):
-            if position == index:
-                steps.append(confirmed)
-            elif (position < index and self._risk(step) is not RiskLevel.READ) or self._risk(step) is RiskLevel.HIGH_RISK or referenced_steps(step) & dropped:
-                dropped.add(step.step_id)
-            else:
-                steps.append(step)
-        return AgentPlan(plan.intent, steps, summary=" then ".join(step.purpose for step in steps), planner=f"{plan.planner}+approval", confidence=plan.confidence, entities=plan.entities)
+        kept = approved.get("resume") or {}
+        try:
+            steps = [PlanStep(str(item["step_id"]), str(item["tool"]), dict(item.get("arguments") or {}), str(item.get("purpose") or ""), tuple(item.get("depends_on") or ()), dict(item.get("bindings") or {}), str(item.get("agent") or "data")) for item in kept["plan"]["steps"]]
+            index = next(position for position, step in enumerate(steps) if step.step_id == kept["stopped_at"] and step.tool == tool.name)
+        except (KeyError, TypeError, ValueError, StopIteration):
+            confirmed = PlanStep("s1", tool.name, dict(approved["arguments"]), f"run the confirmed {tool.name}", agent=TOOL_GROUP_AGENT.get(tool.group, "data"))
+            return AgentPlan(tool.name, [confirmed], summary=confirmed.purpose, planner="approval"), {}
+        stopped = steps[index]
+        remaining = [PlanStep(stopped.step_id, tool.name, dict(approved["arguments"]), stopped.purpose, (), {}, stopped.agent), *steps[index + 1:]]
+        # Dependencies on steps that already ran are met by their kept outputs.
+        present = {step.step_id for step in remaining}
+        for step in remaining:
+            step.depends_on = tuple(dependency for dependency in step.depends_on if dependency in present)
+        plan = kept["plan"]
+        resumed = AgentPlan(str(plan.get("intent") or tool.name), remaining, summary=" then ".join(step.purpose for step in remaining), planner="approval", entities=dict(plan.get("entities") or {}))
+        return resumed, dict(kept.get("completed") or {})
+
+    def _keep_for_resume(self, command: AgentCommand, plan: AgentPlan, results: list[StepResult]) -> None:
+        """Keep, with the confirmation just asked for, the plan and the outputs its later steps use."""
+
+        stopped = next((result for result in results if result.status == "approval_required" and result.approval), None)
+        if stopped is None:
+            return
+        index = next(position for position, step in enumerate(plan.steps) if step.step_id == stopped.step_id)
+        needed = {step_id for step in plan.steps[index + 1:] for step_id in referenced_steps(step)}
+        outputs = {result.step_id: {"data": result.data, "summary": result.summary} for result in results if result.ok and result.step_id in needed}
+        try:
+            self.store.set_approval_resume(command.scope.college_id, str(stopped.approval["approval_id"]), principal_id=command.principal.principal_id, resume={"plan": plan.as_dict(), "stopped_at": stopped.step_id, "completed": outputs})
+        except Exception:  # noqa: BLE001 - without it the confirmed call still runs, alone
+            logger.exception("could not keep the plan for approval %s", stopped.approval.get("approval_id"))
 
     def _refuse(self, command: AgentCommand, reason: str, started: float) -> AgentResponse:
         response = AgentResponse(command.request_id, "refused", f"I cannot run this command: {reason}", refusal_reason=reason, duration_ms=int((monotonic() - started) * 1000), conversation_id=command.conversation_id)
@@ -148,9 +163,11 @@ class MasterAgent:
             pass
 
     # --------------------------------------------------------------- execute
-    async def execute(self, command: AgentCommand, plan: AgentPlan) -> list[StepResult]:
+    async def execute(self, command: AgentCommand, plan: AgentPlan, completed: Mapping[str, Any] | None = None) -> list[StepResult]:
+        """Run the plan in order; ``completed`` holds the outputs of steps that ran earlier (a resumed plan)."""
+
         results: list[StepResult] = []
-        completed: dict[str, Any] = {}
+        completed = dict(completed or {})
         failed: set[str] = set()
         for step in plan.steps:
             if any(dependency in failed for dependency in step.depends_on):
@@ -237,11 +254,13 @@ class MasterAgent:
         if not principal.can_access(command.scope):
             return self._refuse(command, "the requested institution is outside your authorised scope", started)
         self.tracer.record("agent.command", trace_id=command.request_id, attributes={"request_id": command.request_id, "principal_id": principal.principal_id, "scope_college_id": command.scope.college_id})
-        plan = await self.plan(command)
         approved = self._approved_call(command)
+        earlier: dict[str, Any] = {}
         if approved is not None:
-            plan = self._resume(plan, approved)
-        elif self.open_task is not None:
+            plan, earlier = self._resume(approved)
+        else:
+            plan = await self.plan(command)
+        if approved is None and self.open_task is not None:
             route = route_to_open_task(command.text, plan)
             if route is not None:
                 return await self._open_task(command, route, started)
@@ -261,8 +280,10 @@ class MasterAgent:
             response = AgentResponse(command.request_id, "accepted", "Understood. I am working on it in the background and will notify you when it is done.", intent=plan.intent, plan=plan.as_dict(), job_id=job_id, duration_ms=int((monotonic() - started) * 1000), conversation_id=command.conversation_id)
             self._record(command, plan, response, started)
             return response
-        results = await self.execute(command, plan)
+        results = await self.execute(command, plan, earlier)
         status = overall_status(plan, results)
+        if status == "approval_required":
+            self._keep_for_resume(command, plan, results)
         warnings = [warning for result in results for warning in result.warnings] + verify(plan, results)
         answer_text = self._compose(plan, results, status)
         generation_mode = "deterministic"

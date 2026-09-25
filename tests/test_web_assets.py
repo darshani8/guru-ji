@@ -97,13 +97,19 @@ class WebAssetTests(unittest.TestCase):
 
     def test_confirm_and_run_keeps_a_second_prompt_and_reports_a_lost_answer(self):
         console = (CONSOLE / "console.js").read_text(encoding="utf-8")
-        # The id is taken before any await, so a re-sent command's new confirmation keeps its buttons.
-        self.assertIn("const approvalId = state.lastApproval;\n    if (!approvalId) return;\n    state.lastApproval = null;", console)
+        # The id and its command are taken before any await, so a re-sent command's new confirmation keeps its
+        # buttons, and Confirm re-sends the command the confirmation was for, not the last one typed.
+        self.assertIn("const approval = state.lastApproval;\n    if (!approval) return;\n    state.lastApproval = null;", console)
+        self.assertIn("state.lastApproval = { id: data.approval.approval_id, command };", console)
+        self.assertIn("$('command-input').value = approval.command;", console)
         self.assertNotRegex(console, r"finally \{\s*state\.lastApproval = null;")
         self.assertIn("may or may not have been made", console)
         assistant = (ASSISTANT / "app.js").read_text(encoding="utf-8")
         self.assertIn("may or may not have been made", assistant)
         self.assertIn("await settleControls('unusable');", assistant)
+        # The person's own earlier Confirm (its reply lost) is carried out, not called unusable.
+        self.assertIn("/already (approved|executing|consumed)/", assistant)
+        self.assertIn("await carryOut(true);", assistant)
 
     def test_assistant_files_download_through_the_authenticated_client(self):
         # A plain link to the report would reach the server without the signed-in

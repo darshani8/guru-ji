@@ -4,7 +4,7 @@
   'use strict';
 
   const $ = (id) => document.getElementById(id);
-  const state = { entities: [], lastApproval: null, lastCommand: '', jobs: new Map(), shownJob: null, reviewJob: null };
+  const state = { entities: [], lastApproval: null, jobs: new Map(), shownJob: null, reviewJob: null };
 
   function headers(json) {
     return window.SaffronAuth.headers(json);
@@ -132,7 +132,8 @@
   });
 
   // ------------------------------------------------------------------ commands
-  function renderCommandResult(data) {
+  // `command` is the text that was sent; confirming its approval re-sends exactly it.
+  function renderCommandResult(data, command) {
     const box = $('command-result');
     box.hidden = false;
     const sources = (data.sources || []).map((source) => source.url
@@ -150,7 +151,7 @@
     bindDownloads(box);
     const approvalBox = $('command-approval');
     if (data.status === 'approval_required' && data.approval) {
-      state.lastApproval = data.approval.approval_id;
+      state.lastApproval = { id: data.approval.approval_id, command };
       approvalBox.hidden = false;
       approvalBox.innerHTML = `<div class="result-box">This action changes institutional records: <strong>${escapeHtml(data.approval.tool_name)}</strong> ${escapeHtml(JSON.stringify(data.approval.arguments))}
 <button id="approval-confirm" class="btn" type="button">Confirm and run</button> <button id="approval-reject" class="btn danger" type="button">Cancel</button></div>`;
@@ -159,6 +160,7 @@
     } else {
       approvalBox.hidden = true;
       approvalBox.innerHTML = '';
+      state.lastApproval = null;
     }
   }
 
@@ -166,14 +168,20 @@
   async function runCommand(approvalId) {
     const text = $('command-input').value.trim();
     if (!text) return null;
-    state.lastCommand = text;
+    if (!approvalId) {
+      // A new command: a confirmation still showing belongs to an earlier one
+      // and must not be confirmed while this one is pending.
+      $('command-approval').hidden = true;
+      $('command-approval').innerHTML = '';
+      state.lastApproval = null;
+    }
     $('command-run').disabled = true;
     try {
       const data = await api('/v1/agent/commands', {
         method: 'POST',
         json: { command: text, channel: 'text', run_in_background: $('command-background').value === 'true', approval_id: approvalId || null, include_data: false },
       });
-      renderCommandResult(data);
+      renderCommandResult(data, text);
       return null;
     } catch (error) {
       toast(error.message);
@@ -183,15 +191,15 @@
     }
   }
 
-  // The id is taken before any await: the re-sent command may ask for a new
-  // confirmation, whose id and buttons must survive this call returning.
+  // The id and its command are taken before any await: the re-sent command may
+  // ask for a new confirmation, whose id and buttons must survive this call returning.
   async function decideApproval(approve) {
-    const approvalId = state.lastApproval;
-    if (!approvalId) return;
+    const approval = state.lastApproval;
+    if (!approval) return;
     state.lastApproval = null;
     setBusy($('command-approval'), true);
     try {
-      await api(`/v1/agent/approvals/${encodeURIComponent(approvalId)}`, { method: 'POST', json: { approve } });
+      await api(`/v1/agent/approvals/${encodeURIComponent(approval.id)}`, { method: 'POST', json: { approve } });
     } catch (error) {
       toast(error.message);
       // An expired or already decided confirmation cannot be used again: the command must be sent anew.
@@ -203,8 +211,9 @@
       $('command-approval').hidden = true;
       return;
     }
-    $('command-input').value = state.lastCommand;
-    const failed = await runCommand(approvalId);
+    // Re-send the command this confirmation was issued for, not the last one typed.
+    $('command-input').value = approval.command;
+    const failed = await runCommand(approval.id);
     if (failed) {
       // The answer was lost, not necessarily the change (a timeout can come after it was made).
       $('command-approval').hidden = true;

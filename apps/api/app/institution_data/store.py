@@ -961,7 +961,18 @@ class InstitutionDataStore:
             row = self.backend.fetchone("SELECT * FROM approvals WHERE institution_id = ? AND approval_id = ?", (institution_id, approval_id))
         if row:
             row["arguments"] = _loads(row.pop("arguments_json", "{}"), {})
+            row["resume"] = _loads(row.pop("resume_json", None), None)
         return row
+
+    def set_approval_resume(self, institution_id: str, approval_id: str, *, principal_id: str, resume: Mapping[str, Any]) -> bool:
+        """Keep, with a pending confirmation, what its confirmed re-send resumes (the rest of the plan)."""
+
+        with self._tenant(institution_id):
+            changed = self.backend.execute(
+                "UPDATE approvals SET resume_json = ? WHERE institution_id = ? AND approval_id = ? AND principal_id = ? AND status = 'pending'",
+                (_json(dict(resume)), institution_id, approval_id, principal_id),
+            )
+        return changed == 1
 
     def claim_approval(self, institution_id: str, approval_id: str, *, principal_id: str) -> dict[str, Any] | None:
         """Atomically move one approved, unexpired approval to ``executing``.
@@ -1001,6 +1012,7 @@ class InstitutionDataStore:
             rows = self.backend.fetchall(f"SELECT * FROM approvals WHERE {' AND '.join(clauses)} ORDER BY created_at DESC LIMIT ?", (*params, _clamp_limit(limit, 500)))
         for row in rows:
             row["arguments"] = _loads(row.pop("arguments_json", "{}"), {})
+            row.pop("resume_json", None)  # internal: what a confirmed re-send resumes
         return rows
 
     # -------------------------------------------------------- background jobs
