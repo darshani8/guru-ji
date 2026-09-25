@@ -676,8 +676,15 @@ function postUserMessage(text, options = {}) {
 }
 
 // ------------------------------------------------------------------ rendering
+function greeting() {
+  const hour = new Date().getHours();
+  const part = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
+  return `${part}, Guru Ji`;
+}
+
 function setEmpty(empty) {
   $('main').classList.toggle('is-empty', empty);
+  if (empty) $('welcome-greeting').textContent = greeting();
 }
 
 function markLatest() {
