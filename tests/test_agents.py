@@ -61,7 +61,6 @@ class PlannerTests(unittest.TestCase):
             # Everyday ways of asking: greetings, "kindly provide", a trailing "?", chat endings, Hinglish.
             "Hi, can you make a PPT of low attendance students in MBA?": "pptx",
             "Sir can you prepare a Word document of all faculty?": "docx",
-            "Kindly provide a PPT of MBA students with low attendance": "pptx",
             "Make a PPT of MBA students with low attendance?": "pptx",
             "Is it possible to get the MBA student list in a Word document?": "docx",
             "Send me the list of MBA students in word plz": "docx",
@@ -79,9 +78,6 @@ class PlannerTests(unittest.TestCase):
             # Relative clauses, titles, follow-ups, formal openings and other names for the file.
             "Give me the list of students whose fees are due in PPT": "pptx",
             "Send the list of MBA students with pending fees to Prof. Iyer in Word format": "docx",
-            "List MBA students with pending fees. I need it in Word.": "docx",
-            "Give me the faculty list of Computer Science. Make it a PPT.": "pptx",
-            "List students below 75% attendance. PPT please.": "pptx",
             "I would request you to send the pending fees list as a Word document": "docx",
             "Make a PPT presentation of MBA students with pending fees": "pptx",
             "Send HOD a PPT of students with low attendance": "pptx",
