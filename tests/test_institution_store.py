@@ -6,7 +6,7 @@ from pathlib import Path
 
 from app.institution_data.models import CanonicalRecord, RecordLineage
 from app.institution_data.schema import column_type, postgres_numeric_columns, render_sql_migration
-from app.institution_data.store import WRITE_CHUNK_ROWS, InstitutionDataStore
+from app.institution_data.store import ANALYZE_AFTER_ROWS, WRITE_CHUNK_ROWS, InstitutionDataStore
 from app.normalization.canonical import FieldType, entity as canonical_entity
 from app.persistence.sql_backend import PostgresBackend, SqlBackend, SqliteBackend
 
@@ -527,6 +527,103 @@ class SchemaNumericTypeTests(unittest.TestCase):
         backend.fetchall = spy  # type: ignore[method-assign]
         InstitutionDataStore(backend=backend)
         self.assertFalse(any("information_schema" in sql for sql in calls))
+
+
+class _PostgresDialectSqliteBackend(SqliteBackend):
+    """Real SQLite rows behind a dialect the test switches to PostgreSQL after the store has migrated.
+
+    Records writes, commits and tenant pins; the statements only PostgreSQL
+    understands (the lock timeout and ANALYZE) are recorded instead of run.
+    """
+
+    def __init__(self):
+        super().__init__(":memory:")
+        self.events: list[str] = []
+        self.tenants: list[str] = []
+        self.analyze_error: Exception | None = None
+
+    def execute(self, sql, params=()):
+        if sql.startswith(("SET LOCAL ", "ANALYZE ")):
+            self.events.append(sql)
+            if sql.startswith("ANALYZE ") and self.analyze_error is not None:
+                raise self.analyze_error
+            return 0
+        return super().execute(sql, params)
+
+    def executemany(self, sql, rows):
+        self.events.append("write")
+        return super().executemany(sql, rows)
+
+    def commit(self):
+        self.events.append("commit")
+        super().commit()
+
+    def set_tenant(self, tenant_id):
+        self.tenants.append(tenant_id)
+
+
+class PostgresStatisticsAfterBulkWriteTests(unittest.TestCase):
+    def setUp(self):
+        self.backend = _PostgresDialectSqliteBackend()
+        self.store = InstitutionDataStore(backend=self.backend)
+        self.backend.dialect = "postgresql"
+        self.backend.events.clear()
+
+    def _analyzed(self):
+        return [event for event in self.backend.events if event.startswith("ANALYZE ")]
+
+    def test_a_large_import_is_analysed_after_it_commits(self):
+        summary = self.store.upsert_records("college_a", _students(ANALYZE_AFTER_ROWS))
+        self.assertEqual(summary.inserted, ANALYZE_AFTER_ROWS)
+        self.assertEqual(self._analyzed(), ["ANALYZE students"])
+        # The import's write transaction commits first; ANALYZE then runs in
+        # its own transaction under a lock timeout, so it never holds the write open.
+        self.assertEqual(self.backend.events[-5:], ["write", "commit", "SET LOCAL lock_timeout = '15s'", "ANALYZE students", "commit"])
+        self.assertFalse(self.backend.in_transaction)
+
+    def test_small_or_unchanged_imports_are_left_to_autovacuum(self):
+        self.store.upsert_records("college_a", _students(ANALYZE_AFTER_ROWS - 1))
+        self.assertEqual(self._analyzed(), [])
+        self.store.upsert_records("college_b", _students(ANALYZE_AFTER_ROWS))
+        self.backend.events.clear()
+        # Re-uploading the same file writes nothing, so there is nothing to analyse.
+        again = self.store.upsert_records("college_b", _students(ANALYZE_AFTER_ROWS))
+        self.assertEqual((again.inserted, again.updated, again.unchanged), (0, 0, ANALYZE_AFTER_ROWS))
+        self.assertEqual(self._analyzed(), [])
+
+    def test_large_staging_analyses_ingestion_records(self):
+        staged = [{"row_number": i, "locator": f"row={i}", "raw": {"n": i}, "status": "parsed"} for i in range(1, ANALYZE_AFTER_ROWS + 1)]
+        self.store.replace_job_records("college_a", "job-small", staged[:10])
+        self.assertEqual(self._analyzed(), [])
+        self.assertEqual(self.store.replace_job_records("college_a", "job-1", iter(staged)), len(staged))
+        self.assertEqual(self._analyzed(), ["ANALYZE ingestion_records"])
+
+    def test_a_failed_analyze_does_not_fail_the_import(self):
+        self.backend.analyze_error = RuntimeError("must be owner of table students")
+        with self.assertLogs("app.institution_data.store", level="WARNING") as logs:
+            summary = self.store.upsert_records("college_a", _students(ANALYZE_AFTER_ROWS))
+        self.assertEqual(summary.inserted, ANALYZE_AFTER_ROWS)
+        self.assertIn("could not analyse students", logs.output[0])
+        self.assertFalse(self.backend.in_transaction)
+        self.assertEqual(self.store.count_records("college_a", "student"), ANALYZE_AFTER_ROWS)
+
+    def test_sqlite_is_never_analysed(self):
+        self.backend.dialect = "sqlite"
+        self.store.upsert_records("college_a", _students(ANALYZE_AFTER_ROWS))
+        self.store.replace_job_records("college_a", "job-1", [{"row_number": i, "locator": f"row={i}"} for i in range(ANALYZE_AFTER_ROWS)])
+        self.assertEqual([event for event in self.backend.events if event.startswith(("SET LOCAL ", "ANALYZE "))], [])
+
+    def test_existing_keys_opens_one_tenant_transaction_per_chunk(self):
+        total = WRITE_CHUNK_ROWS * 2 + 7
+        records = _students(total)
+        self.store.upsert_records("college_a", records)
+        self.backend.events.clear()
+        self.backend.tenants.clear()
+        found = self.store.existing_keys("college_a", "student", [record.record_key for record in records])
+        self.assertEqual(len(found), total)
+        # The backend lock is released between chunks instead of being held for the whole lookup.
+        self.assertEqual(self.backend.events, ["commit"] * 3)
+        self.assertEqual(self.backend.tenants, ["college_a"] * 3)
 
 
 if __name__ == "__main__":

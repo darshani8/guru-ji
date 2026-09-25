@@ -2,8 +2,9 @@
 
 ``openpyxl`` is used when it is installed. Otherwise a small reader built on
 the standard library handles the common institutional workbook: shared and
-inline strings, numbers, booleans, and ISO dates. Legacy ``.xls`` binaries
-need the optional ``xlrd`` package.
+inline strings, numbers, booleans, and ISO dates. Either way a %-formatted cell
+is read as the percentage it shows (85, not Excel's stored 0.85). Legacy
+``.xls`` binaries need the optional ``xlrd`` package.
 """
 
 from __future__ import annotations
@@ -11,6 +12,7 @@ from __future__ import annotations
 import re
 import zipfile
 from datetime import date, datetime, timedelta
+from decimal import Decimal
 from io import BytesIO
 from typing import Any
 from xml.etree import ElementTree
@@ -28,6 +30,11 @@ _CELL_REF = re.compile(r"([A-Z]+)(\d+)")
 _EXCEL_EPOCH = datetime(1899, 12, 30)
 # Built-in number formats Excel treats as dates (ECMA-376 §18.8.30).
 _DATE_FORMAT_IDS = {14, 15, 16, 17, 18, 19, 20, 21, 22, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 45, 46, 47, 50, 51, 52, 53, 54, 55, 56, 57, 58}
+# Built-in percent formats: 0% and 0.00%.
+_PERCENT_FORMAT_IDS = {9, 10}
+# Parts of a number format where a % sign does not scale the number: escaped
+# (\%) or padding (_% *%) characters, quoted text, and [..] sections.
+_LITERAL_FORMAT_PARTS = re.compile(r'\\.|[_*].|"[^"]*"|\[[^\]]*\]')
 
 
 # Cells beyond this column are ignored: no institutional data table needs them,
@@ -57,6 +64,22 @@ def _excel_serial_to_date(value: float) -> Any:
     if result.hour == 0 and result.minute == 0 and result.second == 0:
         return result.date().isoformat()
     return result.isoformat()
+
+
+def _is_percent_format(code: str) -> bool:
+    return "%" in code and "%" in _LITERAL_FORMAT_PARTS.sub("", code)
+
+
+def _percent_value(number: float) -> Any:
+    """The percentage a %-formatted cell shows; Excel stores 85% as 0.85."""
+
+    # Moving the decimal point on the digits avoids float noise (0.07 * 100 is 7.000000000000001).
+    shown = float(Decimal(repr(number)).scaleb(2))
+    if 0 < shown < 1:
+        # The percent cleaner takes a bare number between 0 and 1 for a fraction
+        # (0.5 -> 50%), so a cell under 1% keeps its percent sign.
+        return f"{shown}%"
+    return int(shown) if shown.is_integer() else shown
 
 
 def _shared_strings(archive: zipfile.ZipFile) -> list[str]:
@@ -90,29 +113,38 @@ def _read_xml(archive: zipfile.ZipFile, name: str) -> ElementTree.Element:
         raise ParserError(f"workbook part {name} is not well-formed XML") from exc
 
 
-def _date_styles(archive: zipfile.ZipFile) -> set[int]:
+def _number_styles(archive: zipfile.ZipFile) -> tuple[set[int], set[int]]:
+    """The cell styles that show a date, and those that show a percentage."""
+
     try:
         root = _read_xml(archive, "xl/styles.xml")
     except KeyError:
-        return set()
+        return set(), set()
     custom_date_formats: set[int] = set()
+    custom_percent_formats: set[int] = set()
     for fmt in root.iterfind("m:numFmts/m:numFmt", _NS):
         code = (fmt.get("formatCode") or "").lower()
         stripped = re.sub(r"\[[^\]]*\]|\"[^\"]*\"", "", code)
+        try:
+            fmt_id = int(fmt.get("numFmtId", "-1"))
+        except ValueError:
+            continue
         if re.search(r"[dmy]", stripped) and not re.search(r"[#0]", stripped):
-            try:
-                custom_date_formats.add(int(fmt.get("numFmtId", "-1")))
-            except ValueError:
-                continue
-    styles: set[int] = set()
+            custom_date_formats.add(fmt_id)
+        elif _is_percent_format(code):
+            custom_percent_formats.add(fmt_id)
+    date_styles: set[int] = set()
+    percent_styles: set[int] = set()
     for index, xf in enumerate(root.iterfind("m:cellXfs/m:xf", _NS)):
         try:
             fmt_id = int(xf.get("numFmtId", "0"))
         except ValueError:
             continue
         if fmt_id in _DATE_FORMAT_IDS or fmt_id in custom_date_formats:
-            styles.add(index)
-    return styles
+            date_styles.add(index)
+        elif fmt_id in _PERCENT_FORMAT_IDS or fmt_id in custom_percent_formats:
+            percent_styles.add(index)
+    return date_styles, percent_styles
 
 
 def _sheet_paths(archive: zipfile.ZipFile) -> list[tuple[str, str]]:
@@ -135,7 +167,7 @@ def _sheet_paths(archive: zipfile.ZipFile) -> list[tuple[str, str]]:
     return sheets
 
 
-def _cell_value(cell: ElementTree.Element, shared: list[str], date_styles: set[int]) -> Any:
+def _cell_value(cell: ElementTree.Element, shared: list[str], date_styles: set[int], percent_styles: set[int]) -> Any:
     cell_type = cell.get("t", "n")
     style = cell.get("s")
     value_node = cell.find("m:v", _NS)
@@ -164,6 +196,8 @@ def _cell_value(cell: ElementTree.Element, shared: list[str], date_styles: set[i
         try:
             if int(style) in date_styles:
                 return _excel_serial_to_date(number)
+            if int(style) in percent_styles:
+                return _percent_value(number)
         except ValueError:
             pass
     if number.is_integer():
@@ -171,7 +205,7 @@ def _cell_value(cell: ElementTree.Element, shared: list[str], date_styles: set[i
     return number
 
 
-def _read_sheet(archive: zipfile.ZipFile, path: str, shared: list[str], date_styles: set[int]) -> list[list[Any]]:
+def _read_sheet(archive: zipfile.ZipFile, path: str, shared: list[str], date_styles: set[int], percent_styles: set[int]) -> list[list[Any]]:
     """Stream a worksheet row by row so the whole XML tree is never held in memory."""
 
     rows: list[list[Any]] = []
@@ -192,7 +226,7 @@ def _read_sheet(archive: zipfile.ZipFile, path: str, shared: list[str], date_sty
                     if index < MAX_SHEET_COLUMNS:
                         while len(values) < index:
                             values.append("")
-                        values.append(_cell_value(element, shared, date_styles))
+                        values.append(_cell_value(element, shared, date_styles, percent_styles))
                 element.clear()
                 continue
             if element.tag == row_tag:
@@ -220,11 +254,11 @@ def _open_archive(content: bytes) -> zipfile.ZipFile:
 def _parse_with_stdlib(file_name: str, content: bytes) -> ParseResult:
     with _open_archive(content) as archive:
         shared = _shared_strings(archive)
-        date_styles = _date_styles(archive)
+        date_styles, percent_styles = _number_styles(archive)
         result = ParseResult(file_name=file_name, file_kind=FileKind.XLSX, metadata={"engine": "stdlib"})
         for sheet_name, path in _sheet_paths(archive):
             try:
-                rows = _read_sheet(archive, path, shared, date_styles)
+                rows = _read_sheet(archive, path, shared, date_styles, percent_styles)
             except (KeyError, ElementTree.ParseError, zipfile.BadZipFile):
                 result.warnings.append(f"sheet_unreadable:{sheet_name}")
                 continue
@@ -232,6 +266,15 @@ def _parse_with_stdlib(file_name: str, content: bytes) -> ParseResult:
             result.tables.append(table)
         result.page_count = len(result.tables)
     return result
+
+
+def _openpyxl_value(cell: Any) -> Any:
+    value = cell.value
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, (int, float)) and not isinstance(value, bool) and _is_percent_format(cell.number_format or ""):
+        return _percent_value(value)
+    return value
 
 
 def _parse_with_openpyxl(file_name: str, content: bytes) -> ParseResult:
@@ -243,11 +286,8 @@ def _parse_with_openpyxl(file_name: str, content: bytes) -> ParseResult:
         if sheet.sheet_state != "visible":
             continue
         rows: list[list[Any]] = []
-        for row in sheet.iter_rows(values_only=True):
-            rows.append([
-                (value.isoformat() if isinstance(value, (datetime, date)) else value)
-                for value in row
-            ])
+        for row in sheet.iter_rows():
+            rows.append([_openpyxl_value(cell) for cell in row])
             if len(rows) > MAX_ROWS + 20:
                 break
         result.tables.append(grid_to_table(rows, name=sheet.title, source_file=file_name, sheet=sheet.title))

@@ -1,3 +1,4 @@
+import importlib.util
 import io
 import json
 import unittest
@@ -7,6 +8,7 @@ from app.ingestion import parsers
 from app.ingestion.detector import detect_file_kind
 from app.ingestion.models import FileKind, ParserError, ParserUnavailable
 from app.ingestion.parsers import archive as archive_guard
+from app.ingestion.parsers import excel_parser
 from app.ingestion.parsers import pdf_parser
 from app.ingestion.parsers.csv_parser import parse_csv
 from app.ingestion.parsers.docx_parser import parse_docx
@@ -17,6 +19,13 @@ from app.ingestion.parsers.ocr import OcrResult, OcrUnavailable, parse_textract_
 from app.ingestion.parsers.tabular import detect_header_row
 from app.ingestion.parsers.text_layout import key_value_fields, text_to_table
 from app.ingestion.registry import ParserRegistry
+from app.ingestion.service import JOB_IMPORTED, IngestionService
+from app.institution_data.store import InstitutionDataStore
+from app.storage.object_store import InMemoryObjectStore
+
+OPENPYXL_AVAILABLE = importlib.util.find_spec("openpyxl") is not None
+# Cell styles build_xlsx writes; a cell given as (style, number) uses one of them.
+PERCENT, PERCENT_2DP, CUSTOM_PERCENT, ESCAPED_PERCENT_SIGN, QUOTED_PERCENT_SIGN = 2, 3, 4, 5, 6
 
 
 def build_xlsx(sheets: dict[str, list[list[object]]]) -> bytes:
@@ -31,7 +40,10 @@ def build_xlsx(sheets: dict[str, list[list[object]]]) -> bytes:
         archive.writestr("xl/_rels/workbook.xml.rels", f'<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">{rels}</Relationships>')
         strings = ["shared one"]
         archive.writestr("xl/sharedStrings.xml", '<?xml version="1.0"?><sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><si><t>shared one</t></si></sst>')
-        archive.writestr("xl/styles.xml", '<?xml version="1.0"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><cellXfs count="2"><xf numFmtId="0"/><xf numFmtId="14"/></cellXfs></styleSheet>')
+        # Styles 2-4 show percentages (built-in 0% and 0.00%, custom [Blue]0.0%); 5 and 6 only print a % sign.
+        formats = '<numFmts count="3"><numFmt numFmtId="164" formatCode="[Blue]0.0%"/><numFmt numFmtId="165" formatCode="0\\%"/><numFmt numFmtId="166" formatCode="0&quot;%&quot;"/></numFmts>'
+        styles = "".join(f'<xf numFmtId="{fmt}"/>' for fmt in (0, 14, 9, 10, 164, 165, 166))
+        archive.writestr("xl/styles.xml", f'<?xml version="1.0"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">{formats}<cellXfs count="7">{styles}</cellXfs></styleSheet>')
         for index, rows in enumerate(sheets.values(), start=1):
             xml = ['<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>']
             for r, row in enumerate(rows, start=1):
@@ -42,6 +54,9 @@ def build_xlsx(sheets: dict[str, list[list[object]]]) -> bytes:
                         cells.append(f'<c r="{ref}" t="s"><v>0</v></c>')
                     elif value == "__date__":
                         cells.append(f'<c r="{ref}" s="1"><v>45000</v></c>')
+                    elif isinstance(value, tuple):
+                        style, number = value
+                        cells.append(f'<c r="{ref}" s="{style}"><v>{number}</v></c>')
                     elif isinstance(value, bool):
                         cells.append(f'<c r="{ref}" t="b"><v>{int(value)}</v></c>')
                     elif isinstance(value, (int, float)):
@@ -120,6 +135,50 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(table.records[0].fields["Joined"], "2023-03-15")
         self.assertIs(table.records[0].fields["Active"], True)
         self.assertEqual(table.records[1].fields["Student ID"], 42)
+
+    def test_percent_formatted_cells_read_as_the_percentage_shown(self):
+        # Excel stores 85% as 0.85 and 100% as 1; the reader returns what the cell shows.
+        content = build_xlsx({"Att": [
+            ["USN", "Built-in", "Two places", "Custom", "Escaped sign", "Quoted sign", "Plain", "Joined"],
+            ["1MS23MBA001", (PERCENT, 0), (PERCENT_2DP, 0.85), (CUSTOM_PERCENT, 0.125), (ESCAPED_PERCENT_SIGN, 85), (QUOTED_PERCENT_SIGN, 85), 1, "__date__"],
+            ["1MS23MBA002", (PERCENT, 1), (PERCENT_2DP, 0.07), (CUSTOM_PERCENT, 1.5), (ESCAPED_PERCENT_SIGN, 1), (QUOTED_PERCENT_SIGN, 1), 0.85, "__date__"],
+            ["1MS23MBA003", (PERCENT, 0.85), (PERCENT_2DP, 0.005), (CUSTOM_PERCENT, 0.01), (ESCAPED_PERCENT_SIGN, 0), (QUOTED_PERCENT_SIGN, 0), 0, "__date__"],
+        ]})
+        result = excel_parser._parse_with_stdlib("attendance.xlsx", content)
+        rows = [record.fields for record in result.tables[0].records]
+        self.assertEqual([row["Built-in"] for row in rows], [0, 100, 85])
+        self.assertEqual([row["Two places"] for row in rows], [85, 7, "0.5%"], "no float noise, and a value under 1% keeps its sign so it is not read as a fraction")
+        self.assertEqual([row["Custom"] for row in rows], [12.5, 150, 1])
+        self.assertEqual([row["Escaped sign"] for row in rows], [85, 1, 0], "a format that only prints a % sign does not scale")
+        self.assertEqual([row["Quoted sign"] for row in rows], [85, 1, 0])
+        self.assertEqual([row["Plain"] for row in rows], [1, 0.85, 0])
+        self.assertEqual([row["Joined"] for row in rows], ["2023-03-15"] * 3)
+        self.assertIs(type(rows[2]["Custom"]), int, "1% stays the whole number 1; a float 1.0 would be read later as the fraction 100%")
+
+    @unittest.skipUnless(OPENPYXL_AVAILABLE, "openpyxl is not installed")
+    def test_openpyxl_reads_percent_formatted_cells_as_the_percentage_shown(self):
+        from datetime import date
+
+        import openpyxl
+
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        sheet.append(["USN", "Attendance %", "Custom", "Escaped sign", "Plain", "Joined", "Flag"])
+        for row in (["1MS23MBA001", 0, 0.125, 85, 1, date(2026, 1, 5), True], ["1MS23MBA002", 1, 1.5, 1, 0.85, date(2026, 1, 5), False], ["1MS23MBA003", 0.85, 0.005, 0, 0, date(2026, 1, 5), True]):
+            sheet.append(row)
+        for number_format, column in (("0%", "B"), ("[Blue]0.0%", "C"), ("0\\%", "D"), ("0%", "G")):
+            for cell in sheet[column][1:]:
+                cell.number_format = number_format
+        buffer = io.BytesIO()
+        workbook.save(buffer)
+        result = excel_parser._parse_with_openpyxl("attendance.xlsx", buffer.getvalue())
+        rows = [record.fields for record in result.tables[0].records]
+        self.assertEqual([row["Attendance %"] for row in rows], [0, 100, 85])
+        self.assertEqual([row["Custom"] for row in rows], [12.5, 150, "0.5%"])
+        self.assertEqual([row["Escaped sign"] for row in rows], [85, 1, 0])
+        self.assertEqual([row["Plain"] for row in rows], [1, 0.85, 0])
+        self.assertEqual([row["Joined"] for row in rows], ["2026-01-05T00:00:00"] * 3)
+        self.assertEqual([row["Flag"] for row in rows], [True, False, True])
 
     def test_docx_parser_returns_text_and_tables(self):
         result = parse_docx("staff.docx", build_docx(["Faculty list", "Department of MBA"], [["Name", "Designation"], ["Dr Meena", "Professor"], ["Mr Rao", "Assistant Professor"]]))
@@ -265,6 +324,25 @@ class ParserTests(unittest.TestCase):
 
         with self.assertRaises(OcrUnavailable):
             DisabledOcrEngine().recognize(b"x")
+
+
+class PercentImportTests(unittest.IsolatedAsyncioTestCase):
+    async def test_percent_formatted_attendance_imports_as_the_percentage_shown(self):
+        store = InstitutionDataStore(":memory:")
+        service = IngestionService(store=store, objects=InMemoryObjectStore(), parsers=ParserRegistry())
+        content = build_xlsx({"Aug": [
+            ["USN", "Subject Code", "Month", "Attendance %"],
+            ["1MS23MBA001", "MBA101", "Aug", (PERCENT, 1)],
+            ["1MS23MBA002", "MBA101", "Aug", (PERCENT, 0.85)],
+            ["1MS23MBA003", "MBA101", "Aug", (PERCENT_2DP, 0.005)],
+            ["1MS23MBA004", "MBA101", "Aug", (PERCENT, 0)],
+            ["1MS23MBA005", "MBA101", "Aug", (PERCENT, 0.01)],
+        ]})
+        job = service.upload("college_a", "staff-1", file_name="attendance.xlsx", content=content, content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+        job = await service.process("college_a", job["job_id"])
+        self.assertEqual((job["entity"], job["status"]), ("attendance", JOB_IMPORTED))
+        stored = {row["student_id"]: row["attendance_percent"] for row in store.query_records("college_a", "attendance")}
+        self.assertEqual(stored, {"1MS23MBA001": 100, "1MS23MBA002": 85, "1MS23MBA003": 0.5, "1MS23MBA004": 0, "1MS23MBA005": 1})
 
 
 class WideSheetTests(unittest.TestCase):

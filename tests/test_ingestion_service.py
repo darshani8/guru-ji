@@ -10,6 +10,7 @@ from app.ingestion.service import (
     JOB_PROCESSING,
     JOB_READY,
     STAGE_DUPLICATE_REVIEW,
+    STAGE_IMPORTING,
     STAGE_MAPPING_REVIEW,
     STAGE_NORMALIZING,
     STAGE_READY,
@@ -21,6 +22,10 @@ from app.institution_data.store import InstitutionDataStore
 from app.storage.object_store import InMemoryObjectStore
 
 STUDENTS = b"Student Name,USN,Course,Sem,Phone,Email ID,DOB\nRAVI KUMAR,1MS23MBA001,M.B.A,Sem 1,98765 43210,Ravi@X.com,12/05/2003\nAsha Rao,1MS23MBA002,MBA,1,9876543211,asha@x.com,2003-01-15\nAsha Rao,1MS23MBA002,MBA,1,9876543211,asha@x.com,2003-01-15\n"
+
+
+class _WorkerDied(BaseException):
+    """The process running a step died: nothing after that point runs, not even ``except Exception``."""
 
 
 class IngestionServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -439,6 +444,47 @@ class ApprovalTests(unittest.IsolatedAsyncioTestCase):
         payload = self._mapping_review(retried)
         job = await self.service.apply_mapping("college_a", job["job_id"], mapping=payload["proposed_mapping"], entity="student", approved_by="staff-1")
         self.assertEqual(job["status"], JOB_IMPORTED)
+
+    def _age(self, job):
+        stale = (datetime.now(timezone.utc) - timedelta(seconds=self.service.restart_after_seconds + 60)).isoformat()
+        self.store.backend.execute("UPDATE ingestion_jobs SET updated_at = ? WHERE job_id = ?", (stale, job["job_id"]))
+
+    async def test_a_run_interrupted_after_the_approval_resumes_under_the_approved_mapping(self):
+        from unittest import mock
+
+        from app.normalization.mapping import header_signature
+
+        content = b"Name,ID,Contact,Prog,Semester,Remarks\nRavi Kumar,1MS23MBA001,9876543210,MBA,2,fine\n"
+        job = await self._upload("list.csv", content)
+        mapping = dict(self._mapping_review(job)["proposed_mapping"], Prog="program")
+        with mock.patch.object(IngestionService, "_normalize", side_effect=_WorkerDied), self.assertRaises(_WorkerDied):
+            await self.service.apply_mapping("college_a", job["job_id"], mapping=mapping, entity="student", approved_by="reviewer-1")
+        interrupted = self.store.get_job("college_a", job["job_id"])
+        self.assertEqual((interrupted["status"], interrupted["stage"]), (JOB_PROCESSING, STAGE_NORMALIZING))
+        # A run that may still be alive is left alone.
+        self.assertEqual((await self.service.process("college_a", job["job_id"]))["status"], JOB_PROCESSING)
+        # Once it is known to be gone, the approved mapping is applied: nobody is asked for it again.
+        self._age(job)
+        job = await self.service.process("college_a", job["job_id"])
+        self.assertEqual(job["status"], JOB_IMPORTED, job.get("error"))
+        self.assertEqual(job["report"]["import"]["inserted"], 1)
+        self.assertEqual(self.store.list_review_items("college_a", job_id=job["job_id"], status="pending"), [])
+        self.assertEqual(self.store.get_record("college_a", "student", "1ms23mba001")["program"], "MBA")
+        self.assertEqual(self.store.find_mapping_profile("college_a", "student", header_signature(["Name", "ID", "Contact", "Prog", "Semester", "Remarks"]))["mapping"]["Prog"], "program")
+
+    async def test_an_import_interrupted_part_way_is_committed_again_for_whoever_asked(self):
+        from unittest import mock
+
+        job = await self._upload("students.csv", STUDENTS, options={"auto_commit": False})
+        self.assertEqual(job["status"], JOB_READY)
+        with mock.patch.object(type(self.store), "upsert_records", side_effect=_WorkerDied), self.assertRaises(_WorkerDied):
+            self.service.commit("college_a", job["job_id"], committed_by="reviewer-2")
+        interrupted = self.store.get_job("college_a", job["job_id"])
+        self.assertEqual((interrupted["status"], interrupted["stage"]), (JOB_PROCESSING, STAGE_IMPORTING))
+        self._age(job)
+        job = await self.service.process("college_a", job["job_id"])
+        self.assertEqual(job["status"], JOB_IMPORTED, job.get("error"))
+        self.assertEqual((job["report"]["import"]["inserted"], job["report"]["import"]["committed_by"]), (2, "reviewer-2"))
 
     async def test_conflicting_copies_import_the_copy_the_reviewer_chose(self):
         rows = b"Name,USN,Program,Semester,Phone\nNeha Shah,{usn},BCA,1,9811111111\nNeha Shah,{usn},BCA,2,9811111112\n"

@@ -318,6 +318,8 @@
       const data = await api('/v1/ingestion/jobs?limit=25');
       state.jobs = new Map(data.jobs.map((job) => [job.job_id, job]));
       renderJobs(data.jobs);
+      // The result box shows the same state as its row, not an older poll.
+      if (state.jobs.has(state.shownJob)) showJobResult(state.jobs.get(state.shownJob));
     } catch (error) {
       $('jobs-table').innerHTML = `<p class="muted">${escapeHtml(error.message)}</p>`;
     }

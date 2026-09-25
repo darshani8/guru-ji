@@ -145,10 +145,14 @@ class IngestionService:
         """Run the pipeline for a queued job.
 
         A job still ``processing`` whose heartbeat is stale was interrupted (a
-        worker restart); it is restarted from the beginning, discarding
-        whatever the interrupted run left behind. One whose heartbeat is fresh
-        belongs to a run that is still alive and is returned unchanged unless
-        ``force`` is set.
+        worker restart). If it had reached a step that is recorded before it
+        runs (normalising under the mapping a reviewer approved, or
+        importing), that step runs again, so nobody is asked for a decision
+        twice; anything else is restarted from the beginning, discarding
+        whatever the interrupted run left behind. A job whose heartbeat is
+        fresh belongs to a run that is still alive and is returned unchanged
+        unless ``force`` is set (as it is for a step the API hands to the job
+        queue).
         """
 
         job = self._job(institution_id, job_id)
@@ -162,6 +166,9 @@ class IngestionService:
         if job["status"] == JOB_PROCESSING:
             if not force and not self._heartbeat_stale(job):
                 return job
+            resumed = self._resume(institution_id, job)
+            if resumed is not None:
+                return resumed
             job = self._reset_interrupted(institution_id, job)
         try:
             self.store.update_job(institution_id, job_id, status=JOB_PROCESSING, stage=STAGE_PARSING, error=None)
@@ -196,6 +203,36 @@ class IngestionService:
 
         self.store.update_job(institution_id, job_id)
 
+    def record_unscheduled(self, institution_id: str, job_id: str, error: str) -> dict[str, Any]:
+        """The job queue refused the job's next step: record why, so an import can be committed again and anything else retried."""
+
+        job = self._job(institution_id, job_id)
+        if job.get("stage") == STAGE_IMPORTING:
+            return self.store.update_job(institution_id, job_id, status=JOB_READY, stage=STAGE_READY, error=error[:500])
+        return self.store.update_job(institution_id, job_id, status=JOB_FAILED, error=error[:500])
+
+    def _resume(self, institution_id: str, job: dict[str, Any]) -> dict[str, Any] | None:
+        """Carry on with the step a ``processing`` job recorded before it ran; ``None`` when it recorded none.
+
+        Rows an interrupted import already brought in come back as unchanged.
+        """
+
+        job_id = job["job_id"]
+        try:
+            if job.get("stage") == STAGE_IMPORTING:
+                return self.run_commit(institution_id, job_id)
+            if job.get("stage") == STAGE_NORMALIZING and (job.get("mapping") or {}).get("approved_mapping"):
+                return self.run_approved_mapping(institution_id, job_id)
+        except ProcessingError:
+            # The step recorded the failure on the job.
+            return self._job(institution_id, job_id)
+        return None
+
+    def _close_pending_reviews(self, institution_id: str, job_id: str, *, note: str) -> None:
+        for item in self._review_items(institution_id, job_id):
+            if item["status"] == "pending":
+                self.store.resolve_review_item(institution_id, item["review_id"], status="rejected", resolved_by="system", resolution={"note": note})
+
     def _reset_interrupted(self, institution_id: str, job: dict[str, Any]) -> dict[str, Any]:
         """Discard the partial state of an interrupted run before it is restarted.
 
@@ -207,9 +244,7 @@ class IngestionService:
         """
 
         job_id = job["job_id"]
-        for item in self._review_items(institution_id, job_id):
-            if item["status"] == "pending":
-                self.store.resolve_review_item(institution_id, item["review_id"], status="rejected", resolved_by="system", resolution={"note": "superseded: the job was restarted after an interruption"})
+        self._close_pending_reviews(institution_id, job_id, note="superseded: the job was restarted after an interruption")
         if job.get("file_id"):
             self.store.replace_job_records(institution_id, job_id, [])
         report = dict(job.get("report") or {})
@@ -313,7 +348,22 @@ class IngestionService:
         return self._normalize(institution_id, job, proposal.mapped())
 
     async def apply_mapping(self, institution_id: str, job_id: str, *, mapping: Mapping[str, str | None], entity: str | None, approved_by: str, remember: bool = True) -> dict[str, Any]:
-        """A reviewer confirms or corrects the proposed mapping; the job resumes."""
+        """A reviewer confirms or corrects the proposed mapping; the job resumes.
+
+        The API does this in two steps, so that only the checks run inside the
+        request: ``approve_mapping`` there, ``run_approved_mapping`` on the job queue.
+        """
+
+        self.approve_mapping(institution_id, job_id, mapping=mapping, entity=entity, approved_by=approved_by, remember=remember)
+        return self.run_approved_mapping(institution_id, job_id)
+
+    def approve_mapping(self, institution_id: str, job_id: str, *, mapping: Mapping[str, str | None], entity: str | None, approved_by: str, remember: bool = True) -> dict[str, Any]:
+        """Check a reviewer's mapping and record it; nothing is normalised yet.
+
+        Everything the reviewer can correct is refused here. The job is left
+        ``processing`` at ``normalizing`` with the approved mapping, which is
+        where ``run_approved_mapping`` (or a restart after an interruption) starts.
+        """
 
         job = self._job(institution_id, job_id)
         if job["status"] not in {JOB_NEEDS_REVIEW, JOB_FAILED} or job["stage"] not in {STAGE_MAPPING_REVIEW, STAGE_MAPPING, STAGE_NORMALIZING}:
@@ -347,9 +397,20 @@ class IngestionService:
             if item["kind"] == "mapping":
                 self.store.resolve_review_item(institution_id, item["review_id"], status="approved", resolved_by=approved_by, resolution={"mapping": approved, "entity": entity_name})
         mapping_state = dict(job.get("mapping") or {})
-        mapping_state.update({"entity": entity_name, "approved_mapping": approved, "approved_by": approved_by, "header_signature": signature, "review_required": [], "missing_required": [], "entity_uncertain": False})
-        job = self.store.update_job(institution_id, job_id, status=JOB_PROCESSING, stage=STAGE_NORMALIZING, entity=entity_name, mapping=mapping_state, error=None)
+        mapping_state.update({"entity": entity_name, "approved_mapping": approved, "approved_by": approved_by, "remember": remember, "header_signature": signature, "review_required": [], "missing_required": [], "entity_uncertain": False})
+        return self.store.update_job(institution_id, job_id, status=JOB_PROCESSING, stage=STAGE_NORMALIZING, entity=entity_name, mapping=mapping_state, error=None)
+
+    def run_approved_mapping(self, institution_id: str, job_id: str) -> dict[str, Any]:
+        """Normalise (and with auto-commit import) the rows under the mapping ``approve_mapping`` recorded."""
+
+        job = self._job(institution_id, job_id)
+        state = job.get("mapping") or {}
+        approved = dict(state.get("approved_mapping") or {})
+        entity_name, signature, approved_by = str(job.get("entity")), str(state.get("header_signature")), str(state.get("approved_by"))
+        remember = bool(state.get("remember", True))
         try:
+            # Questions an earlier, interrupted run raised are asked again if they still apply.
+            self._close_pending_reviews(institution_id, job_id, note="superseded: the rows were normalised again")
             job = self._normalize(institution_id, job, approved)
         except CommitError:
             # The rows were fine and only the import failed; commit() already
@@ -357,7 +418,7 @@ class IngestionService:
             if remember:
                 self._remember_mapping(institution_id, job_id, entity=entity_name, signature=signature, mapping=approved, approved_by=approved_by)
             raise
-        except Exception as exc:  # noqa: BLE001 - a job must never stay processing after a route-run stage fails
+        except Exception as exc:  # noqa: BLE001 - a job must never stay processing after a stage fails
             logger.exception("ingestion job %s for institution %s failed while normalizing", job_id, institution_id)
             message = f"normalization failed unexpectedly ({type(exc).__name__}); retry the job or submit the mapping again once the cause is fixed"
             self.store.update_job(institution_id, job_id, status=JOB_FAILED, stage=STAGE_NORMALIZING, error=message)
@@ -473,8 +534,13 @@ class IngestionService:
             return self.commit(institution_id, job["job_id"], committed_by=job["requested_by"])
         return job
 
-    def resolve_review(self, institution_id: str, review_id: str, *, decision: str, resolved_by: str, note: str = "") -> dict[str, Any]:
-        """Resolve a pending duplicate review item; mapping items go through ``apply_mapping``."""
+    def resolve_review(self, institution_id: str, review_id: str, *, decision: str, resolved_by: str, note: str = "", defer_commit: bool = False) -> dict[str, Any]:
+        """Resolve a pending duplicate review item; mapping items go through ``apply_mapping``.
+
+        When the last decision lets an auto-commit job import, the import runs
+        here, or with ``defer_commit`` is only requested (``request_commit``) so
+        the caller can hand it to the job queue.
+        """
 
         pending_item = self.store.get_review_item(institution_id, review_id)
         if pending_item is None or pending_item["status"] != "pending":
@@ -489,11 +555,25 @@ class IngestionService:
         if job["stage"] == STAGE_DUPLICATE_REVIEW and not pending:
             job = self.store.update_job(institution_id, job["job_id"], status=JOB_READY, stage=STAGE_READY)
             if (job.get("options") or {}).get("auto_commit"):
+                if defer_commit:
+                    return self.request_commit(institution_id, job["job_id"], committed_by=resolved_by)
                 return self.commit(institution_id, job["job_id"], committed_by=resolved_by)
         return job
 
     # ------------------------------------------------------------------ commit
     def commit(self, institution_id: str, job_id: str, *, committed_by: str) -> dict[str, Any]:
+        """Import the staged rows; the API runs ``request_commit`` in the request and ``run_commit`` on the job queue."""
+
+        self.request_commit(institution_id, job_id, committed_by=committed_by)
+        return self.run_commit(institution_id, job_id)
+
+    def request_commit(self, institution_id: str, job_id: str, *, committed_by: str) -> dict[str, Any]:
+        """Check that the job can be imported and record who asked; nothing is imported yet.
+
+        The job is left ``processing`` at ``importing``, which is where
+        ``run_commit`` (or a restart after an interruption) starts.
+        """
+
         job = self._job(institution_id, job_id)
         if job["status"] not in {JOB_READY, JOB_NEEDS_REVIEW}:
             raise IngestionError(f"job cannot be committed from status {job['status']}")
@@ -505,10 +585,18 @@ class IngestionService:
         pending_duplicates = sum(1 for item in pending if item["kind"] == "duplicate")
         if pending_duplicates:
             raise IngestionError(f"{pending_duplicates} duplicate review item(s) are still pending; resolve them before committing")
-        entity = CANONICAL_ENTITIES[job["entity"]]
+        report = dict(job.get("report") or {})
+        report["commit"] = {"committed_by": committed_by}
+        return self.store.update_job(institution_id, job_id, status=JOB_PROCESSING, stage=STAGE_IMPORTING, report=report, error=None)
+
+    def run_commit(self, institution_id: str, job_id: str) -> dict[str, Any]:
+        """Import the rows of a job ``request_commit`` recorded; a failure returns the job to ready with the error."""
+
+        job = self._job(institution_id, job_id)
+        committed_by = str(((job.get("report") or {}).get("commit") or {}).get("committed_by") or job["requested_by"])
         try:
+            entity = CANONICAL_ENTITIES[job["entity"]]
             skip_locators = self._locators_to_skip(institution_id, job, entity, self._review_items(institution_id, job_id))
-            self.store.update_job(institution_id, job_id, status=JOB_PROCESSING, stage=STAGE_IMPORTING, error=None)
             return self._import(institution_id, job, entity, skip_locators, committed_by=committed_by)
         except Exception as exc:  # noqa: BLE001 - the job must not stay in importing
             logger.exception("ingestion job %s for institution %s failed while importing", job_id, institution_id)
@@ -651,5 +739,5 @@ class IngestionService:
 
 __all__ = [
     "CommitError", "IngestionError", "IngestionService", "ProcessingError", "JOB_FAILED", "JOB_IMPORTED", "JOB_NEEDS_REVIEW", "JOB_PROCESSING", "JOB_QUEUED", "JOB_READY",
-    "STAGE_DONE", "STAGE_DUPLICATE_REVIEW", "STAGE_MAPPING", "STAGE_MAPPING_REVIEW", "STAGE_NORMALIZING", "STAGE_PARSING", "STAGE_READY",
+    "STAGE_DONE", "STAGE_DUPLICATE_REVIEW", "STAGE_IMPORTING", "STAGE_MAPPING", "STAGE_MAPPING_REVIEW", "STAGE_NORMALIZING", "STAGE_PARSING", "STAGE_READY",
 ]

@@ -116,7 +116,9 @@ class AppSettings:
     # or in Amazon Bedrock (provider "bedrock"). Voice and chat answers use
     # anthropic_effort; the agent planner, which decides the actions, uses
     # anthropic_planner_effort. No key here means the SDK reads ANTHROPIC_API_KEY;
-    # Bedrock signs with AWS credentials instead and needs bedrock_region.
+    # Bedrock signs with AWS credentials instead and needs bedrock_region. On
+    # Bedrock, a model ID that is not Claude (apac.amazon.nova-pro-v1:0) is
+    # served through the Converse API instead, and takes no effort setting.
     anthropic_model_id: str = ANTHROPIC_DEFAULT_MODEL_ID
     anthropic_api_key: str | None = field(default=None, repr=False)
     anthropic_effort: str = "low"

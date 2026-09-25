@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
 
 from fastapi import APIRouter, File, Form, HTTPException, Request, UploadFile
@@ -11,7 +10,7 @@ from starlette.concurrency import run_in_threadpool
 
 from ...domain.principals import Capability
 from ...ingestion.models import ParserError
-from ...ingestion.service import IngestionError, ProcessingError
+from ...ingestion.service import JOB_PROCESSING, STAGE_IMPORTING, IngestionError, ProcessingError
 from ...normalization.canonical import CANONICAL_ENTITIES
 from ..dependencies import platform_from_request
 from ._platform_common import require_principal, resolve_institution, translate
@@ -42,21 +41,33 @@ class SheetImportBody(BaseModel):
 # synchronous and can take seconds; they run in the thread pool so the event
 # loop keeps serving other requests (and the request timeout can still fire).
 # Reads go there too: a running import holds the store, and the console polls
-# a job while it runs.
+# a job while it runs. Normalising and importing every row can outlast any
+# request, so a route only checks and records a step, and the job queue runs it.
 
 
-def _enqueue_processing(platform: Any, target: str, job_id: str, requested_by: str, *, force: bool = False) -> str:
+def _enqueue_processing(platform: Any, target: str, job_id: str, requested_by: str, *, force: bool = False, resume: bool = False) -> str:
     payload: dict[str, Any] = {"institution_id": target, "job_id": job_id, "requested_by": requested_by}
     if force:
         payload["force"] = True
+    if resume:
+        payload["resume"] = True
     try:
         return platform.jobs.enqueue(target, "ingestion.process", payload)
     except RuntimeError as exc:
         # The queue transport refused the job (for example SQS): the ingestion
         # job would otherwise look queued forever, so record the failure and
         # tell the caller which job to retry.
-        platform.store.update_job(target, job_id, status="failed", error=f"processing could not be scheduled: {exc}"[:500])
-        raise HTTPException(status_code=503, detail=f"ingestion job {job_id} was created but could not be scheduled: {exc}; retry it once the job queue is available") from exc
+        platform.ingestion.record_unscheduled(target, job_id, f"processing could not be scheduled: {exc}")
+        raise HTTPException(status_code=503, detail=f"ingestion job {job_id} could not be scheduled: {exc}; retry it once the job queue is available") from exc
+
+
+def _hand_over(platform: Any, target: str, job: dict[str, Any], requested_by: str) -> dict[str, Any]:
+    """Queue the step the service recorded (normalising, importing) and return the job as it now stands."""
+
+    background_job_id = _enqueue_processing(platform, target, job["job_id"], requested_by, resume=True)
+    job = platform.store.get_job(target, job["job_id"]) or job
+    job["background_job_id"] = background_job_id
+    return job
 
 
 def _entity_or_422(entity: str | None) -> str | None:
@@ -173,21 +184,14 @@ async def decide_mapping(job_id: str, body: MappingDecisionBody, request: Reques
     principal = require_principal(request, Capability.DATA_REVIEW)
     target = resolve_institution(principal, institution_id)
     _entity_or_422(body.entity)
-    def apply_mapping() -> dict[str, Any]:
-        # apply_mapping normalises and (with auto-commit) imports every staged row;
-        # it awaits nothing, so it runs to completion on its own loop in the pool.
-        return asyncio.run(platform.ingestion.apply_mapping(target, job_id, mapping=body.mapping, entity=body.entity, approved_by=principal.principal_id, remember=body.remember))
-
     try:
-        job = await run_in_threadpool(apply_mapping)
-    except ProcessingError as exc:
-        # A server-side failure (database, storage): the job state was recorded and the step can be retried.
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        # Only the checks run here; the rows are normalised (and with auto-commit imported) on the job queue.
+        job = await run_in_threadpool(platform.ingestion.approve_mapping, target, job_id, mapping=body.mapping, entity=body.entity, approved_by=principal.principal_id, remember=body.remember)
     except (IngestionError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except KeyError as exc:
         raise translate(exc) from exc
-    return {"job": _public_job(job)}
+    return {"job": _public_job(await run_in_threadpool(_hand_over, platform, target, job, principal.principal_id))}
 
 
 @router.post("/jobs/{job_id}/commit", summary="Import the staged rows into the canonical database")
@@ -196,15 +200,13 @@ async def commit_job(job_id: str, request: Request, institution_id: str | None =
     principal = require_principal(request, Capability.DATA_REVIEW)
     target = resolve_institution(principal, institution_id)
     try:
-        job = await run_in_threadpool(platform.ingestion.commit, target, job_id, committed_by=principal.principal_id)
-    except ProcessingError as exc:
-        # A server-side failure (database, storage): the job state was recorded and the step can be retried.
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        # Only the checks run here; the import itself runs on the job queue.
+        job = await run_in_threadpool(platform.ingestion.request_commit, target, job_id, committed_by=principal.principal_id)
     except (IngestionError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except KeyError as exc:
         raise translate(exc) from exc
-    return {"job": _public_job(job)}
+    return {"job": _public_job(await run_in_threadpool(_hand_over, platform, target, job, principal.principal_id))}
 
 
 @router.post("/jobs/{job_id}/retry", summary="Re-run a failed or interrupted ingestion job", status_code=202)
@@ -248,15 +250,14 @@ async def resolve_review(review_id: str, body: ReviewDecisionBody, request: Requ
     principal = require_principal(request, Capability.DATA_REVIEW)
     target = resolve_institution(principal, institution_id)
     try:
-        # Resolving the last duplicate may auto-commit the whole import: keep it off the event loop.
-        job = await run_in_threadpool(platform.ingestion.resolve_review, target, review_id, decision=body.decision, resolved_by=principal.principal_id, note=body.note)
-    except ProcessingError as exc:
-        # A server-side failure (database, storage): the job state was recorded and the step can be retried.
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        # Resolving the last duplicate may start the auto-commit: it is only requested here.
+        job = await run_in_threadpool(platform.ingestion.resolve_review, target, review_id, decision=body.decision, resolved_by=principal.principal_id, note=body.note, defer_commit=True)
     except (IngestionError, ValueError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except KeyError as exc:
         raise translate(exc) from exc
+    if (job["status"], job["stage"]) == (JOB_PROCESSING, STAGE_IMPORTING):
+        job = await run_in_threadpool(_hand_over, platform, target, job, principal.principal_id)
     return {"job": _public_job(job)}
 
 

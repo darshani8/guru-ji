@@ -26,6 +26,7 @@ from ..policy.cerbos import CerbosPolicyDecisionPoint
 from ..policy.pdp import LocalPolicyDecisionPoint, PolicyDecisionPoint
 from ..policy.query_limits import QueryLimits
 from ..providers.anthropic import LATENCY_SENSITIVE_SYSTEM, AnthropicProvider
+from ..providers.bedrock_converse import BedrockConverseModel, is_claude_model
 from ..providers.litellm import LiteLLMProvider
 from ..providers.ollama import OllamaProvider
 from ..tools.college_tools import build_college_tools
@@ -129,16 +130,26 @@ def _build_model(settings: AppSettings):
     return None
 
 
+# Providers whose model is named by SAFFRON_ANTHROPIC_MODEL_ID: Claude, or on
+# Bedrock any other model there (such as Amazon Nova) through the Converse API.
 _CLAUDE_PROVIDERS = frozenset({"anthropic", "bedrock"})
 
 
-def _claude(settings: AppSettings, *, effort: str, system: str | None = None) -> AnthropicProvider:
+def _claude(settings: AppSettings, *, effort: str, system: str | None = None, model_id: str | None = None,
+            timeout_seconds: float | None = None) -> AnthropicProvider | BedrockConverseModel:
+    """Claude for the configured model ID, or the Converse adapter when it names a non-Claude Bedrock model."""
+
+    model_id = model_id or settings.anthropic_model_id
+    timeout_seconds = timeout_seconds or settings.model_timeout_seconds
+    if settings.model_provider == "bedrock" and not is_claude_model(model_id):
+        # Effort and the latency instruction are Claude's thinking controls; Nova has neither.
+        return BedrockConverseModel(model_id=model_id, timeout_seconds=timeout_seconds, aws_region=settings.bedrock_region)
     return AnthropicProvider(
-        model_id=settings.anthropic_model_id,
+        model_id=model_id,
         api_key=settings.anthropic_api_key,
         effort=effort,
         system=system,
-        timeout_seconds=settings.model_timeout_seconds,
+        timeout_seconds=timeout_seconds,
         platform=settings.model_provider,
         aws_region=settings.bedrock_region,
     )
@@ -150,16 +161,10 @@ def _build_conversation_model(settings: AppSettings, model):
     if not settings.conversation_enabled:
         return None
     if settings.model_provider in _CLAUDE_PROVIDERS:
-        provider = _claude(settings, effort=settings.anthropic_effort, system=LATENCY_SENSITIVE_SYSTEM)
-        if settings.conversation_model_id:
-            provider = AnthropicProvider(
-                model_id=settings.conversation_model_id, api_key=settings.anthropic_api_key, effort=settings.anthropic_effort,
-                system=LATENCY_SENSITIVE_SYSTEM, timeout_seconds=settings.conversation_stream_seconds, platform=settings.model_provider,
-                aws_region=settings.bedrock_region,
-            )
-        else:
-            provider.timeout_seconds = settings.conversation_stream_seconds
-        return provider
+        return _claude(
+            settings, effort=settings.anthropic_effort, system=LATENCY_SENSITIVE_SYSTEM,
+            model_id=settings.conversation_model_id or None, timeout_seconds=settings.conversation_stream_seconds,
+        )
     return model
 
 
@@ -207,6 +212,10 @@ def _build_open_task_model(settings: AppSettings) -> AnthropicProvider | None:
     """Claude for the open-task agent: its own model, effort and a per-turn timeout sized for long work."""
 
     if not settings.open_task_enabled or settings.model_provider not in _CLAUDE_PROVIDERS:
+        return None
+    if not is_claude_model(settings.open_task_model_id):
+        # The agent's tool-use loop speaks the Claude Messages API only.
+        logging.getLogger(__name__).warning("open-task agent disabled: SAFFRON_OPEN_TASK_MODEL_ID %s is not a Claude model", settings.open_task_model_id)
         return None
     return AnthropicProvider(
         model_id=settings.open_task_model_id, api_key=settings.anthropic_api_key, effort=settings.open_task_effort,

@@ -8,6 +8,7 @@ row-level security is considered. No method accepts SQL from a caller.
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
@@ -17,13 +18,18 @@ from uuid import uuid4
 from ..normalization.canonical import CANONICAL_ENTITIES, CanonicalEntity, CanonicalField, FieldType, entity as canonical_entity
 from ..persistence.sql_backend import SqlBackend, open_backend
 from .models import CanonicalRecord, ImportSummary
-from ..persistence.schema_tools import add_missing_columns, apply_schema, begin_migration, existing_policies, row_level_security_state, tenant_isolation_statements
+from ..persistence.schema_tools import add_missing_columns, apply_schema, begin_migration, bound_lock_waits, existing_policies, row_level_security_state, tenant_isolation_statements
 from .schema import ADDED_COLUMNS, SCHEMA_VERSION, TENANT_TABLES, portable_statements, postgres_numeric_columns
+
+logger = logging.getLogger(__name__)
 
 MAX_QUERY_ROWS = 5_000
 # Rows written per transaction by bulk imports; the backend lock is released
 # between chunks so request handlers are never blocked for a whole import.
 WRITE_CHUNK_ROWS = 500
+# A bulk write of at least this many rows is followed by ANALYZE on PostgreSQL
+# (see ``_analyze_after_bulk_write``); smaller ones are left to autovacuum.
+ANALYZE_AFTER_ROWS = 1_000
 _SAFE_IDENTIFIER = re.compile(r"^[a-z_][a-z0-9_]{0,62}$")
 
 
@@ -150,6 +156,31 @@ class InstitutionDataStore:
             raise ValueError("institution_id is required")
         return self.backend.transaction(tenant_id=institution_id)
 
+    def _analyze_after_bulk_write(self, table: str, rows_written: int) -> None:
+        """Refresh PostgreSQL's statistics for ``table`` after a large write.
+
+        A table filled by a bulk import has no statistics until autovacuum
+        gets to it, and the key lookup plan PostgreSQL cached on the
+        connection while the table was still empty stays in use: it reads
+        every row of the institution and checks each against the 500 keys of
+        a chunk. A corrected re-upload's duplicate check after a 50,000-row
+        import took over a minute that way instead of about a second. ANALYZE
+        gives the planner the statistics and makes it plan the lookup again.
+
+        It runs after the write has committed and is best effort: a role that
+        does not own the table, or a lock held elsewhere, only leaves the work
+        to autovacuum. SQLite keeps no such statistics to go stale.
+        """
+
+        if self.backend.dialect != "postgresql" or rows_written < ANALYZE_AFTER_ROWS:
+            return
+        try:
+            with self.backend.transaction():
+                bound_lock_waits(self.backend)
+                self.backend.execute(f"ANALYZE {_column(table)}")
+        except Exception:  # noqa: BLE001 - the rows are already saved; only the statistics are late
+            logger.warning("could not analyse %s after writing %d rows; autovacuum will", table, rows_written, exc_info=True)
+
     # --------------------------------------------------------------- institutions
     def upsert_institution(self, institution_id: str, name: str, *, location: str = "", timezone_name: str = "Asia/Kolkata", settings: Mapping[str, Any] | None = None) -> dict[str, Any]:
         stamp = now_iso()
@@ -270,6 +301,7 @@ class InstitutionDataStore:
         with self._tenant(institution_id):
             for chunk in _chunks(pending, WRITE_CHUNK_ROWS):
                 self.backend.executemany(sql, [values for _, _, values in chunk])
+        self._analyze_after_bulk_write(entity.table, len(pending))
         for key, previous, _ in pending:
             if previous is None:
                 summary.inserted += 1
@@ -286,16 +318,19 @@ class InstitutionDataStore:
         found: dict[str, dict[str, Any]] = {}
         if not keys:
             return found
-        with self._tenant(institution_id):
-            for offset in range(0, len(keys), 500):
-                chunk = list(keys[offset:offset + 500])
-                placeholders = ",".join("?" for _ in chunk)
+        # One transaction per chunk, like the lookup in upsert_records: the
+        # backend lock is released between chunks, so a large lookup never
+        # blocks other store calls from start to finish.
+        for offset in range(0, len(keys), 500):
+            chunk = list(keys[offset:offset + 500])
+            placeholders = ",".join("?" for _ in chunk)
+            with self._tenant(institution_id):
                 rows = self.backend.fetchall(
                     f"SELECT * FROM {entity.table} WHERE institution_id = ? AND record_key IN ({placeholders})",
                     (institution_id, *chunk),
                 )
-                for row in rows:
-                    found[row["record_key"]] = self._row_to_record(entity, row)
+            for row in rows:
+                found[row["record_key"]] = self._row_to_record(entity, row)
         return found
 
     def lookup_person_matches(self, institution_id: str, entity_name: str, *, names: Sequence[str] = (), phones: Sequence[str] = (), emails: Sequence[str] = (), limit: int = 2000) -> dict[str, dict[str, Any]]:
@@ -677,6 +712,7 @@ class InstitutionDataStore:
                     "INSERT INTO ingestion_records(record_id, job_id, institution_id, row_number, locator, raw_json, normalized_json, status, action, record_key, issues_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     chunk,
                 )
+        self._analyze_after_bulk_write("ingestion_records", count)
         return count
 
     def job_records(self, institution_id: str, job_id: str, *, limit: int = 1000, offset: int = 0, status: str | None = None) -> list[dict[str, Any]]:
@@ -1135,4 +1171,4 @@ class InstitutionDataStore:
         return rows
 
 
-__all__ = ["InstitutionDataStore", "MAX_QUERY_ROWS", "WRITE_CHUNK_ROWS", "now_iso"]
+__all__ = ["ANALYZE_AFTER_ROWS", "InstitutionDataStore", "MAX_QUERY_ROWS", "WRITE_CHUNK_ROWS", "now_iso"]
