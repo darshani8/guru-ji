@@ -1529,13 +1529,6 @@ function closeSidebar() {
   writeSetting('saffron.sidebar', 'collapsed');
 }
 
-function greeting() {
-  const hour = new Date().getHours();
-  const part = hour < 12 ? 'Good morning' : hour < 17 ? 'Good afternoon' : 'Good evening';
-  const name = window.SaffronAuth.displayName().split(/\s+/)[0];
-  return name ? `${part}, ${name}` : part;
-}
-
 function renderSuggestions() {
   $('suggestions').replaceChildren(...SUGGESTIONS.map((suggestion) => {
     const button = el('button', 'suggestion');
@@ -2564,7 +2557,6 @@ function showApp() {
   const name = auth.displayName() || auth.currentUser() || 'Signed in';
   $('account-name').textContent = auth.mode() === 'demo' ? 'Local development' : name;
   $('account-avatar').textContent = (auth.mode() === 'demo' ? 'D' : name.trim().charAt(0) || '·').toUpperCase();
-  $('welcome-title').textContent = greeting();
 }
 
 $('sign-in').addEventListener('click', () => {
