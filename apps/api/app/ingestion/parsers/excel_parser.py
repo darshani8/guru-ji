@@ -272,8 +272,13 @@ def _openpyxl_value(cell: Any) -> Any:
     value = cell.value
     if isinstance(value, (datetime, date)):
         return value.isoformat()
-    if isinstance(value, (int, float)) and not isinstance(value, bool) and _is_percent_format(cell.number_format or ""):
-        return _percent_value(value)
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        try:
+            number_format = cell.number_format or ""
+        except (IndexError, KeyError):  # a style or custom format the workbook never defines
+            number_format = ""
+        if _is_percent_format(number_format):
+            return _percent_value(value)
     return value
 
 

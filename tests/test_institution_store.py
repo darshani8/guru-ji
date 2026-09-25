@@ -533,7 +533,7 @@ class _PostgresDialectSqliteBackend(SqliteBackend):
     """Real SQLite rows behind a dialect the test switches to PostgreSQL after the store has migrated.
 
     Records writes, commits and tenant pins; the statements only PostgreSQL
-    understands (the lock timeout and ANALYZE) are recorded instead of run.
+    understands (SET LOCAL settings and ANALYZE) are recorded instead of run.
     """
 
     def __init__(self):
@@ -562,6 +562,9 @@ class _PostgresDialectSqliteBackend(SqliteBackend):
         self.tenants.append(tenant_id)
 
 
+CUSTOM_PLANS = "SET LOCAL plan_cache_mode = force_custom_plan"
+
+
 class PostgresStatisticsAfterBulkWriteTests(unittest.TestCase):
     def setUp(self):
         self.backend = _PostgresDialectSqliteBackend()
@@ -575,10 +578,12 @@ class PostgresStatisticsAfterBulkWriteTests(unittest.TestCase):
     def test_a_large_import_is_analysed_after_it_commits(self):
         summary = self.store.upsert_records("college_a", _students(ANALYZE_AFTER_ROWS))
         self.assertEqual(summary.inserted, ANALYZE_AFTER_ROWS)
-        self.assertEqual(self._analyzed(), ["ANALYZE students"])
+        # SKIP_LOCKED: a VACUUM or another ANALYZE holding the table makes it
+        # return at once instead of holding the backend lock while it waits.
+        self.assertEqual(self._analyzed(), ["ANALYZE (SKIP_LOCKED) students"])
         # The import's write transaction commits first; ANALYZE then runs in
         # its own transaction under a lock timeout, so it never holds the write open.
-        self.assertEqual(self.backend.events[-5:], ["write", "commit", "SET LOCAL lock_timeout = '15s'", "ANALYZE students", "commit"])
+        self.assertEqual(self.backend.events[-5:], ["write", "commit", "SET LOCAL lock_timeout = '15s'", "ANALYZE (SKIP_LOCKED) students", "commit"])
         self.assertFalse(self.backend.in_transaction)
 
     def test_small_or_unchanged_imports_are_left_to_autovacuum(self):
@@ -596,10 +601,10 @@ class PostgresStatisticsAfterBulkWriteTests(unittest.TestCase):
         self.store.replace_job_records("college_a", "job-small", staged[:10])
         self.assertEqual(self._analyzed(), [])
         self.assertEqual(self.store.replace_job_records("college_a", "job-1", iter(staged)), len(staged))
-        self.assertEqual(self._analyzed(), ["ANALYZE ingestion_records"])
+        self.assertEqual(self._analyzed(), ["ANALYZE (SKIP_LOCKED) ingestion_records"])
 
     def test_a_failed_analyze_does_not_fail_the_import(self):
-        self.backend.analyze_error = RuntimeError("must be owner of table students")
+        self.backend.analyze_error = RuntimeError("server closed the connection unexpectedly")
         with self.assertLogs("app.institution_data.store", level="WARNING") as logs:
             summary = self.store.upsert_records("college_a", _students(ANALYZE_AFTER_ROWS))
         self.assertEqual(summary.inserted, ANALYZE_AFTER_ROWS)
@@ -622,8 +627,25 @@ class PostgresStatisticsAfterBulkWriteTests(unittest.TestCase):
         found = self.store.existing_keys("college_a", "student", [record.record_key for record in records])
         self.assertEqual(len(found), total)
         # The backend lock is released between chunks instead of being held for the whole lookup.
-        self.assertEqual(self.backend.events, ["commit"] * 3)
+        self.assertEqual(self.backend.events, [CUSTOM_PLANS, "commit"] * 3)
         self.assertEqual(self.backend.tenants, ["college_a"] * 3)
+
+    def test_every_key_lookup_is_planned_for_the_rows_the_table_holds_now(self):
+        # A generic plan cached while the table was empty would read every row
+        # per chunk after a large import; ANALYZE cannot fix that for a role
+        # that does not own the table, so each lookup asks for its own plan.
+        total = WRITE_CHUNK_ROWS + 3
+        records = _students(total)
+        self.store.upsert_records("college_a", records)
+        lookups = self.backend.events[:self.backend.events.index("write")]
+        self.assertEqual(lookups, [CUSTOM_PLANS, "commit"] * 2)
+        self.backend.events.clear()
+        self.store.existing_keys("college_a", "student", [record.record_key for record in records])
+        self.assertEqual(self.backend.events, [CUSTOM_PLANS, "commit"] * 2)
+        self.backend.dialect = "sqlite"
+        self.backend.events.clear()
+        self.store.existing_keys("college_a", "student", [record.record_key for record in records])
+        self.assertNotIn(CUSTOM_PLANS, self.backend.events)
 
 
 if __name__ == "__main__":

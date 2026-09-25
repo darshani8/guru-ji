@@ -155,6 +155,18 @@ class ParserTests(unittest.TestCase):
         self.assertEqual([row["Joined"] for row in rows], ["2023-03-15"] * 3)
         self.assertIs(type(rows[2]["Custom"]), int, "1% stays the whole number 1; a float 1.0 would be read later as the fraction 100%")
 
+    def test_a_number_format_the_workbook_never_defines_reads_the_value_as_stored(self):
+        # openpyxl's read-only cells look the format up by index; a style or
+        # custom format id missing from the workbook raises IndexError there.
+        class BrokenStyleCell:
+            value = 0.85
+
+            @property
+            def number_format(self):
+                raise IndexError("list index out of range")
+
+        self.assertEqual(excel_parser._openpyxl_value(BrokenStyleCell()), 0.85)
+
     @unittest.skipUnless(OPENPYXL_AVAILABLE, "openpyxl is not installed")
     def test_openpyxl_reads_percent_formatted_cells_as_the_percentage_shown(self):
         from datetime import date
