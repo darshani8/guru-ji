@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 
 import hashlib
 import logging
+from collections import Counter
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -57,6 +58,40 @@ class ProcessingError(IngestionError):
 
 class CommitError(ProcessingError):
     """The import step failed; the job was returned to ``ready`` with the error recorded."""
+
+
+# Paging for a job's review items: a large roster can raise thousands of them.
+REVIEW_PAGE_SIZE = 2000
+
+
+def _skip_reason(row: Mapping[str, Any]) -> str:
+    """Why a staged row is not imported, named like the store's own skip reasons."""
+
+    if row["status"] == "rejected":
+        return "blocking_issues"
+    if row.get("action") == "missing_key":
+        return "missing_natural_key"
+    return str(row.get("action") or row["status"])
+
+
+def _nothing_importable(rows: Sequence[Mapping[str, Any]]) -> str:
+    """Why no staged row can be imported, in words the uploader can act on."""
+
+    rejected = [row for row in rows if row["status"] == "rejected"]
+    errors: Counter[str] = Counter(
+        f"{issue.get('field')} {issue.get('code')}" for row in rejected for issue in row.get("issues", []) if issue.get("severity") == "error"
+    )
+    no_key = sum(1 for row in rows if row["status"] != "rejected" and row.get("action") == "missing_key")
+    reasons = []
+    if rejected:
+        detail = ", ".join(f"{name} ({count})" for name, count in errors.most_common(3))
+        reasons.append(f"{len(rejected)} have errors" + (f": {detail}" if detail else ""))
+    if no_key:
+        reasons.append(f"{no_key} have no identifier")
+    return (
+        f"none of the {len(rows)} rows can be imported ({'; '.join(reasons) or 'no row is eligible'}); "
+        "check the column mapping and the file, then retry the job to map it again"
+    )[:500]
 
 
 @dataclass(slots=True)
@@ -119,6 +154,11 @@ class IngestionService:
         job = self._job(institution_id, job_id)
         if job["status"] not in {JOB_QUEUED, JOB_FAILED, JOB_PROCESSING}:
             return job
+        # A job that failed after its mapping was chosen (no row importable, or
+        # normalising broke) goes back to a person: the same mapping, remembered
+        # or automatic, would only fail the same way again.
+        remap = job["status"] == JOB_FAILED and job.get("stage") == STAGE_NORMALIZING
+        previous_error = job.get("error") if remap else None
         if job["status"] == JOB_PROCESSING:
             if not force and not self._heartbeat_stale(job):
                 return job
@@ -131,7 +171,7 @@ class IngestionService:
             records = self.store.job_records(institution_id, job_id, limit=self.max_rows)
             if not records:
                 raise IngestionError("no tabular rows were found; upload the file through the documents API if it is a policy or circular")
-            return await self._map(institution_id, job, records)
+            return await self._map(institution_id, job, records, force_review=remap, previous_error=previous_error)
         except CommitError:
             # commit() already recorded the error and returned the job to ready.
             return self._job(institution_id, job_id)
@@ -167,8 +207,9 @@ class IngestionService:
         """
 
         job_id = job["job_id"]
-        for item in self.store.list_review_items(institution_id, job_id=job_id, status="pending"):
-            self.store.resolve_review_item(institution_id, item["review_id"], status="rejected", resolved_by="system", resolution={"note": "superseded: the job was restarted after an interruption"})
+        for item in self._review_items(institution_id, job_id):
+            if item["status"] == "pending":
+                self.store.resolve_review_item(institution_id, item["review_id"], status="rejected", resolved_by="system", resolution={"note": "superseded: the job was restarted after an interruption"})
         if job.get("file_id"):
             self.store.replace_job_records(institution_id, job_id, [])
         report = dict(job.get("report") or {})
@@ -225,36 +266,46 @@ class IngestionService:
         return self.store.update_job(institution_id, job["job_id"], row_count=len(rows), sheet_name=table.name, report=report, stage=STAGE_MAPPING)
 
     # ----------------------------------------------------------------- mapping
-    async def _map(self, institution_id: str, job: dict[str, Any], records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    async def _map(self, institution_id: str, job: dict[str, Any], records: Sequence[Mapping[str, Any]], *, force_review: bool = False, previous_error: str | None = None) -> dict[str, Any]:
         headers = list(job.get("report", {}).get("selected_table", {}).get("headers") or list(records[0]["raw"].keys()))
         samples = {header: [row["raw"].get(header) for row in records[:50]] for header in headers}
         entity_hint = job.get("entity") or None
-        detected_entity: str | None = entity_hint
-        if detected_entity is None:
-            detected_entity, _, _ = self.mapping.detect_entity(headers, samples)
         signature = header_signature(headers)
-        profile = self.store.find_mapping_profile(institution_id, detected_entity, signature)
-        proposal = await self.mapping.propose(headers, samples, entity_hint=entity_hint or detected_entity, saved_profile=profile["mapping"] if profile else None)
+        if force_review:
+            profile = None
+        elif entity_hint:
+            profile = self.store.find_mapping_profile(institution_id, entity_hint, signature)
+        else:
+            # A reviewer's earlier decision for these headers wins over detection,
+            # including one that corrected the detected entity.
+            profile = self.store.find_latest_mapping_profile(institution_id, signature)
+        # Only the uploader's choice is passed as a hint: a detected entity keeps
+        # its real confidence and alternatives, so a doubtful guess is reviewed.
+        proposal = await self.mapping.propose(headers, samples, entity_hint=entity_hint or (profile["entity"] if profile else None), saved_profile=profile["mapping"] if profile else None)
         profile_incomplete = bool(profile) and bool(proposal.missing_required())
         if profile_incomplete:
             # The remembered profile no longer covers the entity's required fields:
             # propose afresh and let a human decide rather than importing nothing.
-            proposal = await self.mapping.propose(headers, samples, entity_hint=entity_hint or detected_entity)
+            proposal = await self.mapping.propose(headers, samples, entity_hint=entity_hint)
         mapping_state = proposal.as_dict()
         mapping_state["header_signature"] = signature
         mapping_state["profile_incomplete"] = profile_incomplete
-        needs_review = bool(proposal.review_required() or proposal.missing_required())
+        entity_uncertain = not entity_hint and not proposal.profile_applied and proposal.entity_confidence < self.mapping.threshold
+        mapping_state["entity_uncertain"] = entity_uncertain
+        needs_review = bool(force_review or proposal.review_required() or proposal.missing_required() or entity_uncertain)
         if needs_review:
             review_payload = {
                 "entity": proposal.entity,
                 "entity_confidence": mapping_state["entity_confidence"],
                 "entity_alternatives": mapping_state["entity_alternatives"],
+                "entity_uncertain": entity_uncertain,
                 "review_required": [item.as_dict() for item in proposal.review_required()],
                 "missing_required": list(proposal.missing_required()),
                 "unmapped": list(proposal.unmapped()),
                 "proposed_mapping": {item.source_header: item.canonical_field for item in proposal.mappings},
                 "headers": headers,
                 "samples": {header: [str(value)[:60] for value in values[:3] if value not in (None, "")] for header, values in samples.items()},
+                "previous_error": previous_error,
             }
             self.store.add_review_items(institution_id, job["job_id"], [{"kind": "mapping", "payload": review_payload}])
             return self.store.update_job(institution_id, job["job_id"], status=JOB_NEEDS_REVIEW, stage=STAGE_MAPPING_REVIEW, entity=proposal.entity, mapping=mapping_state)
@@ -281,8 +332,9 @@ class IngestionService:
                 raise IngestionError(f"{target} is not a field of {entity_name}")
             if headers and header not in headers:
                 raise IngestionError(f"unknown header: {header}")
-            if target in approved.values():
-                raise IngestionError(f"two headers were mapped to {target}")
+            holder = next((name for name, chosen in approved.items() if chosen == target), None)
+            if holder is not None:
+                raise IngestionError(f"two headers were mapped to {target} ({holder!r} and {header!r}); keep {target} on one of them and leave the other unmapped")
             approved[header] = str(target)
         mapped_fields = set(approved.values())
         if "name" in valid and {"first_name", "last_name"} & mapped_fields:
@@ -291,23 +343,44 @@ class IngestionService:
         if missing:
             raise IngestionError(f"required fields are not mapped: {', '.join(missing)}")
         signature = job.get("mapping", {}).get("header_signature") or header_signature(headers)
-        if remember:
-            self.store.save_mapping_profile(institution_id, entity=entity_name, header_signature=signature, mapping=approved, approved_by=approved_by)
         for item in self.store.list_review_items(institution_id, job_id=job_id, status="pending"):
             if item["kind"] == "mapping":
                 self.store.resolve_review_item(institution_id, item["review_id"], status="approved", resolved_by=approved_by, resolution={"mapping": approved, "entity": entity_name})
         mapping_state = dict(job.get("mapping") or {})
-        mapping_state.update({"entity": entity_name, "approved_mapping": approved, "approved_by": approved_by, "header_signature": signature, "review_required": [], "missing_required": []})
+        mapping_state.update({"entity": entity_name, "approved_mapping": approved, "approved_by": approved_by, "header_signature": signature, "review_required": [], "missing_required": [], "entity_uncertain": False})
         job = self.store.update_job(institution_id, job_id, status=JOB_PROCESSING, stage=STAGE_NORMALIZING, entity=entity_name, mapping=mapping_state, error=None)
         try:
-            return self._normalize(institution_id, job, approved)
+            job = self._normalize(institution_id, job, approved)
         except CommitError:
-            raise  # commit() already returned the job to ready with the error
+            # The rows were fine and only the import failed; commit() already
+            # returned the job to ready with the error.
+            if remember:
+                self._remember_mapping(institution_id, job_id, entity=entity_name, signature=signature, mapping=approved, approved_by=approved_by)
+            raise
         except Exception as exc:  # noqa: BLE001 - a job must never stay processing after a route-run stage fails
             logger.exception("ingestion job %s for institution %s failed while normalizing", job_id, institution_id)
-            message = f"normalization failed unexpectedly ({type(exc).__name__}); submit the mapping again once the cause is fixed"
+            message = f"normalization failed unexpectedly ({type(exc).__name__}); retry the job or submit the mapping again once the cause is fixed"
             self.store.update_job(institution_id, job_id, status=JOB_FAILED, stage=STAGE_NORMALIZING, error=message)
             raise ProcessingError(message) from exc
+        if remember:
+            self._remember_mapping(institution_id, job_id, entity=entity_name, signature=signature, mapping=approved, approved_by=approved_by)
+        return job
+
+    def _remember_mapping(self, institution_id: str, job_id: str, *, entity: str, signature: str, mapping: Mapping[str, str], approved_by: str) -> None:
+        """Keep an approved mapping for the next upload of these headers once it produced importable rows.
+
+        A mapping under which no row could be imported is not remembered: it
+        would skip review on every re-upload and import nothing again. Saving
+        is best effort, since the job itself has already moved on.
+        """
+
+        normalization = (self._job(institution_id, job_id).get("report") or {}).get("normalization") or {}
+        if not int(normalization.get("rows_ready") or 0) + int(normalization.get("rows_in_review") or 0):
+            return
+        try:
+            self.store.save_mapping_profile(institution_id, entity=entity, header_signature=signature, mapping=mapping, approved_by=approved_by)
+        except Exception:  # noqa: BLE001 - the import stands; only the remembered mapping is missing
+            logger.exception("could not remember the approved mapping of ingestion job %s for institution %s", job_id, institution_id)
 
     # ---------------------------------------------------------- normalization
     def _normalize(self, institution_id: str, job: dict[str, Any], mapping: Mapping[str, str]) -> dict[str, Any]:
@@ -345,7 +418,12 @@ class IngestionService:
             for key, value in people.items():
                 existing.setdefault(key, value)
         self._heartbeat(institution_id, job["job_id"])
-        candidates, actions, duplicate_warnings = find_duplicates(records, existing)
+        # A row that cannot be imported claims no key and matches no one: the
+        # first importable copy owns the key, and no question asks about a row
+        # that would not be imported whatever the answer.
+        importable = [index for index, record in enumerate(records) if not record.has_blocking_issues()]
+        candidates, found, duplicate_warnings = find_duplicates([records[index] for index in importable], existing)
+        actions = {importable[position]: action for position, action in found.items()}
         self._heartbeat(institution_id, job["job_id"])
         updated_rows: list[dict[str, Any]] = []
         for index, (row, record) in enumerate(prepared):
@@ -361,12 +439,9 @@ class IngestionService:
                 "status": status, "action": action, "record_key": record.record_key, "issues": list(record.issues),
             })
         self.store.replace_job_records(institution_id, job["job_id"], updated_rows)
-        review_items = []
-        for candidate in candidates:
-            if candidate.kind in {"conflicting_key", "probable_person"}:
-                review_items.append({"kind": "duplicate", "payload": candidate.as_dict()})
-        if review_items:
-            self.store.add_review_items(institution_id, job["job_id"], review_items)
+        # Decisions count only for the questions of this run (see _locators_to_skip).
+        run_id = uuid4().hex
+        review_items = [{"kind": "duplicate", "payload": {**candidate.as_dict(), "normalization_run": run_id}} for candidate in candidates if candidate.kind in {"conflicting_key", "probable_person"}]
         issue_summary = summarize_issues([record.issues for record in records])
         actions_summary: dict[str, int] = {}
         for action in actions.values():
@@ -385,8 +460,13 @@ class IngestionService:
             "normalizations_applied": sorted({note.split(":", 1)[1] if ":" in note else note for record in records for note in record.normalizations}),
             "identifier_pattern": pattern,
             "warnings": list(duplicate_warnings),
+            "run_id": run_id,
         }
+        if not any(item["status"] in {"ready", "review"} for item in updated_rows):
+            # Finishing as an empty "imported" job would hide why nothing arrived.
+            return self.store.update_job(institution_id, job["job_id"], status=JOB_FAILED, stage=STAGE_NORMALIZING, report=report, error=_nothing_importable(updated_rows))
         if review_items:
+            self.store.add_review_items(institution_id, job["job_id"], review_items)
             return self.store.update_job(institution_id, job["job_id"], status=JOB_NEEDS_REVIEW, stage=STAGE_DUPLICATE_REVIEW, report=report)
         job = self.store.update_job(institution_id, job["job_id"], status=JOB_READY, stage=STAGE_READY, report=report)
         if (job.get("options") or {}).get("auto_commit"):
@@ -426,10 +506,9 @@ class IngestionService:
         if pending_duplicates:
             raise IngestionError(f"{pending_duplicates} duplicate review item(s) are still pending; resolve them before committing")
         entity = CANONICAL_ENTITIES[job["entity"]]
-        resolved = {item["review_id"]: item for item in self.store.list_review_items(institution_id, job_id=job_id, status=None)}
-        skip_locators = self._locators_to_skip(institution_id, job, entity, resolved.values())
-        self.store.update_job(institution_id, job_id, status=JOB_PROCESSING, stage=STAGE_IMPORTING, error=None)
         try:
+            skip_locators = self._locators_to_skip(institution_id, job, entity, self._review_items(institution_id, job_id))
+            self.store.update_job(institution_id, job_id, status=JOB_PROCESSING, stage=STAGE_IMPORTING, error=None)
             return self._import(institution_id, job, entity, skip_locators, committed_by=committed_by)
         except Exception as exc:  # noqa: BLE001 - the job must not stay in importing
             logger.exception("ingestion job %s for institution %s failed while importing", job_id, institution_id)
@@ -437,65 +516,112 @@ class IngestionService:
             self.store.update_job(institution_id, job_id, status=JOB_READY, stage=STAGE_READY, error=message)
             raise CommitError(message) from exc
 
-    def _locators_to_skip(self, institution_id: str, job: Mapping[str, Any], entity: CanonicalEntity, items: Iterable[Mapping[str, Any]]) -> set[str]:
-        """Rows an approved duplicate decision keeps out of the import.
+    def _review_items(self, institution_id: str, job_id: str) -> list[dict[str, Any]]:
+        """Every review item of a job, decided or not, read page by page."""
 
-        Approving "same person" must drop the row that would create a second
-        identity, never the legitimate update of the record that already
-        exists: for a match against an existing record that is the new row;
-        for a pair inside the batch it is the row whose key is not yet known
-        (or the later row when both are new). Two rows that both update
-        existing records are both imported: they already are separate records
-        and merging them is not an import decision. Conflicting copies of one
-        key keep the first copy.
+        items: list[dict[str, Any]] = []
+        while True:
+            page = self.store.list_review_items(institution_id, job_id=job_id, status=None, limit=REVIEW_PAGE_SIZE, offset=len(items))
+            items.extend(page)
+            if len(page) < REVIEW_PAGE_SIZE:
+                return items
+
+    def _locators_to_skip(self, institution_id: str, job: Mapping[str, Any], entity: CanonicalEntity, items: Iterable[Mapping[str, Any]]) -> set[str]:
+        """Rows the reviewer's duplicate decisions keep out of the import.
+
+        Conflicting copies of one key: approving keeps the earlier copy and
+        skips the reviewed one; rejecting ("use this row") imports the
+        reviewed copy instead of the others (the latest one when several are
+        chosen). Approving "same person" must drop the identity that would be
+        a second one, never the legitimate update of the record that already
+        exists: for a match against an existing record that is the new row's
+        key; for a pair inside the batch it is the key not yet known (or the
+        later row's when both are new). Every copy of a dropped key is
+        skipped, whatever was chosen among the copies. Two rows that both
+        update existing records are both imported: they already are separate
+        records and merging them is not an import decision.
         """
 
-        approved = [item for item in items if item["kind"] == "duplicate" and item["status"] == "approved"]
-        if not approved:
+        # Only a person's decisions on this run's questions count: questions of an
+        # earlier, superseded run were closed by the system, not answered.
+        run_id = ((job.get("report") or {}).get("normalization") or {}).get("run_id")
+        decided = [
+            item for item in items
+            if item["kind"] == "duplicate" and item["status"] in {"approved", "rejected"} and item.get("resolved_by") != "system"
+            and (item.get("payload") or {}).get("normalization_run") == run_id
+        ]
+        if not decided:
             return set()
         rows = {row["locator"]: row for row in self.store.job_records(institution_id, job["job_id"], limit=self.max_rows)}
         keys = {str(row.get("record_key")) for row in rows.values() if row.get("record_key") and str(row["record_key"]).strip("|")}
         existing = self.store.existing_keys(institution_id, entity.name, sorted(keys)) if keys else {}
         skip: set[str] = set()
-        for item in approved:
+        dropped_keys: set[str] = set()
+        chosen: dict[str, tuple[int, str]] = {}
+
+        def drop(locator: str) -> None:
+            key = str(rows.get(locator, {}).get("record_key") or "")
+            if key.strip("|"):
+                dropped_keys.add(key)
+            else:
+                skip.add(locator)
+
+        for item in decided:
             payload = item.get("payload", {})
             left, right = str(payload.get("left_locator") or ""), payload.get("right_locator")
-            if payload.get("kind") == "conflicting_key" or not right:
-                skip.add(left)
+            if payload.get("kind") == "conflicting_key":
+                row = rows.get(left, {})
+                if item["status"] == "approved":
+                    skip.add(left)
+                elif row.get("status") in {"ready", "review"} and str(row.get("record_key") or "").strip("|"):
+                    key, number = str(row["record_key"]), int(row.get("row_number") or 0)
+                    if key not in chosen or number > chosen[key][0]:
+                        chosen[key] = (number, left)
+                continue
+            if item["status"] != "approved":
+                continue
+            left_known = str(rows.get(left, {}).get("record_key") or "") in existing
+            if not right:
+                if not left_known:
+                    drop(left)
                 continue
             right = str(right)
-            left_key = str(rows.get(left, {}).get("record_key") or "")
-            right_key = str(rows.get(right, {}).get("record_key") or "")
-            left_known, right_known = left_key in existing, right_key in existing
+            right_known = str(rows.get(right, {}).get("record_key") or "") in existing
             if left_known and not right_known:
-                skip.add(right)
+                drop(right)
             elif right_known and not left_known:
-                skip.add(left)
+                drop(left)
             elif not left_known and not right_known:
-                skip.add(right)
+                drop(right)
+        for key, (_, keep) in chosen.items():
+            skip.update(locator for locator, row in rows.items() if row.get("record_key") == key and locator != keep)
+        skip.update(locator for locator, row in rows.items() if row.get("record_key") in dropped_keys)
         return skip
 
     def _import(self, institution_id: str, job: dict[str, Any], entity: CanonicalEntity, skip_locators: set[str], *, committed_by: str) -> dict[str, Any]:
         job_id = job["job_id"]
         staged = self.store.job_records(institution_id, job_id, limit=self.max_rows)
         records: list[CanonicalRecord] = []
-        skipped = 0
+        reasons: Counter[str] = Counter()
         for row in staged:
             if row["status"] != "ready" and row["status"] != "review":
-                skipped += 1
+                reasons[_skip_reason(row)] += 1
                 continue
             if row["locator"] in skip_locators:
-                skipped += 1
+                reasons["duplicate_review_decision"] += 1
                 continue
             normalized = row.get("normalized") or {}
             lineage = RecordLineage(source_file_id=job.get("file_id"), source_file_name=str(job.get("report", {}).get("parse", {}).get("file_name") or (job.get("options") or {}).get("source_label") or ""), source_locator=row["locator"], ingestion_job_id=job_id)
             records.append(CanonicalRecord(entity.name, dict(normalized.get("fields", {})), dict(normalized.get("attributes", {})), tuple(normalized.get("normalizations", [])), tuple(row.get("issues", [])), lineage))
+        skipped = sum(reasons.values())
         if not records:
             report = dict(job.get("report") or {})
-            report["import"] = {"entity": entity.name, "inserted": 0, "updated": 0, "unchanged": 0, "skipped": skipped, "committed_by": committed_by, "message": "no rows were eligible for import"}
+            report["import"] = {"entity": entity.name, "inserted": 0, "updated": 0, "unchanged": 0, "skipped": skipped, "skipped_reasons": dict(reasons), "committed_by": committed_by, "message": "no rows were eligible for import"}
             return self.store.update_job(institution_id, job_id, status=JOB_IMPORTED, stage=STAGE_DONE, report=report)
         summary = self.store.upsert_records(institution_id, records)
         summary.skipped += skipped
+        for reason, count in reasons.items():
+            summary.skipped_reasons[reason] = summary.skipped_reasons.get(reason, 0) + count
         report = dict(job.get("report") or {})
         import_report = summary.as_dict()
         import_report["committed_by"] = committed_by

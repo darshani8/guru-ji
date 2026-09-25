@@ -174,6 +174,46 @@ class PlatformRouteTests(unittest.TestCase):
         self.assertEqual(upload.status_code, 200, upload.text[:200])
         self.client.delete(f"/v1/documents/{upload.json()['document_id']}", headers=self.principal)
 
+    def test_the_console_review_flow_imports_what_the_reviewer_approved_as_shown(self):
+        content = b"Name,USN,Email,Email ID\nRavi Kumar,1MS23MBA101,ravi@x.com,ravi.k@x.com\nAsha Rao,1MS23MBA102,asha@x.com,asha.r@x.com\n"
+        upload = self.client.post("/v1/ingestion/uploads", headers=self.principal, files={"file": ("emails.csv", content, "text/csv")})
+        self.assertEqual(upload.status_code, 200, upload.text)
+        job_id = upload.json()["job"]["job_id"]
+        detail = self.client.get(f"/v1/ingestion/jobs/{job_id}", headers=self.principal).json()
+        self.assertEqual(detail["job"]["status"], "needs_review")
+        payload = detail["pending_reviews"][0]["payload"]
+        # What console.js posts when "Approve mapping" is clicked without changing anything.
+        mapping = {header: payload["proposed_mapping"].get(header) or None for header in payload["headers"]}
+        approved = self.client.post(f"/v1/ingestion/jobs/{job_id}/mapping", headers=self.principal, json={"mapping": mapping, "entity": payload["entity"], "remember": True})
+        self.assertEqual(approved.status_code, 200, approved.text)
+        self.assertEqual(approved.json()["job"]["status"], "imported")
+        self.assertEqual(approved.json()["job"]["report"]["import"]["inserted"], 2)
+        self.assertEqual(self.client.get(f"/v1/ingestion/jobs/{job_id}", headers=self.principal).json()["pending_reviews"], [])
+
+    def test_ingestion_reads_run_off_the_event_loop(self):
+        # The console polls a job while an import holds the store: a read on the
+        # event loop would stall every other request until the import finished.
+        platform = app.state.runtime.platform
+        seen: dict[str, list[bool]] = {}
+
+        def probe(name, real):
+            def wrapper(*args, **kwargs):
+                try:
+                    asyncio.get_running_loop()
+                    seen.setdefault(name, []).append(True)
+                except RuntimeError:
+                    seen.setdefault(name, []).append(False)
+                return real(*args, **kwargs)
+            return wrapper
+
+        names = ("get_job", "list_jobs", "list_review_items", "job_records")
+        with mock.patch.multiple(platform.store, **{name: probe(name, getattr(platform.store, name)) for name in names}):
+            for path in (f"/v1/ingestion/jobs/{self.job_id}", "/v1/ingestion/jobs", f"/v1/ingestion/jobs/{self.job_id}/records", f"/v1/ingestion/jobs/{self.job_id}/report", "/v1/ingestion/reviews"):
+                self.assertEqual(self.client.get(path, headers=self.principal).status_code, 200, path)
+        self.assertEqual(set(seen), set(names))
+        for name, on_loop in seen.items():
+            self.assertFalse(any(on_loop), f"{name} ran on the event loop")
+
     def test_blocking_store_and_object_store_work_runs_off_the_event_loop(self):
         platform = app.state.runtime.platform
         seen: dict[str, tuple[bool, asyncio.AbstractEventLoop | None]] = {}

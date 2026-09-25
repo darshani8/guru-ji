@@ -41,6 +41,8 @@ class SheetImportBody(BaseModel):
 # Parsing, normalisation, commits, object-store writes and queue publishes are
 # synchronous and can take seconds; they run in the thread pool so the event
 # loop keeps serving other requests (and the request timeout can still fire).
+# Reads go there too: a running import holds the store, and the console polls
+# a job while it runs.
 
 
 def _enqueue_processing(platform: Any, target: str, job_id: str, requested_by: str, *, force: bool = False) -> str:
@@ -138,7 +140,7 @@ async def list_jobs(request: Request, institution_id: str | None = None, status:
     platform = platform_from_request(request)
     principal = require_principal(request, Capability.DATA_INGEST)
     target = resolve_institution(principal, institution_id)
-    jobs = platform.store.list_jobs(target, limit=min(max(limit, 1), 200), status=status)
+    jobs = await run_in_threadpool(platform.store.list_jobs, target, limit=min(max(limit, 1), 200), status=status)
     return {"jobs": [_public_job(job) for job in jobs]}
 
 
@@ -147,10 +149,11 @@ async def get_job(job_id: str, request: Request, institution_id: str | None = No
     platform = platform_from_request(request)
     principal = require_principal(request, Capability.DATA_INGEST)
     target = resolve_institution(principal, institution_id)
-    job = platform.store.get_job(target, job_id)
+    job = await run_in_threadpool(platform.store.get_job, target, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="ingestion job not found")
-    return {"job": _public_job(job), "pending_reviews": platform.store.list_review_items(target, job_id=job_id, status="pending")}
+    pending = await run_in_threadpool(platform.store.list_review_items, target, job_id=job_id, status="pending")
+    return {"job": _public_job(job), "pending_reviews": pending}
 
 
 @router.get("/jobs/{job_id}/records", summary="Staged rows for a job with their normalization and issues")
@@ -158,9 +161,9 @@ async def job_records(job_id: str, request: Request, institution_id: str | None 
     platform = platform_from_request(request)
     principal = require_principal(request, Capability.DATA_INGEST)
     target = resolve_institution(principal, institution_id)
-    if platform.store.get_job(target, job_id) is None:
+    if await run_in_threadpool(platform.store.get_job, target, job_id) is None:
         raise HTTPException(status_code=404, detail="ingestion job not found")
-    rows = platform.store.job_records(target, job_id, limit=min(max(limit, 1), 1000), offset=max(offset, 0), status=status)
+    rows = await run_in_threadpool(platform.store.job_records, target, job_id, limit=min(max(limit, 1), 1000), offset=max(offset, 0), status=status)
     return {"records": rows, "count": len(rows)}
 
 
@@ -226,7 +229,7 @@ async def job_report(job_id: str, request: Request, institution_id: str | None =
     principal = require_principal(request, Capability.DATA_INGEST)
     target = resolve_institution(principal, institution_id)
     try:
-        return platform.ingestion.import_report(target, job_id)
+        return await run_in_threadpool(platform.ingestion.import_report, target, job_id)
     except KeyError as exc:
         raise translate(exc) from exc
 
@@ -236,7 +239,7 @@ async def list_reviews(request: Request, institution_id: str | None = None, job_
     platform = platform_from_request(request)
     principal = require_principal(request, Capability.DATA_REVIEW)
     target = resolve_institution(principal, institution_id)
-    return {"reviews": platform.store.list_review_items(target, job_id=job_id, status=status or None, limit=min(max(limit, 1), 500))}
+    return {"reviews": await run_in_threadpool(platform.store.list_review_items, target, job_id=job_id, status=status or None, limit=min(max(limit, 1), 500))}
 
 
 @router.post("/reviews/{review_id}", summary="Resolve a duplicate review item")

@@ -74,6 +74,43 @@ class WebAssetTests(unittest.TestCase):
         self.assertNotRegex(js, re.compile(r'href="\$\{escapeHtml\((report|item)\.download_path\)\}'))
         self.assertIn("downloadReport(", js)
 
+    def test_console_follows_an_upload_through_review_to_its_result(self):
+        js = (CONSOLE / "console.js").read_text(encoding="utf-8")
+        # A queued or processing job is polled until it settles, so its review opens by itself.
+        self.assertIn("async function followJob(jobId", js)
+        self.assertIn("if (RUNNING.includes(job.status) && !stalled(job)) followJob(job.job_id);", js)
+        # Every step uses the job the server returned instead of assuming it went on.
+        for path in ("/mapping`", "/commit`", "/retry`", "/v1/ingestion/reviews/"):
+            self.assertRegex(js, r"const \{ job \} = await api\(`[^`]*" + re.escape(path), path)
+        # A failed or stalled job offers Retry; the reviewer can correct the entity.
+        self.assertIn("data-retry=", js)
+        self.assertIn("select[data-entity]", js)
+        self.assertIn("entity: entitySelect.value", js)
+        # Two columns on one field are caught before the request, and marked with a class (no inline style).
+        self.assertIn("are both mapped to", js)
+        self.assertIn("select.classList.add('invalid')", js)
+        self.assertIn(".mapping-grid select.invalid", (CONSOLE / "console.css").read_text(encoding="utf-8"))
+        # A job followed in the background never replaces a review card showing another job, and a late answer is dropped.
+        self.assertIn("settle(job, { background: true });", js)
+        self.assertIn("if (!background || $('review-card').hidden || state.reviewJob === job.job_id) openReview(job.job_id);", js)
+        self.assertIn("if (state.reviewJob !== jobId) return;", js)
+
+    def test_confirm_and_run_keeps_a_second_prompt_and_reports_a_lost_answer(self):
+        console = (CONSOLE / "console.js").read_text(encoding="utf-8")
+        # The id and its command are taken before any await, so a re-sent command's new confirmation keeps its
+        # buttons, and Confirm re-sends the command the confirmation was for, not the last one typed.
+        self.assertIn("const approval = state.lastApproval;\n    if (!approval) return;\n    state.lastApproval = null;", console)
+        self.assertIn("state.lastApproval = { id: data.approval.approval_id, command };", console)
+        self.assertIn("$('command-input').value = approval.command;", console)
+        self.assertNotRegex(console, r"finally \{\s*state\.lastApproval = null;")
+        self.assertIn("may or may not have been made", console)
+        assistant = (ASSISTANT / "app.js").read_text(encoding="utf-8")
+        self.assertIn("may or may not have been made", assistant)
+        self.assertIn("await settleControls('unusable');", assistant)
+        # The person's own earlier Confirm (its reply lost) is carried out, not called unusable.
+        self.assertIn("/already (approved|executing|consumed)/", assistant)
+        self.assertIn("await carryOut(true);", assistant)
+
     def test_assistant_files_download_through_the_authenticated_client(self):
         # A plain link to the report would reach the server without the signed-in
         # identity; only this server's report paths are ever fetched.

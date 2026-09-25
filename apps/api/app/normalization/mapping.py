@@ -21,6 +21,8 @@ from .canonical import CANONICAL_ENTITIES, CanonicalEntity, CanonicalField, Fiel
 
 DEFAULT_CONFIDENCE_THRESHOLD = 0.8
 MIN_CANDIDATE_CONFIDENCE = 0.4
+# A header whose field a stronger header already holds: left unmapped and shown to the reviewer.
+CONFLICT = "conflict"
 
 _PHONE = re.compile(r"^\+?[\d][\d\s()-]{6,17}\d$")
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+\.[A-Za-z]{2,}$")
@@ -83,7 +85,7 @@ class MappingProposal:
         return {item.source_header: item.canonical_field for item in self.mappings if item.canonical_field and item.confidence >= self.threshold}
 
     def review_required(self) -> tuple[FieldMapping, ...]:
-        return tuple(item for item in self.mappings if item.canonical_field and item.confidence < self.threshold)
+        return tuple(item for item in self.mappings if (item.canonical_field and item.confidence < self.threshold) or item.method == CONFLICT)
 
     def unmapped(self) -> tuple[str, ...]:
         return tuple(item.source_header for item in self.mappings if item.canonical_field is None)
@@ -246,23 +248,33 @@ class MappingEngine:
 
     @staticmethod
     def _resolve_conflicts(proposals: list[FieldMapping]) -> list[FieldMapping]:
-        """Two headers cannot claim one canonical field; the weaker one goes to review."""
+        """Two headers never share one canonical field; the weaker one goes to review.
+
+        The strongest header keeps the field. A weaker one falls back to its
+        best alternative that no other header holds (and claims it, so two
+        weaker headers never land on the same fallback); with none free it is
+        left unmapped and marked as a conflict. The proposal a reviewer is
+        shown can therefore always be approved as it stands.
+        """
 
         by_field: dict[str, list[int]] = {}
         for index, item in enumerate(proposals):
             if item.canonical_field:
                 by_field.setdefault(item.canonical_field, []).append(index)
+        # Ties keep the earlier header, as the stable sort did before.
+        claimed = {name: max(indexes, key=lambda idx: proposals[idx].confidence) for name, indexes in by_field.items()}
         for name, indexes in by_field.items():
-            if len(indexes) < 2:
-                continue
-            indexes.sort(key=lambda idx: proposals[idx].confidence, reverse=True)
-            for idx in indexes[1:]:
+            winner = claimed[name]
+            for idx in indexes:
+                if idx == winner:
+                    continue
                 item = proposals[idx]
-                fallback = next(((alt, score) for alt, score in item.alternatives if alt not in by_field or by_field[alt][0] == idx), None)
-                if fallback and fallback[1] >= MIN_CANDIDATE_CONFIDENCE:
+                fallback = next(((alt, score) for alt, score in item.alternatives if alt not in claimed and score >= MIN_CANDIDATE_CONFIDENCE), None)
+                if fallback:
+                    claimed[fallback[0]] = idx
                     proposals[idx] = FieldMapping(item.source_header, fallback[0], min(fallback[1], DEFAULT_CONFIDENCE_THRESHOLD - 0.05), "heuristic", f"{name} already claimed; fell back to {fallback[0]}", item.alternatives)
                 else:
-                    proposals[idx] = FieldMapping(item.source_header, item.canonical_field, min(item.confidence, DEFAULT_CONFIDENCE_THRESHOLD - 0.1), "heuristic", f"conflicts with another header mapped to {name}", item.alternatives)
+                    proposals[idx] = FieldMapping(item.source_header, None, 0.0, CONFLICT, f"{name} is already mapped from {proposals[winner].source_header}", ((name, item.confidence), *item.alternatives))
         return proposals
 
     async def _model_assist(self, entity: CanonicalEntity, unresolved: Sequence[FieldMapping], samples: Mapping[str, Sequence[Any]]) -> dict[str, tuple[str | None, float, str]]:
@@ -327,11 +339,25 @@ class MappingEngine:
             # Profiles are found by normalised header signature, so they must be
             # applied the same way: "NAME" and "Name" are the same column.
             valid = set(entity.field_names())
-            by_normalized = {normalize_header(header): target for header, target in saved_profile.items() if target in valid}
-            mappings = tuple(
-                FieldMapping(header, by_normalized.get(normalize_header(header)), 1.0 if normalize_header(header) in by_normalized else 0.0, "approved_profile", "reused an approved mapping profile")
+            by_normalized: dict[str, str] = {}
+            for header, target in saved_profile.items():
+                if target in valid:
+                    by_normalized.setdefault(normalize_header(header), target)
+            # A header the reviewer named exactly keeps their choice, and its
+            # look-alike ("Mobile No" beside "Mobile No.") stays as they left it.
+            named = {normalize_header(header) for header in headers if header in saved_profile}
+
+            def remembered(header: str) -> str | None:
+                if header in saved_profile:
+                    target = saved_profile[header]
+                    return target if target in valid else None
+                return None if normalize_header(header) in named else by_normalized.get(normalize_header(header))
+
+            # Look-alikes neither of which was named exactly would both take the one remembered field.
+            mappings = tuple(self._resolve_conflicts([
+                FieldMapping(header, remembered(header), 1.0 if remembered(header) else 0.0, "approved_profile", "reused an approved mapping profile")
                 for header in headers
-            )
+            ]))
             return MappingProposal(entity_name, entity_confidence, mappings, self.threshold, alternatives, profile_applied=True)
         proposals = self._deterministic(entity, headers, samples)
         unresolved = [item for item in proposals if item.canonical_field is None or item.confidence < self.threshold]
@@ -343,7 +369,8 @@ class MappingEngine:
                 final.append(FieldMapping(item.source_header, suggestion[0], suggestion[1], suggestion[2], "model proposed; requires review", item.alternatives))
             else:
                 final.append(item)
-        return MappingProposal(entity_name, entity_confidence, tuple(final), self.threshold, alternatives)
+        # A model suggestion may name a field another header already holds.
+        return MappingProposal(entity_name, entity_confidence, tuple(self._resolve_conflicts(final)), self.threshold, alternatives)
 
 
 def apply_mapping(entity: CanonicalEntity, mapping: Mapping[str, str], fields: Mapping[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -366,4 +393,4 @@ def apply_mapping(entity: CanonicalEntity, mapping: Mapping[str, str], fields: M
     return canonical, extras
 
 
-__all__ = ["DEFAULT_CONFIDENCE_THRESHOLD", "FieldMapping", "MappingEngine", "MappingProposal", "apply_mapping", "header_signature", "normalize_header"]
+__all__ = ["CONFLICT", "DEFAULT_CONFIDENCE_THRESHOLD", "FieldMapping", "MappingEngine", "MappingProposal", "apply_mapping", "header_signature", "normalize_header"]

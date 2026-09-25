@@ -1079,6 +1079,13 @@ function showAnswer(data, options = {}) {
   return article;
 }
 
+// A 422 that names the person's own earlier Confirm ("approved", "executing" or
+// "consumed"), which is not a reason to give up on the confirmation; '' otherwise.
+function earlierConfirmation(error) {
+  const match = error.status === 422 && /already (approved|executing|consumed)/.exec(error.message || '');
+  return match ? match[1] : '';
+}
+
 // An action that changes institutional records waits for the person to
 // confirm it; confirming records the decision and runs the same command again.
 function addApprovalControls(article, message) {
@@ -1093,6 +1100,13 @@ function addApprovalControls(article, message) {
   controls.append(confirm, cancel);
   article.querySelector('.bubble').append(controls);
 
+  async function settleControls(decided) {
+    controls.remove();
+    await updateMessage(conversationId, message.id, (stored) => {
+      stored.answer = { ...stored.answer, decided };
+    });
+  }
+
   async function decide(approve) {
     confirm.disabled = true;
     cancel.disabled = true;
@@ -1101,24 +1115,48 @@ function addApprovalControls(article, message) {
         method: 'POST',
         body: JSON.stringify({ approve }),
       });
-      controls.remove();
-      await updateMessage(conversationId, message.id, (stored) => {
-        stored.answer = { ...stored.answer, decided: approve ? 'confirmed' : 'cancelled' };
-      });
-      if (!approve || !command) {
-        addToConversation(conversationId, makeMessage('assistant', approve ? 'Confirmed.' : 'Cancelled. Nothing was changed.'));
+    } catch (error) {
+      const earlier = approve ? earlierConfirmation(error) : '';
+      if (earlier === 'approved') {
+        // An earlier Confirm reached the server but its reply was lost: the command still has to be sent.
+        await carryOut(true);
         return;
       }
-      const loading = state.conversation.id === conversationId ? showThinking() : null;
-      try {
-        showAnswer(await askAgent(command, approval.approval_id, { conversationId, history: [] }), { command, conversationId });
-      } finally {
-        loading?.remove();
+      if (earlier) {
+        // The command already ran (or is running) with this confirmation; sending it again would do nothing.
+        await settleControls('confirmed');
+        addToConversation(conversationId, makeMessage('assistant', 'This change was already confirmed and sent.'));
+        return;
       }
-    } catch (error) {
+      if (error.status === 422 || error.status === 404) {
+        // An expired or already decided confirmation cannot be used again: say so where the buttons were.
+        await settleControls('unusable');
+        addToConversation(conversationId, makeMessage('assistant', `${error.message.charAt(0).toUpperCase()}${error.message.slice(1)}.`));
+        return;
+      }
       confirm.disabled = false;
       cancel.disabled = false;
       showToast(error.message);
+      return;
+    }
+    await carryOut(approve);
+  }
+
+  // The server has the decision: settle the buttons and, for a confirmation, send the command again.
+  async function carryOut(approve) {
+    await settleControls(approve ? 'confirmed' : 'cancelled');
+    if (!approve || !command) {
+      addToConversation(conversationId, makeMessage('assistant', approve ? 'Confirmed.' : 'Cancelled. Nothing was changed.'));
+      return;
+    }
+    const loading = state.conversation.id === conversationId ? showThinking() : null;
+    try {
+      showAnswer(await askAgent(command, approval.approval_id, { conversationId, history: [] }), { command, conversationId });
+    } catch (error) {
+      // The answer was lost, not necessarily the change: a time limit can be reached after the change was made.
+      addToConversation(conversationId, makeMessage('assistant', `I could not get the result of the confirmed change (${error.message}). It may or may not have been made, so check the record before asking again.`));
+    } finally {
+      loading?.remove();
     }
   }
   confirm.addEventListener('click', () => decide(true));

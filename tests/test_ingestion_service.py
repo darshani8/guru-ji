@@ -314,5 +314,235 @@ class IngestionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(elapsed, 5.0, f"4000 distinct students took {elapsed:.1f}s")
 
 
+
+class ApprovalTests(unittest.IsolatedAsyncioTestCase):
+    """What a reviewer approves is what gets imported."""
+
+    def setUp(self):
+        self.store = InstitutionDataStore(":memory:")
+        self.objects = InMemoryObjectStore()
+        self.service = IngestionService(store=self.store, objects=self.objects, parsers=ParserRegistry())
+
+    async def _upload(self, name: str, content: bytes, **kwargs):
+        job = self.service.upload("college_a", "staff-1", file_name=name, content=content, content_type="text/csv", **kwargs)
+        return await self.service.process("college_a", job["job_id"])
+
+    def _mapping_review(self, job):
+        items = [item for item in self.store.list_review_items("college_a", job_id=job["job_id"]) if item["kind"] == "mapping"]
+        self.assertEqual(len(items), 1)
+        return items[0]["payload"]
+
+    async def _decide_duplicates(self, job, decision):
+        for item in self.store.list_review_items("college_a", job_id=job["job_id"]):
+            job = self.service.resolve_review("college_a", item["review_id"], decision=decision, resolved_by="staff-1")
+        return job
+
+    async def test_similar_columns_are_proposed_so_approving_as_shown_imports(self):
+        content = (
+            b"Name,USN,Email,Email ID,Father Name,Mother Name\n"
+            b"Ravi Kumar,1MS23MBA001,ravi@x.com,ravi.k@x.com,Suresh,Lata\n"
+            b"Asha Rao,1MS23MBA002,asha@x.com,asha.r@x.com,Mohan,Gita\n"
+        )
+        job = await self._upload("parents.csv", content)
+        self.assertEqual((job["status"], job["stage"]), (JOB_NEEDS_REVIEW, STAGE_MAPPING_REVIEW))
+        payload = self._mapping_review(job)
+        proposed = [target for target in payload["proposed_mapping"].values() if target]
+        self.assertEqual(len(proposed), len(set(proposed)), payload["proposed_mapping"])
+        self.assertTrue({"Email ID", "Mother Name"} <= {item["source_header"] for item in payload["review_required"]})
+        # Exactly what the console sends when the reviewer changes nothing.
+        job = await self.service.apply_mapping("college_a", job["job_id"], mapping=payload["proposed_mapping"], entity=payload["entity"], approved_by="staff-1")
+        self.assertEqual(job["status"], JOB_IMPORTED)
+        self.assertEqual(job["report"]["import"]["inserted"], 2)
+        record = self.store.get_record("college_a", "student", "1ms23mba001")
+        self.assertEqual(record["email"], "ravi@x.com")
+        self.assertEqual(record["attributes"]["Email ID"], "ravi.k@x.com")
+
+    async def test_two_columns_on_one_field_are_named_in_the_refusal(self):
+        job = await self._upload("parents.csv", b"Name,USN,Email,Email ID\nRavi Kumar,1MS23MBA001,ravi@x.com,ravi.k@x.com\n")
+        with self.assertRaises(IngestionError) as raised:
+            await self.service.apply_mapping("college_a", job["job_id"], mapping={"Name": "name", "USN": "student_id", "Email": "email", "Email ID": "email"}, entity="student", approved_by="staff-1")
+        self.assertIn("'Email' and 'Email ID'", str(raised.exception))
+        self.assertEqual(self.store.get_job("college_a", job["job_id"])["status"], JOB_NEEDS_REVIEW)
+
+    async def test_a_doubtful_entity_is_reviewed_with_its_alternatives_and_a_correction_is_remembered(self):
+        content = b"USN,Program,Semester,Academic Year,Section\n1MS23MBA001,MBA,1,2025-26,A\n1MS23MBA002,MBA,1,2025-26,B\n"
+        job = await self._upload("enrollment.csv", content)
+        self.assertEqual((job["status"], job["stage"]), (JOB_NEEDS_REVIEW, STAGE_MAPPING_REVIEW))
+        payload = self._mapping_review(job)
+        self.assertTrue(payload["entity_uncertain"])
+        self.assertLess(payload["entity_confidence"], 0.8)
+        self.assertIn("enrollment", [item["entity"] for item in payload["entity_alternatives"]])
+        # The reviewer picks the right kind of records; the job imports under it.
+        mapping = {"USN": "student_id", "Program": "program", "Semester": "semester", "Academic Year": "academic_year", "Section": "section"}
+        job = await self.service.apply_mapping("college_a", job["job_id"], mapping=mapping, entity="enrollment", approved_by="staff-1")
+        self.assertEqual((job["status"], job["entity"]), (JOB_IMPORTED, "enrollment"))
+        self.assertEqual(job["report"]["import"]["inserted"], 2)
+        # The same headers again, with nothing chosen at upload: the correction is reused.
+        again = await self._upload("enrollment2.csv", content)
+        self.assertEqual((again["status"], again["entity"]), (JOB_IMPORTED, "enrollment"))
+        self.assertTrue(again["mapping"]["profile_applied"])
+        # A confident detection or the uploader's own choice is not questioned.
+        chosen = await self._upload("enrollment3.csv", content.replace(b"MBA00", b"MBA10"), entity_hint="enrollment")
+        self.assertFalse(chosen["mapping"]["entity_uncertain"])
+        confident = await self._upload("students.csv", STUDENTS)
+        self.assertEqual(confident["status"], JOB_IMPORTED)
+
+    async def test_an_approval_that_imports_nothing_fails_with_the_reason_and_is_not_remembered(self):
+        content = b"USN,Student Name,Subject Code,Exam,Total Marks,Max Marks\n1MS23MBA001,Ravi,MBA101,IA1,42,25\n1MS23MBA002,Asha,MBA101,IA1,40,25\n"
+        job = await self._upload("ia.csv", content)
+        self.assertEqual(job["stage"], STAGE_MAPPING_REVIEW)
+        payload = self._mapping_review(job)
+        job = await self.service.apply_mapping("college_a", job["job_id"], mapping=payload["proposed_mapping"], entity=payload["entity"], approved_by="staff-1")
+        self.assertEqual((job["status"], job["stage"]), (JOB_FAILED, STAGE_NORMALIZING))
+        self.assertIn("none of the 2 rows can be imported", job["error"])
+        self.assertIn("marks_exceed_maximum", job["error"])
+        self.assertEqual(self.store.count_records("college_a", "exam"), 0)
+        # A retry maps the file again: the mapping that imported nothing was not kept.
+        retried = await self.service.process("college_a", job["job_id"])
+        self.assertEqual((retried["status"], retried["stage"]), (JOB_NEEDS_REVIEW, STAGE_MAPPING_REVIEW))
+        self.assertFalse(retried["mapping"]["profile_applied"])
+
+    async def test_retrying_a_job_that_imported_nothing_under_a_remembered_mapping_asks_again(self):
+        from app.normalization.mapping import header_signature
+
+        # A mapping remembered before it was known to import nothing (as approvals used to be).
+        headers = ["USN", "Student Name", "Subject Code", "Exam", "Total Marks", "Max Marks"]
+        self.store.save_mapping_profile("college_a", entity="exam", header_signature=header_signature(headers), mapping={"USN": "student_id", "Student Name": "student_name", "Subject Code": "course_code", "Exam": "exam_name", "Total Marks": "marks_obtained", "Max Marks": "max_marks"}, approved_by="staff-1")
+        job = await self._upload("ia.csv", b"USN,Student Name,Subject Code,Exam,Total Marks,Max Marks\n1MS23MBA001,Ravi,MBA101,IA1,42,25\n")
+        self.assertEqual((job["status"], job["stage"]), (JOB_FAILED, STAGE_NORMALIZING))
+        self.assertTrue(job["mapping"]["profile_applied"])
+        # Retry puts the mapping in front of a person, with the reason, instead of failing the same way.
+        retried = await self.service.process("college_a", job["job_id"])
+        self.assertEqual((retried["status"], retried["stage"]), (JOB_NEEDS_REVIEW, STAGE_MAPPING_REVIEW))
+        payload = self._mapping_review(retried)
+        self.assertIn("none of the 1 rows can be imported", payload["previous_error"])
+        # Swapping the two marks columns imports the row and replaces the remembered mapping.
+        mapping = dict(payload["proposed_mapping"], **{"Total Marks": "max_marks", "Max Marks": "marks_obtained"})
+        job = await self.service.apply_mapping("college_a", job["job_id"], mapping=mapping, entity="exam", approved_by="staff-1")
+        self.assertEqual(job["status"], JOB_IMPORTED)
+        self.assertEqual(self.store.find_mapping_profile("college_a", "exam", header_signature(headers))["mapping"]["Total Marks"], "max_marks")
+
+    async def test_a_failed_approval_can_be_retried_back_to_review(self):
+        from unittest import mock
+
+        from app.ingestion.service import ProcessingError
+
+        content = b"Name,ID,Contact,Prog,Semester,Remarks\nRavi Kumar,1MS23MBA001,9876543210,MBA,2,fine\n"
+        job = await self._upload("list.csv", content)
+        payload = self._mapping_review(job)
+        with mock.patch.object(type(self.store), "lookup_person_matches", side_effect=RuntimeError("connection reset")), self.assertLogs("app.ingestion.service", level="ERROR"):
+            with self.assertRaises(ProcessingError):
+                await self.service.apply_mapping("college_a", job["job_id"], mapping=payload["proposed_mapping"], entity="student", approved_by="staff-1")
+        self.assertEqual(self.store.get_job("college_a", job["job_id"])["status"], JOB_FAILED)
+        retried = await self.service.process("college_a", job["job_id"])
+        self.assertEqual((retried["status"], retried["stage"]), (JOB_NEEDS_REVIEW, STAGE_MAPPING_REVIEW))
+        payload = self._mapping_review(retried)
+        job = await self.service.apply_mapping("college_a", job["job_id"], mapping=payload["proposed_mapping"], entity="student", approved_by="staff-1")
+        self.assertEqual(job["status"], JOB_IMPORTED)
+
+    async def test_conflicting_copies_import_the_copy_the_reviewer_chose(self):
+        rows = b"Name,USN,Program,Semester,Phone\nNeha Shah,{usn},BCA,1,9811111111\nNeha Shah,{usn},BCA,2,9811111112\n"
+        keep_earlier = await self._upload("a.csv", rows.replace(b"{usn}", b"1AB22CS010"), entity_hint="student")
+        self.assertEqual(keep_earlier["stage"], STAGE_DUPLICATE_REVIEW)
+        job = await self._decide_duplicates(keep_earlier, "approved")
+        self.assertEqual(job["status"], JOB_IMPORTED)
+        self.assertEqual(self.store.get_record("college_a", "student", "1ab22cs010")["semester"], 1)
+        self.assertEqual(job["report"]["import"]["skipped_reasons"], {"duplicate_review_decision": 1})
+        use_this = await self._upload("b.csv", rows.replace(b"{usn}", b"1AB22CS011"), entity_hint="student")
+        job = await self._decide_duplicates(use_this, "rejected")
+        self.assertEqual(job["status"], JOB_IMPORTED)
+        self.assertEqual(job["report"]["import"]["inserted"], 1)
+        self.assertEqual(self.store.get_record("college_a", "student", "1ab22cs011")["semester"], 2)
+        # A later copy that cannot be imported raises no question: the good copy is imported.
+        broken = await self._upload("c.csv", b"Name,USN,Program,Semester,Phone\nIra Menon,1AB22CS012,BCA,1,9822222221\n,1AB22CS012,BCA,2,9822222222\n", entity_hint="student")
+        self.assertEqual(broken["status"], JOB_IMPORTED)
+        self.assertEqual(self.store.get_record("college_a", "student", "1ab22cs012")["semester"], 1)
+
+    async def test_only_decisions_on_the_current_run_count(self):
+        from datetime import datetime, timedelta, timezone
+
+        rows = b"Name,USN,Program,Semester,Phone\nIra Menon,1AB22CS020,BCA,1,9833333331\nIra Menon,1AB22CS020,BCA,2,9833333332\n"
+        job = await self._upload("a.csv", rows, entity_hint="student", options={"auto_commit": False})
+        self.assertEqual(job["stage"], STAGE_DUPLICATE_REVIEW)
+        job = await self._decide_duplicates(job, "approved")  # keep the earlier copy
+        self.assertEqual(job["status"], JOB_READY)
+        # The job is interrupted and restarted before the commit: the question is asked again and answered differently.
+        stale = (datetime.now(timezone.utc) - timedelta(seconds=self.service.restart_after_seconds + 60)).isoformat()
+        self.store.update_job("college_a", job["job_id"], status=JOB_PROCESSING, stage=STAGE_NORMALIZING)
+        self.store.backend.execute("UPDATE ingestion_jobs SET updated_at = ? WHERE job_id = ?", (stale, job["job_id"]))
+        job = await self.service.process("college_a", job["job_id"])
+        self.assertEqual(job["stage"], STAGE_DUPLICATE_REVIEW)
+        for item in self.store.list_review_items("college_a", job_id=job["job_id"]):
+            job = self.service.resolve_review("college_a", item["review_id"], decision="rejected", resolved_by="staff-1")  # use this row
+        job = self.service.commit("college_a", job["job_id"], committed_by="staff-1")
+        self.assertEqual(job["report"]["import"]["inserted"], 1)
+        self.assertEqual(self.store.get_record("college_a", "student", "1ab22cs020")["semester"], 2)
+
+    async def test_a_copy_that_cannot_be_imported_does_not_claim_the_identifier(self):
+        # The first copy has no name (a blocking error); the second is fine.
+        content = b"Name,USN,Program,Semester,Phone\n,1AB22CS030,BCA,1,9844444441\nIra Menon,1AB22CS030,BCA,2,9844444442\n"
+        job = await self._upload("a.csv", content, entity_hint="student")
+        self.assertEqual(job["status"], JOB_IMPORTED, "no question is asked about a row that cannot be imported")
+        self.assertEqual(self.store.get_record("college_a", "student", "1ab22cs030")["semester"], 2)
+
+    async def test_duplicate_questions_come_in_file_order(self):
+        lines = [b"Name,USN,Program,Semester,Phone"]
+        for i in range(12):
+            lines.append(f"Person {i} Rao,1AB22CS{i:03d},BCA,1,98555{i:05d}".encode())
+            lines.append(f"Person {i} Rao,1AB22CS{i:03d},BCA,2,98666{i:05d}".encode())
+        job = await self._upload("pairs.csv", b"\n".join(lines) + b"\n", entity_hint="student")
+        items = self.store.list_review_items("college_a", job_id=job["job_id"])
+        rows = [int(item["payload"]["left_locator"].split("row=")[1]) for item in items]
+        self.assertEqual(len(rows), 12)
+        self.assertEqual(rows, sorted(rows))
+
+    async def test_same_person_decision_drops_every_copy_of_the_new_identity(self):
+        await self._upload("students.csv", STUDENTS)
+        # A new USN for an existing person, listed twice with different details.
+        content = (
+            b"Student Name,USN,Course,Sem,Phone,Email ID,DOB\n"
+            b"Ravi Kumar,1MS23MBA777,MBA,1,9876543210,ravi@x.com,12/05/2003\n"
+            b"Ravi Kumar,1MS23MBA777,MBA,2,9876543210,ravi@x.com,12/05/2003\n"
+        )
+        job = await self._upload("again.csv", content)
+        for item in self.store.list_review_items("college_a", job_id=job["job_id"]):
+            decision = "approved" if item["payload"]["kind"] == "probable_person" else "rejected"
+            job = self.service.resolve_review("college_a", item["review_id"], decision=decision, resolved_by="staff-1")
+        self.assertEqual(job["status"], JOB_IMPORTED)
+        self.assertIsNone(self.store.get_record("college_a", "student", "1ms23mba777"))
+
+    async def test_every_duplicate_decision_counts_however_many_there_are(self):
+        from unittest import mock
+
+        await self._upload("students.csv", STUDENTS)
+        lines = [b"Student Name,USN,Course,Sem,Phone,Email ID,DOB"] + [f"Person{i} Surname,1MS23MBA{i:03d},MBA,1,98765{i:05d},p{i}@x.com,2003-01-{i - 90}".encode() for i in range(100, 105)]
+        await self._upload("first.csv", b"\n".join(lines) + b"\n")
+        renumbered = b"\n".join(lines).replace(b"1MS23MBA", b"1MS23MCA") + b"\n"
+        job = await self._upload("second.csv", renumbered)
+        self.assertEqual(len(self.store.list_review_items("college_a", job_id=job["job_id"])), 5)
+        # Pages of two: the decisions on later pages must still be honoured at commit.
+        with mock.patch("app.ingestion.service.REVIEW_PAGE_SIZE", 2):
+            job = await self._decide_duplicates(job, "approved")
+        self.assertEqual(job["status"], JOB_IMPORTED)
+        self.assertEqual(job["report"]["import"]["inserted"], 0)
+        self.assertEqual(job["report"]["import"]["skipped_reasons"], {"duplicate_review_decision": 5})
+
+    async def test_a_failure_before_the_import_is_recorded_on_the_job(self):
+        from unittest import mock
+
+        await self._upload("students.csv", STUDENTS)
+        same_person = b"Student Name,USN,Course,Sem,Phone,Email ID,DOB\nRavi Kumar,1MS23MBA777,MBA,1,9876543210,ravi@x.com,12/05/2003\n"
+        job = await self._upload("again.csv", same_person)
+        review = self.store.list_review_items("college_a", job_id=job["job_id"])[0]
+        # Working out which rows the decision skips reads the store before anything is imported.
+        with mock.patch.object(type(self.store), "existing_keys", side_effect=RuntimeError("connection reset")):
+            with self.assertLogs("app.ingestion.service", level="ERROR"), self.assertRaises(CommitError):
+                self.service.resolve_review("college_a", review["review_id"], decision="approved", resolved_by="staff-1")
+        job = self.store.get_job("college_a", job["job_id"])
+        self.assertEqual((job["status"], job["stage"]), (JOB_READY, STAGE_READY))
+        self.assertIn("RuntimeError", job["error"])
+        self.assertEqual(self.service.commit("college_a", job["job_id"], committed_by="staff-1")["status"], JOB_IMPORTED)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -275,6 +275,134 @@ class MasterAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second.status, "complete")
         self.assertEqual(self.fx.store.get_record("college_a", "student", "mba001")["phone"], "9999988888")
 
+    def _model_plans(self, *plans):
+        """A model planner that answers each planning call with the next plan (the last one repeats)."""
+
+        import json
+
+        replies = [json.dumps({"intent": "records", "steps": steps, "confidence": 0.9}) for steps in plans]
+        calls = []
+
+        def reply(prompt):
+            calls.append(prompt)
+            return replies[min(len(calls), len(replies)) - 1]
+
+        self.fx.agent.model_planner = ModelPlanner(_Model(reply))
+        return calls
+
+    @staticmethod
+    def _update(student_id, section, step_id="s1"):
+        return {"step_id": step_id, "tool": "update_student_record", "arguments": {"student_id": student_id, "changes": {"section": section}}, "purpose": f"move {student_id} to {section}"}
+
+    @staticmethod
+    def _notify(title, step_id):
+        return {"step_id": step_id, "tool": "create_notification", "arguments": {"title": title, "body": "Section change"}, "purpose": "tell the office"}
+
+    async def test_a_confirmation_runs_the_confirmed_change_even_when_planning_again_differs(self):
+        pri = principal(PrincipalType.PRINCIPAL)
+        # The second planning pass words the value differently, as a model (or its fallback) may.
+        self._model_plans([self._update("MBA002", "B")], [self._update("MBA002", "b")])
+        first = await self.run_command("Move MBA002 to section B", who=pri)
+        self.assertEqual(first.status, "approval_required")
+        self.fx.gateway.decide_approval(pri, "college_a", first.approval["approval_id"], approve=True)
+        second = await self.run_command("Move MBA002 to section B", who=pri, approval_id=first.approval["approval_id"])
+        self.assertEqual(second.status, "complete", second.answer)
+        self.assertEqual(self.fx.store.get_record("college_a", "student", "mba002")["section"], "B")
+        self.assertEqual([item["status"] for item in self.fx.store.list_approvals("college_a", status=None)], ["consumed"], "no second confirmation is asked for")
+
+    async def test_one_record_change_per_confirmation(self):
+        pri = principal(PrincipalType.PRINCIPAL)
+        self._model_plans([self._update("MBA001", "C"), self._update("MBA002", "C", "s2")])
+        response = await self.run_command("Move MBA001 and MBA002 to section C", who=pri)
+        self.assertEqual(response.status, "needs_input")
+        self.assertIn("one record per confirmation", response.answer)
+        self.assertEqual(self.fx.store.list_approvals("college_a", status=None), [])
+
+    async def test_steps_around_a_confirmed_change_run_once(self):
+        pri = principal(PrincipalType.PRINCIPAL)
+
+        def titles():
+            return [item["title"] for item in self.fx.notifications.inbox(pri, "college_a")]
+
+        # A write planned before the change ran when the confirmation was asked for: it is not repeated.
+        self._model_plans([self._notify("Before", "s1"), self._update("MBA003", "D", "s2")])
+        first = await self.run_command("Tell the office, then move MBA003 to section D", who=pri)
+        self.assertEqual(first.status, "approval_required")
+        self.fx.gateway.decide_approval(pri, "college_a", first.approval["approval_id"], approve=True)
+        second = await self.run_command("Tell the office, then move MBA003 to section D", who=pri, approval_id=first.approval["approval_id"])
+        self.assertEqual(second.status, "complete", second.answer)
+        self.assertEqual(titles().count("Before"), 1)
+        # A step planned after the change still runs once it is confirmed.
+        self._model_plans([self._update("MBA004", "E"), self._notify("After", "s2")])
+        first = await self.run_command("Move MBA004 to section E, then tell the office", who=pri)
+        self.assertEqual(titles().count("After"), 0)
+        self.fx.gateway.decide_approval(pri, "college_a", first.approval["approval_id"], approve=True)
+        second = await self.run_command("Move MBA004 to section E, then tell the office", who=pri, approval_id=first.approval["approval_id"])
+        self.assertEqual([(step.tool, step.status) for step in second.steps], [("update_student_record", "success"), ("create_notification", "success")])
+        self.assertEqual(titles().count("After"), 1)
+        self.assertEqual(self.fx.store.get_record("college_a", "student", "mba004")["section"], "E")
+
+    async def test_a_confirmed_re_send_resumes_the_plan_that_asked_and_never_plans_again(self):
+        pri = principal(PrincipalType.PRINCIPAL)
+        # Planning the words again would give another student and an email nobody saw.
+        calls = self._model_plans([self._update("MBA002", "B")], [self._update("MBA004", "B"), self._notify("MBA004 moved", "s2")])
+        first = await self.run_command("Move Student 2 to section B", who=pri)
+        self.fx.gateway.decide_approval(pri, "college_a", first.approval["approval_id"], approve=True)
+        second = await self.run_command("Move Student 2 to section B", who=pri, approval_id=first.approval["approval_id"])
+        self.assertEqual(second.status, "complete")
+        self.assertEqual(len(calls), 1, "the confirmed re-send is not planned again")
+        self.assertEqual([step.tool for step in second.steps], ["update_student_record"])
+        self.assertEqual(self.fx.store.get_record("college_a", "student", "mba002")["section"], "B")
+        self.assertNotEqual(self.fx.store.get_record("college_a", "student", "mba004").get("section"), "B")
+        self.assertEqual(self.fx.notifications.inbox(pri, "college_a"), [])
+
+    async def test_later_steps_use_the_outputs_of_steps_that_ran_before_the_confirmation(self):
+        pri = principal(PrincipalType.PRINCIPAL)
+        after = {**self._notify("After", "s3"), "bindings": {"reference_id": "$s1.summary"}, "depends_on": ["s1"]}
+        self._model_plans([self._notify("Before", "s1"), self._update("MBA003", "D", "s2"), after])
+        first = await self.run_command("Tell the office, move MBA003 to D, then tell them again", who=pri)
+        self.assertEqual(first.status, "approval_required")
+        self.fx.gateway.decide_approval(pri, "college_a", first.approval["approval_id"], approve=True)
+        second = await self.run_command("Tell the office, move MBA003 to D, then tell them again", who=pri, approval_id=first.approval["approval_id"])
+        self.assertEqual([(step.tool, step.status) for step in second.steps], [("update_student_record", "success"), ("create_notification", "success")])
+        inbox = {item["title"]: item for item in self.fx.notifications.inbox(pri, "college_a")}
+        self.assertEqual(sorted(inbox), ["After", "Before"])
+        self.assertIn("Before", inbox["After"]["reference_id"], "the later step read the earlier step's kept output")
+
+    async def test_a_plan_whose_steps_name_later_ones_resumes_without_failing(self):
+        pri = principal(PrincipalType.PRINCIPAL)
+        count = {"step_id": "s1", "tool": "count_students", "arguments": {}, "purpose": "count", "depends_on": ["s2"]}
+        self._model_plans([count, self._notify("Heads up", "s2"), self._update("MBA005", "F", "s3")])
+        first = await self.run_command("Count, notify, then move MBA005 to F", who=pri)
+        self.assertEqual(first.status, "approval_required")
+        self.fx.gateway.decide_approval(pri, "college_a", first.approval["approval_id"], approve=True)
+        second = await self.run_command("Count, notify, then move MBA005 to F", who=pri, approval_id=first.approval["approval_id"])
+        self.assertEqual(second.status, "complete")
+        self.assertEqual(self.fx.store.get_record("college_a", "student", "mba005")["section"], "F")
+
+    async def test_a_confirmation_kept_without_its_plan_runs_the_confirmed_call_alone(self):
+        pri = principal(PrincipalType.PRINCIPAL)
+        self._model_plans([self._update("MBA001", "G"), self._notify("After", "s2")])
+        first = await self.run_command("Move MBA001 to G, then tell the office", who=pri)
+        approval_id = first.approval["approval_id"]
+        self.fx.store.backend.execute("UPDATE approvals SET resume_json = NULL WHERE approval_id = ?", (approval_id,))
+        self.fx.gateway.decide_approval(pri, "college_a", approval_id, approve=True)
+        second = await self.run_command("Move MBA001 to G, then tell the office", who=pri, approval_id=approval_id)
+        self.assertEqual([step.tool for step in second.steps], ["update_student_record"])
+        self.assertEqual(self.fx.store.get_record("college_a", "student", "mba001")["section"], "G")
+        # The kept plan is internal: listings of confirmations do not carry it.
+        self.assertNotIn("resume_json", self.fx.store.list_approvals("college_a", status=None)[0])
+
+    async def test_a_record_change_is_confirmed_in_the_foreground_even_when_sent_to_the_background(self):
+        pri = principal(PrincipalType.PRINCIPAL)
+        first = await self.run_command("Update the phone number of student MBA005 to 9999977777", who=pri, run_in_background=True)
+        self.assertEqual(first.status, "approval_required", "a background job has nowhere to ask for the confirmation")
+        self.assertIsNone(first.job_id)
+        self.fx.gateway.decide_approval(pri, "college_a", first.approval["approval_id"], approve=True)
+        second = await self.run_command("Update the phone number of student MBA005 to 9999977777", who=pri, approval_id=first.approval["approval_id"], run_in_background=True)
+        self.assertEqual(second.status, "complete")
+        self.assertEqual(self.fx.store.get_record("college_a", "student", "mba005")["phone"], "9999977777")
+
     async def test_background_execution_notifies_the_requester(self):
         response = await self.run_command("How many students are there?", run_in_background=True)
         self.assertEqual(response.status, "accepted")

@@ -56,4 +56,16 @@ def resolve_arguments(arguments: Mapping[str, Any], bindings: Mapping[str, str],
     return resolved
 
 
-__all__ = ["BindingError", "is_reference", "resolve_arguments", "resolve_reference"]
+
+def referenced_steps(step: Any) -> set[str]:
+    """The steps a plan step waits for or reads from."""
+
+    found = set(step.depends_on)
+    for value in (*step.bindings.values(), *step.arguments.values()):
+        match = _REFERENCE.match(value) if isinstance(value, str) else None
+        if match is not None:
+            found.add(match.group("step"))
+    return found
+
+
+__all__ = ["BindingError", "is_reference", "referenced_steps", "resolve_arguments", "resolve_reference"]

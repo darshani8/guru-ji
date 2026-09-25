@@ -8,6 +8,8 @@ is notified when the work completes.
 from __future__ import annotations
 
 import hashlib
+import logging
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from time import monotonic
 from typing import Any
@@ -18,7 +20,7 @@ from ..domain.audit import AuditEvent, AuditOutcome
 from ..domain.principals import Capability, Principal
 from ..gateway.gateway import ToolGateway
 from ..gateway.registry import PlatformToolRegistry
-from ..gateway.spec import ToolCallContext
+from ..gateway.spec import RiskLevel, ToolCallContext
 from ..institution_data.store import InstitutionDataStore
 from ..observability.tracing import TraceRecorder
 from ..open_task.routing import OPEN_TASK_INTENT, route_to_open_task
@@ -26,13 +28,15 @@ from ..orchestration.answer_synthesizer import AssistantAnswer, apply_model_word
 from ..persistence.database import InMemoryControlStore, PostgresControlStore, SqliteControlStore
 from ..policy.query_limits import QueryLimits
 from ..providers.model_base import TextModel
-from .bindings import BindingError, resolve_arguments
-from .contracts import AgentCommand, AgentPlan, AgentResponse, StepResult
-from .planner import DeterministicPlanner, ModelPlanner, Vocabulary
+from .bindings import BindingError, referenced_steps, resolve_arguments
+from .contracts import AgentCommand, AgentPlan, AgentResponse, PlanStep, StepResult
+from .planner import TOOL_GROUP_AGENT, DeterministicPlanner, ModelPlanner, Vocabulary
 from .specialists import SpecializedAgent, build_specialists
 from .verification import overall_status, verify
 
 ControlStore = InMemoryControlStore | PostgresControlStore | SqliteControlStore
+ONE_CHANGE_PER_CONFIRMATION = "I can change one record per confirmation. Please ask for each change separately."
+logger = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -70,6 +74,67 @@ class MasterAgent:
             return await self.model_planner.plan(command.text, tools, vocabulary)
         return self.planner.plan(command.text, tools, vocabulary)
 
+    def _risk(self, step: PlanStep) -> RiskLevel:
+        return self.registry.get(step.tool).risk if self.registry.has(step.tool) else RiskLevel.HIGH_RISK
+
+    def _approved_call(self, command: AgentCommand) -> Mapping[str, Any] | None:
+        """The confirmed tool call a re-sent command carries, while it can still run."""
+
+        if not command.approval_id:
+            return None
+        try:
+            record = self.store.get_approval(command.scope.college_id, command.approval_id)
+        except Exception:  # noqa: BLE001 - the gateway reports an unusable confirmation itself
+            logger.exception("could not read approval %s", command.approval_id)
+            return None
+        if record is None or record.get("status") != "approved" or record.get("principal_id") != command.principal.principal_id or not self.registry.has(str(record.get("tool_name"))):
+            return None
+        return record
+
+    def _resume(self, approved: Mapping[str, Any]) -> tuple[AgentPlan, dict[str, Any]]:
+        """The plan a confirmed re-send runs, and the outputs of the steps that already ran.
+
+        It is the plan that asked for the confirmation, kept with it, from the
+        confirmed step on, with the confirmed call in place of that step:
+        planning the words again can give other arguments (a model's wording,
+        or its fallback) whose confirmation would be asked for without end,
+        other steps, or another order. Steps before it ran when the
+        confirmation was asked for; later ones use their kept outputs. A
+        confirmation kept without its plan runs the confirmed call alone.
+        """
+
+        tool = self.registry.get(str(approved["tool_name"]))
+        kept = approved.get("resume") or {}
+        try:
+            steps = [PlanStep(str(item["step_id"]), str(item["tool"]), dict(item.get("arguments") or {}), str(item.get("purpose") or ""), tuple(item.get("depends_on") or ()), dict(item.get("bindings") or {}), str(item.get("agent") or "data")) for item in kept["plan"]["steps"]]
+            index = next(position for position, step in enumerate(steps) if step.step_id == kept["stopped_at"] and step.tool == tool.name)
+        except (KeyError, TypeError, ValueError, StopIteration):
+            confirmed = PlanStep("s1", tool.name, dict(approved["arguments"]), f"run the confirmed {tool.name}", agent=TOOL_GROUP_AGENT.get(tool.group, "data"))
+            return AgentPlan(tool.name, [confirmed], summary=confirmed.purpose, planner="approval"), {}
+        stopped = steps[index]
+        remaining = [PlanStep(stopped.step_id, tool.name, dict(approved["arguments"]), stopped.purpose, (), {}, stopped.agent), *steps[index + 1:]]
+        # Dependencies on steps that already ran are met by their kept outputs.
+        present = {step.step_id for step in remaining}
+        for step in remaining:
+            step.depends_on = tuple(dependency for dependency in step.depends_on if dependency in present)
+        plan = kept["plan"]
+        resumed = AgentPlan(str(plan.get("intent") or tool.name), remaining, summary=" then ".join(step.purpose for step in remaining), planner="approval", entities=dict(plan.get("entities") or {}))
+        return resumed, dict(kept.get("completed") or {})
+
+    def _keep_for_resume(self, command: AgentCommand, plan: AgentPlan, results: list[StepResult]) -> None:
+        """Keep, with the confirmation just asked for, the plan and the outputs its later steps use."""
+
+        stopped = next((result for result in results if result.status == "approval_required" and result.approval), None)
+        if stopped is None:
+            return
+        index = next(position for position, step in enumerate(plan.steps) if step.step_id == stopped.step_id)
+        needed = {step_id for step in plan.steps[index + 1:] for step_id in referenced_steps(step)}
+        outputs = {result.step_id: {"data": result.data, "summary": result.summary} for result in results if result.ok and result.step_id in needed}
+        try:
+            self.store.set_approval_resume(command.scope.college_id, str(stopped.approval["approval_id"]), principal_id=command.principal.principal_id, resume={"plan": plan.as_dict(), "stopped_at": stopped.step_id, "completed": outputs})
+        except Exception:  # noqa: BLE001 - without it the confirmed call still runs, alone
+            logger.exception("could not keep the plan for approval %s", stopped.approval.get("approval_id"))
+
     def _refuse(self, command: AgentCommand, reason: str, started: float) -> AgentResponse:
         response = AgentResponse(command.request_id, "refused", f"I cannot run this command: {reason}", refusal_reason=reason, duration_ms=int((monotonic() - started) * 1000), conversation_id=command.conversation_id)
         self._record(command, None, response, started)
@@ -98,9 +163,11 @@ class MasterAgent:
             pass
 
     # --------------------------------------------------------------- execute
-    async def execute(self, command: AgentCommand, plan: AgentPlan) -> list[StepResult]:
+    async def execute(self, command: AgentCommand, plan: AgentPlan, completed: Mapping[str, Any] | None = None) -> list[StepResult]:
+        """Run the plan in order; ``completed`` holds the outputs of steps that ran earlier (a resumed plan)."""
+
         results: list[StepResult] = []
-        completed: dict[str, Any] = {}
+        completed = dict(completed or {})
         failed: set[str] = set()
         for step in plan.steps:
             if any(dependency in failed for dependency in step.depends_on):
@@ -163,7 +230,8 @@ class MasterAgent:
                     if listing:
                         fragments.append(listing)
             elif result.status == "approval_required":
-                fragments.append(f"{result.tool} needs your confirmation before it runs.")
+                note = (result.approval or {}).get("note")
+                fragments.append(f"{result.tool} needs your confirmation before it runs{f' ({note})' if note else ''}.")
             elif result.status in {"denied", "failed", "invalid_arguments", "unknown_tool"}:
                 fragments.append(f"{result.tool} could not run: {result.denial_reason or result.status}.")
         for result in results:
@@ -186,22 +254,36 @@ class MasterAgent:
         if not principal.can_access(command.scope):
             return self._refuse(command, "the requested institution is outside your authorised scope", started)
         self.tracer.record("agent.command", trace_id=command.request_id, attributes={"request_id": command.request_id, "principal_id": principal.principal_id, "scope_college_id": command.scope.college_id})
-        plan = await self.plan(command)
-        if self.open_task is not None:
+        approved = self._approved_call(command)
+        earlier: dict[str, Any] = {}
+        if approved is not None:
+            plan, earlier = self._resume(approved)
+        else:
+            plan = await self.plan(command)
+        if approved is None and self.open_task is not None:
             route = route_to_open_task(command.text, plan)
             if route is not None:
                 return await self._open_task(command, route, started)
-        if plan.clarification:
-            response = AgentResponse(command.request_id, "needs_input", plan.clarification, intent=plan.intent, plan=plan.as_dict(), clarification=plan.clarification, duration_ms=int((monotonic() - started) * 1000), conversation_id=command.conversation_id)
+        clarification = plan.clarification
+        record_changes = sum(1 for step in plan.steps if self._risk(step) is RiskLevel.HIGH_RISK)
+        if not clarification and record_changes > 1:
+            # Execution stops at the first confirmation, so a second change could never run.
+            clarification = ONE_CHANGE_PER_CONFIRMATION
+        if clarification:
+            response = AgentResponse(command.request_id, "needs_input", clarification, intent=plan.intent, plan=plan.as_dict(), clarification=clarification, duration_ms=int((monotonic() - started) * 1000), conversation_id=command.conversation_id)
             self._record(command, plan, response, started)
             return response
-        if command.run_in_background and not command.in_background and self.background is not None:
+        # A record change runs in the foreground: its confirmation, and then its
+        # result, must reach the person, and a background job has nowhere to ask.
+        if command.run_in_background and not command.in_background and self.background is not None and not record_changes:
             job_id = self._enqueue(command)
             response = AgentResponse(command.request_id, "accepted", "Understood. I am working on it in the background and will notify you when it is done.", intent=plan.intent, plan=plan.as_dict(), job_id=job_id, duration_ms=int((monotonic() - started) * 1000), conversation_id=command.conversation_id)
             self._record(command, plan, response, started)
             return response
-        results = await self.execute(command, plan)
+        results = await self.execute(command, plan, earlier)
         status = overall_status(plan, results)
+        if status == "approval_required":
+            self._keep_for_resume(command, plan, results)
         warnings = [warning for result in results for warning in result.warnings] + verify(plan, results)
         answer_text = self._compose(plan, results, status)
         generation_mode = "deterministic"

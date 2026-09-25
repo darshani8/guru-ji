@@ -4,7 +4,7 @@
   'use strict';
 
   const $ = (id) => document.getElementById(id);
-  const state = { entities: [], lastApproval: null, lastCommand: '' };
+  const state = { entities: [], lastApproval: null, jobs: new Map(), shownJob: null, reviewJob: null };
 
   function headers(json) {
     return window.SaffronAuth.headers(json);
@@ -24,7 +24,9 @@
         const data = await response.json();
         message = data.detail || data.error?.message || message;
       } catch { /* non-JSON error */ }
-      throw new Error(message);
+      const error = new Error(message);
+      error.status = response.status;
+      throw error;
     }
     if (raw) return response;
     return type.includes('application/json') ? response.json() : response;
@@ -103,10 +105,10 @@
     return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
   }
 
-  function pill(status) {
-    const kind = ['imported', 'complete', 'success', 'succeeded', 'indexed', 'sent', 'approved'].includes(status) ? 'ok'
+  function pill(status, kind) {
+    kind = kind ?? (['imported', 'complete', 'success', 'succeeded', 'indexed', 'sent', 'approved'].includes(status) ? 'ok'
       : ['needs_review', 'partial', 'needs_input', 'approval_required', 'queued', 'processing', 'accepted', 'pending', 'review'].includes(status) ? 'warn'
-        : ['failed', 'refused', 'denied', 'rejected'].includes(status) ? 'bad' : '';
+        : ['failed', 'refused', 'denied', 'rejected'].includes(status) ? 'bad' : '');
     return `<span class="pill ${kind}">${escapeHtml(status)}</span>`;
   }
 
@@ -130,7 +132,8 @@
   });
 
   // ------------------------------------------------------------------ commands
-  function renderCommandResult(data) {
+  // `command` is the text that was sent; confirming its approval re-sends exactly it.
+  function renderCommandResult(data, command) {
     const box = $('command-result');
     box.hidden = false;
     const sources = (data.sources || []).map((source) => source.url
@@ -148,7 +151,7 @@
     bindDownloads(box);
     const approvalBox = $('command-approval');
     if (data.status === 'approval_required' && data.approval) {
-      state.lastApproval = data.approval.approval_id;
+      state.lastApproval = { id: data.approval.approval_id, command };
       approvalBox.hidden = false;
       approvalBox.innerHTML = `<div class="result-box">This action changes institutional records: <strong>${escapeHtml(data.approval.tool_name)}</strong> ${escapeHtml(JSON.stringify(data.approval.arguments))}
 <button id="approval-confirm" class="btn" type="button">Confirm and run</button> <button id="approval-reject" class="btn danger" type="button">Cancel</button></div>`;
@@ -157,42 +160,64 @@
     } else {
       approvalBox.hidden = true;
       approvalBox.innerHTML = '';
+      state.lastApproval = null;
     }
   }
 
+  // Returns the error when the command could not be run or answered.
   async function runCommand(approvalId) {
     const text = $('command-input').value.trim();
-    if (!text) return;
-    state.lastCommand = text;
+    if (!text) return null;
+    if (!approvalId) {
+      // A new command: a confirmation still showing belongs to an earlier one
+      // and must not be confirmed while this one is pending.
+      $('command-approval').hidden = true;
+      $('command-approval').innerHTML = '';
+      state.lastApproval = null;
+    }
     $('command-run').disabled = true;
     try {
       const data = await api('/v1/agent/commands', {
         method: 'POST',
         json: { command: text, channel: 'text', run_in_background: $('command-background').value === 'true', approval_id: approvalId || null, include_data: false },
       });
-      renderCommandResult(data);
+      renderCommandResult(data, text);
+      return null;
     } catch (error) {
       toast(error.message);
+      return error;
     } finally {
       $('command-run').disabled = false;
     }
   }
 
+  // The id and its command are taken before any await: the re-sent command may
+  // ask for a new confirmation, whose id and buttons must survive this call returning.
   async function decideApproval(approve) {
-    if (!state.lastApproval) return;
+    const approval = state.lastApproval;
+    if (!approval) return;
+    state.lastApproval = null;
+    setBusy($('command-approval'), true);
     try {
-      await api(`/v1/agent/approvals/${state.lastApproval}`, { method: 'POST', json: { approve } });
-      if (approve) {
-        $('command-input').value = state.lastCommand;
-        await runCommand(state.lastApproval);
-      } else {
-        toast('Action cancelled.');
-        $('command-approval').hidden = true;
-      }
+      await api(`/v1/agent/approvals/${encodeURIComponent(approval.id)}`, { method: 'POST', json: { approve } });
     } catch (error) {
       toast(error.message);
-    } finally {
-      state.lastApproval = null;
+      // An expired or already decided confirmation cannot be used again: the command must be sent anew.
+      $('command-approval').hidden = true;
+      return;
+    }
+    if (!approve) {
+      toast('Action cancelled.');
+      $('command-approval').hidden = true;
+      return;
+    }
+    // Re-send the command this confirmation was issued for, not the last one typed.
+    $('command-input').value = approval.command;
+    const failed = await runCommand(approval.id);
+    if (failed) {
+      // The answer was lost, not necessarily the change (a timeout can come after it was made).
+      $('command-approval').hidden = true;
+      toast(`The confirmed change may or may not have been made (${failed.message}). Check the record before sending the command again.`);
     }
   }
 
@@ -211,6 +236,16 @@
   $('command-input').addEventListener('keydown', (event) => { if (event.key === 'Enter') runCommand(null); });
 
   // ---------------------------------------------------------------- ingestion
+  // Processing, and with the thread or SQS queue even the start of it, runs on
+  // the server's job queue: a job is followed until it settles, so its review
+  // opens and its result shows without pressing Refresh.
+  const RUNNING = ['queued', 'processing'];
+  const FOLLOW_MS = 10 * 60 * 1000;
+  // A job still "processing" after this long lost its run (a restart or a
+  // crash); the server restarts it on Retry and leaves a live run alone.
+  const STALLED_MS = 15 * 60 * 1000;
+  const following = new Set();
+
   async function loadEntities() {
     try {
       const data = await api('/v1/ingestion/entities');
@@ -225,88 +260,303 @@
     } catch { /* role may not ingest */ }
   }
 
+  function importCounts(result) {
+    const reasons = Object.entries(result.skipped_reasons || {}).map(([reason, count]) => `${reason.replace(/_/g, ' ')} ${count}`);
+    return `+${result.inserted} / ~${result.updated} / =${result.unchanged} / skip ${result.skipped}${reasons.length ? ` (${reasons.join(', ')})` : ''}`;
+  }
+
+  // An import that brought in nothing is not a success, whatever its status says.
+  function jobPill(job) {
+    const result = job.report?.import;
+    const empty = job.status === 'imported' && result && !(result.inserted + result.updated + result.unchanged);
+    return pill(job.status, empty ? 'warn' : undefined);
+  }
+
+  // Where a job stands and what the person does next.
+  function jobSummary(job) {
+    const result = job.report?.import;
+    if (job.status === 'imported') {
+      if (!result) return 'Imported.';
+      return `Imported: ${result.inserted} new, ${result.updated} updated, ${result.unchanged} unchanged, ${result.skipped} skipped${result.message ? ` (${result.message})` : ''}.`;
+    }
+    if (job.status === 'ready') return `Ready to import: press Commit.${job.error ? ` ${job.error}` : ''}`;
+    if (job.status === 'needs_review') return job.stage === 'duplicate_review' ? 'Possible duplicates need a decision before the import.' : 'The column mapping needs your review.';
+    if (job.status === 'failed') return `Failed: ${job.error || 'no reason was recorded'}. Press Retry once the cause is fixed.`;
+    return `Working on it (${job.stage})…`;
+  }
+
+  function stalled(job) {
+    return job.status === 'processing' && Date.now() - Date.parse(job.updated_at) > STALLED_MS;
+  }
+
+  function jobAction(job) {
+    const id = escapeHtml(job.job_id);
+    if (job.status === 'needs_review') return `<button class="btn secondary" data-review="${id}" type="button">Review</button>`;
+    if (job.status === 'ready') return `<button class="btn" data-commit="${id}" type="button">Commit</button>`;
+    if (job.status === 'failed' || stalled(job)) return `<button class="btn secondary" data-retry="${id}" type="button">Retry</button>`;
+    return '';
+  }
+
   function renderJobs(jobs) {
     $('jobs-table').innerHTML = table(['Job', 'Entity', 'Status', 'Stage', 'Rows', 'Import', ''], jobs, (job) => [
       `<code>${escapeHtml(job.job_id.slice(0, 12))}</code><br><span class="muted">${escapeHtml(job.created_at.slice(0, 19))}</span>`,
       escapeHtml(job.entity || '—'),
-      pill(job.status),
+      jobPill(job),
       escapeHtml(job.stage),
       String(job.row_count ?? ''),
-      job.report?.import ? `+${job.report.import.inserted} / ~${job.report.import.updated} / =${job.report.import.unchanged} / skip ${job.report.import.skipped}` : (job.error ? `<span class="muted">${escapeHtml(job.error)}</span>` : ''),
-      job.status === 'needs_review' ? `<button class="btn secondary" data-review="${escapeHtml(job.job_id)}" type="button">Review</button>` : (job.status === 'ready' ? `<button class="btn" data-commit="${escapeHtml(job.job_id)}" type="button">Commit</button>` : ''),
+      job.report?.import ? escapeHtml(importCounts(job.report.import)) + (job.report.import.message ? `<br><span class="muted">${escapeHtml(job.report.import.message)}</span>` : '')
+        : (job.error ? `<span class="muted">${escapeHtml(job.error)}</span>` : ''),
+      jobAction(job),
     ]);
     $('jobs-table').querySelectorAll('[data-review]').forEach((button) => button.addEventListener('click', () => openReview(button.dataset.review)));
-    $('jobs-table').querySelectorAll('[data-commit]').forEach((button) => button.addEventListener('click', () => commitJob(button.dataset.commit)));
+    $('jobs-table').querySelectorAll('[data-commit]').forEach((button) => button.addEventListener('click', () => commitJob(button.dataset.commit, button)));
+    $('jobs-table').querySelectorAll('[data-retry]').forEach((button) => button.addEventListener('click', () => retryJob(button.dataset.retry, button)));
   }
 
   async function loadJobs() {
     try {
       const data = await api('/v1/ingestion/jobs?limit=25');
+      state.jobs = new Map(data.jobs.map((job) => [job.job_id, job]));
       renderJobs(data.jobs);
     } catch (error) {
       $('jobs-table').innerHTML = `<p class="muted">${escapeHtml(error.message)}</p>`;
     }
   }
 
-  async function commitJob(jobId) {
+  function showJobResult(job) {
+    if (job.job_id !== state.shownJob) return;
+    const box = $('upload-result');
+    box.hidden = false;
+    box.innerHTML = `${jobPill(job)} Job ${escapeHtml(job.job_id)} · stage ${escapeHtml(job.stage)} · entity ${escapeHtml(job.entity || 'detecting')}\n${escapeHtml(jobSummary(job))}`;
+  }
+
+  // After every step: show the job, then open what needs the person next, or
+  // follow the job while the server is still working on it. A job followed in
+  // the background never takes over a review card that shows another job.
+  function settle(job, { background = false } = {}) {
+    showJobResult(job);
+    loadJobs();
+    if (job.status === 'needs_review') {
+      if (!background || $('review-card').hidden || state.reviewJob === job.job_id) openReview(job.job_id);
+      else toast(`Job ${job.job_id.slice(0, 12)} needs review: press Review in Recent jobs.`);
+      return;
+    }
+    if (state.reviewJob === job.job_id) {
+      $('review-card').hidden = true;
+      state.reviewJob = null;
+    }
+    if (RUNNING.includes(job.status) && !stalled(job)) followJob(job.job_id);
+  }
+
+  // ``unchangedSince`` keeps following a job the queue has not picked up yet
+  // (a retried job still reads "failed" until a worker starts it).
+  async function followJob(jobId, { unchangedSince = null } = {}) {
+    if (following.has(jobId)) return;
+    following.add(jobId);
     try {
-      await api(`/v1/ingestion/jobs/${jobId}/commit`, { method: 'POST', json: {} });
-      toast('Import committed.');
+      const deadline = Date.now() + FOLLOW_MS;
+      let delay = 800;
+      while (Date.now() < deadline) {
+        await new Promise((resolve) => { setTimeout(resolve, delay); });
+        delay = Math.min(delay * 1.5, 8000);
+        let job;
+        try {
+          job = (await api(`/v1/ingestion/jobs/${encodeURIComponent(jobId)}`)).job;
+        } catch (error) {
+          if (error.status === 403 || error.status === 404) return;
+          continue;
+        }
+        if (RUNNING.includes(job.status) || (unchangedSince && job.updated_at === unchangedSince)) {
+          showJobResult(job);
+          continue;
+        }
+        following.delete(jobId);
+        settle(job, { background: true });
+        return;
+      }
       loadJobs();
+    } finally {
+      following.delete(jobId);
+    }
+  }
+
+  // Where the job really stands after a step failed: an approval that timed out
+  // may still finish, and one that failed may have moved the job on. A mapping
+  // still under review keeps its card, so the reviewer can fix the selection.
+  async function refreshJob(jobId, { keepMappingReview = false } = {}) {
+    try {
+      const { job } = await api(`/v1/ingestion/jobs/${encodeURIComponent(jobId)}`);
+      if (keepMappingReview && job.status === 'needs_review' && job.stage === 'mapping_review') {
+        showJobResult(job);
+        return;
+      }
+      settle(job);
+    } catch {
+      loadJobs();
+    }
+  }
+
+  async function commitJob(jobId, button) {
+    if (button) button.disabled = true;
+    try {
+      const { job } = await api(`/v1/ingestion/jobs/${encodeURIComponent(jobId)}/commit`, { method: 'POST', json: {} });
+      state.shownJob = jobId;
+      toast(jobSummary(job));
+      settle(job);
     } catch (error) {
       toast(error.message);
+      refreshJob(jobId);
     }
+  }
+
+  async function retryJob(jobId, button) {
+    if (button) button.disabled = true;
+    const before = state.jobs.get(jobId)?.updated_at;
+    try {
+      const { job } = await api(`/v1/ingestion/jobs/${encodeURIComponent(jobId)}/retry`, { method: 'POST', json: {} });
+      state.shownJob = jobId;
+      toast('Retrying the job.');
+      if (job.updated_at === before) {
+        showJobResult(job);
+        followJob(jobId, { unchangedSince: before });
+      } else {
+        settle(job);
+      }
+    } catch (error) {
+      toast(error.message);
+      loadJobs();
+    }
+  }
+
+  function setBusy(root, busy) {
+    root.querySelectorAll('button, select').forEach((element) => { element.disabled = busy; });
+  }
+
+  function entityFields(name) {
+    return (state.entities.find((item) => item.name === name) || { fields: [] }).fields;
+  }
+
+  function fieldOptions(entityName, selected) {
+    const fields = entityFields(entityName);
+    return `<option value="">— keep as extra attribute —</option>${fields.map((field) => `<option value="${escapeHtml(field.name)}"${field.name === selected ? ' selected' : ''}>${escapeHtml(field.name)}${field.required ? ' *' : ''}</option>`).join('')}`;
+  }
+
+  // The detected entity and its runners-up first, then every other entity.
+  function entityChoices(payload) {
+    const names = [payload.entity, ...(payload.entity_alternatives || []).map((item) => item.entity), ...state.entities.map((item) => item.name)];
+    return [...new Set(names.filter(Boolean))];
+  }
+
+  function missingRequired(entityName, mapped) {
+    const chosen = new Set(mapped);
+    // First and last name together stand in for the name.
+    if (chosen.has('first_name') || chosen.has('last_name')) chosen.add('name');
+    return entityFields(entityName).filter((field) => field.required && !chosen.has(field.name)).map((field) => field.name);
+  }
+
+  function mappingReview(jobId, review) {
+    const payload = review.payload;
+    const block = document.createElement('div');
+    block.className = 'result-box';
+    const reasons = (payload.review_required || []).map((item) => `${item.source_header} (${item.reason || 'uncertain'})`).join('; ') || 'none';
+    const doubt = (payload.previous_error ? `The last attempt failed: ${payload.previous_error}. ` : '')
+      + (payload.entity_uncertain ? `The records were detected as ${payload.entity}, but not with certainty: check the kind of records. ` : '');
+    const entities = entityChoices(payload).map((name) => `<option value="${escapeHtml(name)}"${name === payload.entity ? ' selected' : ''}>${escapeHtml(name)}</option>`).join('');
+    const rows = payload.headers.map((header) => `<div>${escapeHtml(header)}</div><div><select data-header="${escapeHtml(header)}">${fieldOptions(payload.entity, payload.proposed_mapping[header])}</select></div><div class="muted">${escapeHtml((payload.samples[header] || []).join(' | ').slice(0, 40))}</div>`).join('');
+    block.innerHTML = `<strong>Column mapping</strong><div class="field-row stack-sm"><label>Records in this file <select data-entity>${entities}</select></label></div><div class="muted stack-sm">${escapeHtml(doubt)}Review required: ${escapeHtml(reasons)}. Missing required: <span data-missing></span>.</div><div class="mapping-grid stack-sm"><div class="muted">Source header</div><div class="muted">Canonical field</div><div class="muted">Sample</div>${rows}</div><div class="stack"><button class="btn" data-approve type="button">Approve mapping</button></div>`;
+    const entitySelect = block.querySelector('select[data-entity]');
+    const selects = [...block.querySelectorAll('select[data-header]')];
+    const showMissing = () => {
+      // Without the entity's field list the choices cannot be checked (or even offered): say so rather than "none".
+      const known = entityFields(entitySelect.value).length > 0;
+      const missing = known ? missingRequired(entitySelect.value, selects.map((select) => select.value).filter(Boolean)) : [];
+      block.querySelector('[data-missing]').textContent = known ? (missing.join(', ') || 'none') : 'unknown (the field list could not be loaded; reload the page)';
+      block.querySelector('[data-approve]').disabled = !known;
+    };
+    entitySelect.addEventListener('change', () => {
+      // Keep each choice the new entity also has; the rest start unmapped.
+      selects.forEach((select) => { select.innerHTML = fieldOptions(entitySelect.value, select.value); });
+      showMissing();
+    });
+    selects.forEach((select) => select.addEventListener('change', () => { select.classList.remove('invalid'); showMissing(); }));
+    showMissing();
+    block.querySelector('[data-approve]').addEventListener('click', async () => {
+      const mapping = {};
+      const byField = new Map();
+      selects.forEach((select) => {
+        mapping[select.dataset.header] = select.value || null;
+        select.classList.remove('invalid');
+        if (select.value) byField.set(select.value, [...(byField.get(select.value) || []), select]);
+      });
+      // One canonical field takes one column; say which ones clash instead of sending a request the server refuses.
+      const clash = [...byField.entries()].find(([, list]) => list.length > 1);
+      if (clash) {
+        clash[1].forEach((select) => select.classList.add('invalid'));
+        toast(`${clash[1].map((select) => select.dataset.header).join(' and ')} are both mapped to ${clash[0]}: keep it on one and set the other to “keep as extra attribute”.`);
+        return;
+      }
+      setBusy(block, true);
+      try {
+        const { job } = await api(`/v1/ingestion/jobs/${encodeURIComponent(jobId)}/mapping`, { method: 'POST', json: { mapping, entity: entitySelect.value, remember: true } });
+        state.shownJob = jobId;
+        toast(`Mapping approved. ${jobSummary(job)}`);
+        settle(job);
+      } catch (error) {
+        setBusy(block, false);
+        showMissing();
+        toast(error.message);
+        refreshJob(jobId, { keepMappingReview: true });
+      }
+    });
+    return block;
+  }
+
+  function duplicateReview(jobId, review) {
+    const payload = review.payload;
+    // Two copies of one identifier can only become one record: the choice is which copy.
+    const conflict = payload.kind === 'conflicting_key';
+    const [title, keep, other] = conflict
+      ? ['Same identifier, different details', 'Keep the earlier row (skip this one)', 'Use this row instead']
+      : ['Possible duplicate', 'Same person (skip the new row)', 'Different people (import)'];
+    const differing = conflict && payload.evidence?.differing_fields?.length ? ` · differs in ${payload.evidence.differing_fields.join(', ')}` : '';
+    const block = document.createElement('div');
+    block.className = 'result-box';
+    block.innerHTML = `<strong>${title}</strong> (${escapeHtml(payload.kind)}, score ${escapeHtml(payload.score)})<div class="muted">${escapeHtml(payload.left_locator)} vs ${escapeHtml(payload.right_locator || payload.record_key || 'existing record')}${escapeHtml(differing)} · ${escapeHtml(JSON.stringify(payload.evidence || {}))}</div><div class="stack-sm"><button class="btn" data-decision="approved" type="button">${keep}</button> <button class="btn secondary" data-decision="rejected" type="button">${other}</button></div>`;
+    block.querySelectorAll('button[data-decision]').forEach((button) => button.addEventListener('click', async () => {
+      // One decision at a time: the last one may start the import.
+      setBusy($('review-body'), true);
+      try {
+        const { job } = await api(`/v1/ingestion/reviews/${encodeURIComponent(review.review_id)}`, { method: 'POST', json: { decision: button.dataset.decision } });
+        state.shownJob = jobId;
+        toast(job.status === 'needs_review' ? 'Decision recorded.' : `Decision recorded. ${jobSummary(job)}`);
+        settle(job);
+      } catch (error) {
+        toast(error.message);
+        refreshJob(jobId);
+      }
+    }));
+    return block;
   }
 
   async function openReview(jobId) {
     const card = $('review-card');
     card.hidden = false;
+    state.reviewJob = jobId;
     const body = $('review-body');
     body.innerHTML = '<p class="muted">Loading…</p>';
     try {
-      const data = await api(`/v1/ingestion/jobs/${jobId}`);
+      const data = await api(`/v1/ingestion/jobs/${encodeURIComponent(jobId)}`);
       const reviews = data.pending_reviews || [];
-      if (!reviews.length) { body.innerHTML = '<p class="muted">Nothing to review.</p>'; return; }
-      body.innerHTML = '';
-      reviews.forEach((review) => {
-        const block = document.createElement('div');
-        block.className = 'result-box';
-        if (review.kind === 'mapping') {
-          const payload = review.payload;
-          const entity = state.entities.find((item) => item.name === payload.entity) || { fields: [] };
-          const options = (selected) => `<option value="">— keep as extra attribute —</option>${entity.fields.map((field) => `<option value="${field.name}" ${field.name === selected ? 'selected' : ''}>${field.name}${field.required ? ' *' : ''}</option>`).join('')}`;
-          block.innerHTML = `<strong>Column mapping for ${escapeHtml(payload.entity)}</strong> (confidence ${payload.entity_confidence})
-<div class="muted">Review required: ${escapeHtml((payload.review_required || []).map((item) => item.source_header).join(', ') || 'none')}. Missing required: ${escapeHtml((payload.missing_required || []).join(', ') || 'none')}.</div>
-<div class="mapping-grid stack-sm"><div class="muted">Source header</div><div class="muted">Canonical field</div><div class="muted">Sample</div>
-${payload.headers.map((header) => `<div>${escapeHtml(header)}</div><div><select data-header="${escapeHtml(header)}">${options(payload.proposed_mapping[header])}</select></div><div class="muted">${escapeHtml((payload.samples[header] || []).join(' | ').slice(0, 40))}</div>`).join('')}</div>
-<div class="stack"><button class="btn" type="button">Approve mapping</button></div>`;
-          block.querySelector('button').addEventListener('click', async () => {
-            const mapping = {};
-            block.querySelectorAll('select[data-header]').forEach((select) => { mapping[select.dataset.header] = select.value || null; });
-            try {
-              await api(`/v1/ingestion/jobs/${jobId}/mapping`, { method: 'POST', json: { mapping, entity: payload.entity, remember: true } });
-              toast('Mapping approved; the job continues.');
-              card.hidden = true;
-              loadJobs();
-            } catch (error) { toast(error.message); }
-          });
-        } else {
-          const payload = review.payload;
-          block.innerHTML = `<strong>Possible duplicate</strong> (${escapeHtml(payload.kind)}, score ${payload.score})<div class="muted">${escapeHtml(payload.left_locator)} vs ${escapeHtml(payload.right_locator || payload.record_key || 'existing record')} · ${escapeHtml(JSON.stringify(payload.evidence))}</div>
-<div class="stack-sm"><button class="btn" data-decision="approved" type="button">Same record (skip new row)</button> <button class="btn secondary" data-decision="rejected" type="button">Different (import)</button></div>`;
-          block.querySelectorAll('button[data-decision]').forEach((button) => button.addEventListener('click', async () => {
-            try {
-              await api(`/v1/ingestion/reviews/${review.review_id}`, { method: 'POST', json: { decision: button.dataset.decision } });
-              toast('Decision recorded.');
-              openReview(jobId);
-              loadJobs();
-            } catch (error) { toast(error.message); }
-          }));
-        }
-        body.append(block);
-      });
+      if (reviews.some((review) => review.kind === 'mapping') && !state.entities.length) await loadEntities();
+      // A later openReview owns the card; this answer is stale.
+      if (state.reviewJob !== jobId) return;
+      if (!reviews.length) {
+        body.innerHTML = `<p class="muted">Nothing to review. ${escapeHtml(jobSummary(data.job))}</p>`;
+        return;
+      }
+      body.replaceChildren(...reviews.map((review) => (review.kind === 'mapping' ? mappingReview(jobId, review) : duplicateReview(jobId, review))));
     } catch (error) {
-      body.innerHTML = `<p class="muted">${escapeHtml(error.message)}</p>`;
+      if (state.reviewJob === jobId) body.innerHTML = `<p class="muted">${escapeHtml(error.message)}</p>`;
     }
   }
 
@@ -316,12 +566,8 @@ ${payload.headers.map((header) => `<div>${escapeHtml(header)}</div><div><select 
     $('upload-run').disabled = true;
     try {
       const data = await upload('/v1/ingestion/uploads', file, { entity: $('upload-entity').value, sheet: $('upload-sheet').value, auto_commit: $('upload-autocommit').value });
-      const job = data.job;
-      const box = $('upload-result');
-      box.hidden = false;
-      box.innerHTML = `${pill(job.status)} Job ${escapeHtml(job.job_id)} · stage ${escapeHtml(job.stage)} · entity ${escapeHtml(job.entity || 'detecting')}` + (job.report?.import ? `\nInserted ${job.report.import.inserted}, updated ${job.report.import.updated}, unchanged ${job.report.import.unchanged}, skipped ${job.report.import.skipped}.` : '') + (job.error ? `\n${escapeHtml(job.error)}` : '');
-      loadJobs();
-      if (job.status === 'needs_review') openReview(job.job_id);
+      state.shownJob = data.job.job_id;
+      settle(data.job);
     } catch (error) {
       toast(error.message);
     } finally {
