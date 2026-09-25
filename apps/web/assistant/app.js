@@ -1628,11 +1628,15 @@ function unlockAudio() {
   }
 }
 
+// Agentic Saffron speaks as an Indian man: the male Indian voices of Edge
+// (Prabhat, Madhur, Gagan), Windows (Ravi, Hemant) and Apple (Rishi) come first.
 const VOICE_PREFERENCES = {
-  'en-IN': [/kajal/i, /neerja/i, /heera/i, /aditi/i, /prabhat/i, /ravi/i, /rishi/i, /india/i],
-  'hi-IN': [/kajal/i, /swara/i, /madhur/i, /kalpana/i, /lekha/i, /hemant/i, /हिन्दी/, /hindi/i],
-  'kn-IN': [/sapna/i, /gagan/i, /kannada/i, /ಕನ್ನಡ/],
+  'en-IN': [/prabhat/i, /\bravi\b/i, /rishi/i, /\bmale\b/i],
+  'hi-IN': [/madhur/i, /hemant/i, /\bmale\b/i],
+  'kn-IN': [/gagan/i, /\bmale\b/i],
 };
+// Known women's voices, passed over while any other voice for the language is left.
+const FEMALE_VOICES = /female|kajal|neerja|heera|aditi|raveena|veena|swara|kalpana|lekha|sapna|google हिन्दी/i;
 
 function pickVoice(language) {
   const voices = window.speechSynthesis ? window.speechSynthesis.getVoices() : [];
@@ -1642,7 +1646,10 @@ function pickVoice(language) {
     const hit = matching.find((voice) => pattern.test(voice.name));
     if (hit) return hit;
   }
-  return matching[0] || voices.find((voice) => (voice.lang || '').toLowerCase().startsWith(wanted.slice(0, 2))) || null;
+  // A device with only a woman's Indian voice still speaks with the Indian accent;
+  // one with no Indian voice at all gets a man's voice in the same language.
+  const related = matching.length ? matching : voices.filter((voice) => (voice.lang || '').toLowerCase().startsWith(wanted.slice(0, 2)));
+  return related.find((voice) => /\bmale\b/i.test(voice.name)) || related.find((voice) => !FEMALE_VOICES.test(voice.name)) || related[0] || null;
 }
 
 function speechEcho(text) {

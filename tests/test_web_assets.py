@@ -195,6 +195,17 @@ class WebAssetTests(unittest.TestCase):
             self.assertIn(f'<option value="{language}">', page)
         self.assertIn('id="interrupt-button"', page)
 
+    def test_the_device_voice_is_an_indian_man(self):
+        js = (ASSISTANT / "app.js").read_text(encoding="utf-8")
+        self.assertIn("'en-IN': [/prabhat/i, /\\bravi\\b/i, /rishi/i, /\\bmale\\b/i],", js)
+        self.assertIn("'hi-IN': [/madhur/i, /hemant/i, /\\bmale\\b/i],", js)
+        self.assertIn("'kn-IN': [/gagan/i, /\\bmale\\b/i],", js)
+        # Women's voices are a last resort, never a preference.
+        preferences = js[js.index("const VOICE_PREFERENCES") : js.index("const FEMALE_VOICES")]
+        for name in ("kajal", "neerja", "heera", "aditi", "swara", "kalpana", "lekha", "sapna"):
+            self.assertNotIn(name, preferences)
+        self.assertIn("related.find((voice) => !FEMALE_VOICES.test(voice.name))", js)
+
     def test_streamed_replies_show_as_they_are_spoken_and_can_be_retracted(self):
         js = (ASSISTANT / "app.js").read_text(encoding="utf-8")
         self.assertIn("if (!message.filler) showLiveText(message.client_message_id, message.text);", js)

@@ -230,8 +230,9 @@ class AppSettings:
     voice_max_active_sessions: int = 50
     voice_max_sessions_per_person: int = 2
     voice_utterances_per_minute: int = 20
-    # Spoken replies: "browser" leaves speech to the browser's own voices;
-    # "polly" speaks with Amazon Polly (Kajal, Indian English and Hindi), with
+    # Spoken replies: "browser" leaves speech to the browser's own voices (an
+    # Indian male voice where the device has one); "polly" speaks with Amazon
+    # Polly (Kajal, a woman's voice: Polly has no male Indian voice), with
     # the browser voice as the fallback for Kannada or when Polly is unavailable.
     voice_tts_provider: str = "browser"
     voice_polly_voice_id: str = "Kajal"
