@@ -28,11 +28,48 @@ The client assistant (`apps/web/assistant/`, served at `/`) and the developer pl
 - `POST /v1/ingestion/uploads`, `/v1/ingestion/sheets`, job inspection, mapping approval, duplicate review, commit, import reports. Approving a mapping, committing and the last duplicate decision answer with the job as it stands and run on the job queue; follow it with `GET /v1/ingestion/jobs/{job_id}`.
 - `GET /v1/data/*` unified, minimised data access (students, attendance, fees, exams, faculty, programs, events, admissions).
 - `POST /v1/agent/commands` master agent (text or voice transcripts), `/v1/agent/tools`, approvals for high-risk actions, background jobs, run history.
-- `POST /v1/documents` and `/v1/documents/search` document intelligence with page-level citations.
+- `POST /v1/documents` and `/v1/documents/search` document intelligence with page-level citations; `POST /v1/documents/evaluate` scores the pipeline against labelled questions.
 - `PUT /v1/intelligence/profile`, `POST /v1/intelligence/investigate`, mentions, digest, monitoring runs.
 - `GET /v1/reports` and `/v1/reports/{id}/download` generated reports, notifications, email outbox, institutions.
 
 The `generate_report` tool writes records as CSV, Excel, PDF, Word (`.docx`) or PowerPoint (`.pptx`), with no extra dependencies (`apps/api/app/actions/files.py`). The deterministic planner picks Word for "Word document", "docx" or "MS Word" and PowerPoint for "PowerPoint", "pptx", "presentation" or "slides". A Word file holds up to 5,000 rows and a deck up to 240 rows and 10 columns, 12 rows per slide; past that the file says how many rows it leaves out and suggests Excel.
+
+## Document RAG pipeline
+
+    Documents -> Chunking -> Embedding -> Vector store
+                                              |
+    Query -> Embed query -> Retrieve top-K -> Rerank -> Top-N -> Model -> Cited answer
+                                                                            |
+                                                                    Evaluate (RAG evals)
+
+| Stage | Code | Configuration |
+| --- | --- | --- |
+| Chunking | `documents/chunking.py`: 900-character chunks with 150 characters of overlap. Each chunk keeps its page, and headings stay with their paragraph. | |
+| Embedding | `documents/embeddings.py`: local hashing, Ollama or OpenAI-compatible. | `SAFFRON_EMBEDDING_PROVIDER` |
+| Vector store | `documents/vector_store.py`: `InstitutionVectorStore` scores stored chunk vectors with a hybrid score (0.7 cosine + 0.3 query-term overlap). It filters by classification and category before scoring. Another backend only has to implement `VectorStore.search`. | |
+| Retrieve top-K | `DocumentRagService.retrieve` | `SAFFRON_RAG_RETRIEVE_K` (default 20), or `retrieve_k` per request |
+| Rerank → top-N | `documents/rerank.py`: `LexicalReranker` (BM25 plus query-term coverage and phrase matches, runs locally) or `HttpReranker` (the Cohere, Jina, Voyage, LiteLLM or TEI `/rerank` endpoint). If the reranker fails, retrieval order is kept and the answer carries a warning. | `SAFFRON_RERANK_PROVIDER` = `lexical` \| `http` \| `none`; `top_k` per request (top-N, at most 10); `SAFFRON_RAG_MIN_RERANK_SCORE` drops weak passages |
+| Model → answer | `DocumentRagService.answer`: the model sees only the top-N passages. Its answer must cite them, or the answer falls back to the quoted passages. The response's `pipeline` field reports each stage. | the planner model |
+| Evaluate | `documents/evals.py`: `RagEvaluator` | see below |
+
+**RAG evals.** An eval case is a question plus labels:
+- `expected_document_ids`, `expected_pages` or `expected_text` say which passage is right.
+- `reference_answer` and `must_contain` describe a correct answer.
+- `answerable: false` marks a question the pipeline should decline.
+
+For each case the evaluator reports:
+- **Retrieval** (hit rate, recall, precision, MRR, nDCG), measured on the top-K candidates and again on the reranked top-N, so the reranker's lift is visible.
+- **Generation:** faithfulness, answer relevance, context recall, answer recall and F1 correctness, keyword coverage, citation validity and coverage, and abstention.
+
+The scores are deterministic, so they run in CI. Passing a `judge` model to `RagEvaluator` adds model-graded faithfulness, relevance and correctness.
+
+    make rag-eval                                                        # sample set in evals/rag/
+    PYTHONPATH=apps/api python scripts/rag_eval.py --reranker none       # compare without reranking
+    PYTHONPATH=apps/api python scripts/rag_eval.py --min-rerank-score 0.05 --min-pass-rate 1.0 --json
+    curl -X POST http://localhost:8000/v1/documents/evaluate -H 'Authorization: Bearer dev-token' -H 'X-Demo-Role: principal' -H 'Content-Type: application/json' \
+      -d '{"top_k":3,"cases":[{"question":"What is the late fee?","expected_text":"late fee","must_contain":["100"]}]}'
+
+`scripts/rag_eval.py` ingests `--documents` into an in-memory store using the configured embeddings and reranker. Cases can name files with `expected_files`. The script exits non-zero when the pass rate is below `--min-pass-rate`. The endpoint needs `documents:manage` and takes at most 100 cases per run.
 
 ## Open-task agent
 

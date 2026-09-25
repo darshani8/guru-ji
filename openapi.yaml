@@ -1785,6 +1785,33 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/HTTPValidationError'
+  /v1/documents/evaluate:
+    post:
+      tags:
+      - documents
+      summary: Score retrieval, reranking and answers against labelled questions
+      operationId: evaluate_documents_v1_documents_evaluate_post
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DocumentEvalBody'
+        required: true
+      responses:
+        '200':
+          description: Successful Response
+          content:
+            application/json:
+              schema:
+                additionalProperties: true
+                type: object
+                title: Response Evaluate Documents V1 Documents Evaluate Post
+        '422':
+          description: Validation Error
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/HTTPValidationError'
   /v1/documents/{document_id}:
     delete:
       tags:
@@ -3547,6 +3574,38 @@ components:
       required:
       - decision
       title: DecisionBody
+    DocumentEvalBody:
+      properties:
+        cases:
+          items:
+            $ref: '#/components/schemas/EvalCaseBody'
+          type: array
+          maxItems: 100
+          minItems: 1
+          title: Cases
+        institution_id:
+          anyOf:
+          - type: string
+            maxLength: 128
+          - type: 'null'
+          title: Institution Id
+        top_k:
+          type: integer
+          maximum: 10.0
+          minimum: 1.0
+          title: Top K
+          default: 5
+        retrieve_k:
+          anyOf:
+          - type: integer
+            maximum: 50.0
+            minimum: 1.0
+          - type: 'null'
+          title: Retrieve K
+      type: object
+      required:
+      - cases
+      title: DocumentEvalBody
     DocumentSearchBody:
       properties:
         question:
@@ -3566,6 +3625,13 @@ components:
           minimum: 1.0
           title: Top K
           default: 5
+        retrieve_k:
+          anyOf:
+          - type: integer
+            maximum: 50.0
+            minimum: 1.0
+          - type: 'null'
+          title: Retrieve K
         category:
           anyOf:
           - type: string
@@ -3576,6 +3642,63 @@ components:
       required:
       - question
       title: DocumentSearchBody
+    EvalCaseBody:
+      properties:
+        question:
+          type: string
+          maxLength: 1000
+          minLength: 1
+          title: Question
+        case_id:
+          anyOf:
+          - type: string
+            maxLength: 80
+          - type: 'null'
+          title: Case Id
+        expected_document_ids:
+          items:
+            type: string
+          type: array
+          maxItems: 20
+          title: Expected Document Ids
+        expected_pages:
+          items:
+            type: integer
+          type: array
+          maxItems: 50
+          title: Expected Pages
+        expected_text:
+          anyOf:
+          - type: string
+            maxLength: 500
+          - type: 'null'
+          title: Expected Text
+        reference_answer:
+          anyOf:
+          - type: string
+            maxLength: 4000
+          - type: 'null'
+          title: Reference Answer
+        must_contain:
+          items:
+            type: string
+          type: array
+          maxItems: 20
+          title: Must Contain
+        answerable:
+          type: boolean
+          title: Answerable
+          default: true
+        category:
+          anyOf:
+          - type: string
+            maxLength: 40
+          - type: 'null'
+          title: Category
+      type: object
+      required:
+      - question
+      title: EvalCaseBody
     HTTPValidationError:
       properties:
         detail:

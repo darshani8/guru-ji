@@ -131,6 +131,12 @@ class PlatformRouteTests(unittest.TestCase):
         self.assertEqual(self.client.post("/v1/documents", headers=self.student, files={"file": ("x.txt", b"text", "text/plain")}).status_code, 403)
         listed = self.client.get("/v1/documents", headers=self.student).json()["documents"]
         self.assertTrue(listed)
+        cases = [{"question": "attendance to sit exams", "expected_document_ids": [upload.json()["document_id"]], "must_contain": ["75%"]}]
+        report = self.client.post("/v1/documents/evaluate", headers=self.principal, json={"cases": cases, "top_k": 3})
+        self.assertEqual(report.status_code, 200, report.text)
+        self.assertEqual(report.json()["summary"]["reranked"]["hit"], 1.0)
+        self.assertEqual(self.client.post("/v1/documents/evaluate", headers=self.student, json={"cases": cases}).status_code, 403)
+        self.assertEqual(self.client.post("/v1/documents/evaluate", headers=self.principal, json={"cases": []}).status_code, 422)
         self.assertEqual(self.client.delete(f"/v1/documents/{upload.json()['document_id']}", headers=self.principal).json()["deleted"], True)
 
     def test_intelligence_routes_without_provider(self):

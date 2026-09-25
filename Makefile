@@ -1,4 +1,4 @@
-.PHONY: test compile validate-openapi hygiene lint ci run db-init smoke postgres-smoke connector-smoke all-phases worker monitor platform-smoke platform-postgres-smoke openapi
+.PHONY: test compile validate-openapi hygiene lint ci run db-init smoke postgres-smoke connector-smoke all-phases worker monitor platform-smoke platform-postgres-smoke openapi rag-eval
 
 PYTHON ?= python
 PYTHONPATH_VALUE = apps/api:apps
@@ -54,3 +54,6 @@ connector-smoke:
 	PYTHONPATH=$(PYTHONPATH_VALUE) $(PYTHON) -m pytest -q tests/test_all_phase_completion.py
 
 all-phases: ci connector-smoke
+
+rag-eval:
+	PYTHONPATH=$(PYTHONPATH_VALUE) CONTROL_DATABASE_URL=:memory: $(PYTHON) scripts/rag_eval.py

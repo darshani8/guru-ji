@@ -1,5 +1,8 @@
 """Retrieval-augmented answers over the institution's own documents.
 
+    documents -> chunking -> embedding -> vector store
+    query -> embed -> retrieve top-K -> rerank -> top-N -> model -> cited answer
+
 Only the retrieved passages reach the model, never the document store. The
 deterministic answer (quoted passages with document and page references) is
 always produced; a model may reword it but must keep every citation marker.
@@ -22,7 +25,9 @@ from ..policy.data_classification import DataClassification
 from ..providers.model_base import TextModel
 from ..storage.object_store import ObjectStore, build_object_key, safe_file_name
 from .chunking import chunk_texts
-from .embeddings import EmbeddingProvider, HashingEmbeddingProvider, cosine, tokenize
+from .embeddings import EmbeddingProvider, HashingEmbeddingProvider
+from .rerank import LexicalReranker, Reranker
+from .vector_store import InstitutionVectorStore, VectorStore
 
 _CITATION = re.compile(r"\[(doc-[0-9a-f]+):(?:page\s*)?([^\]]+)\]")
 _ROLE_CLASSIFICATIONS = {
@@ -54,6 +59,10 @@ class DocumentRagService:
     model: TextModel | None = None
     model_max_tokens: int = 600
     max_document_bytes: int = 50_000_000
+    vector_store: VectorStore | None = None
+    reranker: Reranker | None = field(default_factory=LexicalReranker)
+    retrieve_k: int = 20
+    min_rerank_score: float | None = None
 
     def _guard(self, principal: Principal, institution_id: str, capability: Capability) -> None:
         if not principal.active or not principal.can_access(InstitutionScope(institution_id)):
@@ -107,51 +116,71 @@ class DocumentRagService:
         self.objects.delete(record["object_key"])
         return self.store.delete_document(institution_id, document_id)
 
-    async def search(self, principal: Principal, institution_id: str, question: str, *, top_k: int = 5, category: str | None = None) -> list[dict[str, Any]]:
+    def __post_init__(self) -> None:
+        if self.vector_store is None:
+            self.vector_store = InstitutionVectorStore(self.store)
+
+    async def retrieve(self, principal: Principal, institution_id: str, question: str, *, top_k: int = 5, retrieve_k: int | None = None, category: str | None = None) -> dict[str, Any]:
+        """Embed the query, pull the top-K candidates, rerank them and keep the top-N (``top_k``)."""
+
         self._guard(principal, institution_id, Capability.DOCUMENTS_READ)
         query = question.strip()
         if not query or len(query) > 1000:
             raise ValueError("question must be 1 to 1000 characters")
-        top_k = max(1, min(int(top_k), 10))
-        visible = _visible_classifications(principal)
-        chunks = self.store.document_chunks(institution_id, classifications=visible)
-        if category:
-            chunks = [chunk for chunk in chunks if chunk.get("category") == category.lower()]
-        if not chunks:
-            return []
-        query_vector = (await self.embeddings.embed([query]))[0]
-        query_tokens = set(tokenize(query))
-        scored: list[tuple[float, dict[str, Any]]] = []
-        for chunk in chunks:
-            semantic = cosine(query_vector, chunk["embedding"])
-            chunk_tokens = set(tokenize(chunk["text"]))
-            lexical = len(query_tokens & chunk_tokens) / len(query_tokens) if query_tokens else 0.0
-            score = 0.7 * semantic + 0.3 * lexical
-            if score > 0:
-                scored.append((score, chunk))
-        scored.sort(key=lambda item: item[0], reverse=True)
-        results = []
-        for score, chunk in scored[:top_k]:
-            results.append({
-                "document_id": chunk["document_id"], "title": chunk["title"], "page_number": chunk.get("page_number"), "chunk_index": chunk["chunk_index"],
-                "locator": f"page {chunk['page_number']}" if chunk.get("page_number") else f"section {chunk['chunk_index'] + 1}", "score": round(score, 4),
-                "text": chunk["text"], "classification": chunk["classification"], "category": chunk.get("category"),
-            })
-        return results
-
-    async def answer(self, principal: Principal, institution_id: str, question: str, *, top_k: int = 5, category: str | None = None) -> dict[str, Any]:
-        searched_at = datetime.now(timezone.utc).isoformat()
-        passages = await self.search(principal, institution_id, question, top_k=top_k, category=category)
+        top_n = max(1, min(int(top_k), 10))
+        candidate_count = max(top_n, min(int(retrieve_k or self.retrieve_k), 50))
         warnings: list[dict[str, str]] = []
+        query_vector = (await self.embeddings.embed([query]))[0]
+        hits = self.vector_store.search(institution_id, query_vector, query, classifications=_visible_classifications(principal), top_k=candidate_count, category=category)
+        candidates = [self._passage(hit.chunk, rank, retrieval_score=hit.score) for rank, hit in enumerate(hits, start=1)]
+        reranked_by = "none"
+        order = [(index, item["retrieval_score"]) for index, item in enumerate(candidates)]
+        if self.reranker is not None and candidates:
+            try:
+                ranked = await self.reranker.rerank(query, [item["text"] for item in candidates], top_n=top_n)
+            except Exception:  # noqa: BLE001 - a failed reranker keeps the retrieval order
+                warnings.append({"code": "reranker_unavailable", "message": "The reranker was unavailable; passages are in retrieval order."})
+            else:
+                order = [(result.index, result.score) for result in ranked]
+                reranked_by = self.reranker.provider_name
+                if self.min_rerank_score is not None:
+                    order = [(index, score) for index, score in order if score >= self.min_rerank_score]
+        passages = []
+        for index, score in order[:top_n]:
+            passage = dict(candidates[index])
+            passage["rerank_score"] = round(score, 4) if reranked_by != "none" else None
+            passage["score"] = passage["rerank_score"] if reranked_by != "none" else passage["retrieval_score"]
+            passages.append(passage)
+        return {"candidates": candidates, "passages": passages, "reranked_by": reranked_by, "vector_store": self.vector_store.store_name, "warnings": warnings}
+
+    @staticmethod
+    def _passage(chunk: dict[str, Any], rank: int, *, retrieval_score: float) -> dict[str, Any]:
+        return {
+            "document_id": chunk["document_id"], "title": chunk["title"], "page_number": chunk.get("page_number"), "chunk_index": chunk["chunk_index"],
+            "locator": f"page {chunk['page_number']}" if chunk.get("page_number") else f"section {chunk['chunk_index'] + 1}",
+            "retrieval_rank": rank, "retrieval_score": round(retrieval_score, 4), "score": round(retrieval_score, 4),
+            "text": chunk["text"], "classification": chunk["classification"], "category": chunk.get("category"),
+        }
+
+    async def search(self, principal: Principal, institution_id: str, question: str, *, top_k: int = 5, retrieve_k: int | None = None, category: str | None = None) -> list[dict[str, Any]]:
+        return (await self.retrieve(principal, institution_id, question, top_k=top_k, retrieve_k=retrieve_k, category=category))["passages"]
+
+    async def answer(self, principal: Principal, institution_id: str, question: str, *, top_k: int = 5, retrieve_k: int | None = None, category: str | None = None, include_trace: bool = False) -> dict[str, Any]:
+        searched_at = datetime.now(timezone.utc).isoformat()
+        retrieval = await self.retrieve(principal, institution_id, question, top_k=top_k, retrieve_k=retrieve_k, category=category)
+        passages = retrieval["passages"]
+        warnings: list[dict[str, str]] = list(retrieval["warnings"])
+        pipeline = {"vector_store": retrieval["vector_store"], "embeddings": self.embeddings.provider_name, "retrieved": len(retrieval["candidates"]), "reranked_by": retrieval["reranked_by"], "used": len(passages)}
         if not passages:
-            return {"question": question, "answer": "No indexed document contains a passage relevant to this question.", "sources": [], "searched_at": searched_at, "generation_mode": "deterministic", "warnings": [{"code": "no_relevant_passage", "message": "Upload the relevant policy or circular through the documents API."}]}
+            result = {"question": question, "answer": "No indexed document contains a passage relevant to this question.", "sources": [], "searched_at": searched_at, "generation_mode": "deterministic", "pipeline": pipeline, "warnings": warnings + [{"code": "no_relevant_passage", "message": "Upload the relevant policy or circular through the documents API."}]}
+            return result | ({"trace": {"candidates": [], "passages": []}} if include_trace else {})
         fragments = [f"The following passages from institutional documents are relevant to: {question}"]
         sources: list[dict[str, Any]] = []
         for index, item in enumerate(passages, start=1):
             marker = f"[{item['document_id']}:{item['locator']}]"
             excerpt = item["text"][:700]
             fragments.append(f"{index}. {excerpt} {marker}")
-            sources.append({"document_id": item["document_id"], "title": item["title"], "locator": item["locator"], "score": item["score"], "excerpt": excerpt[:300]})
+            sources.append({"document_id": item["document_id"], "title": item["title"], "locator": item["locator"], "score": item["score"], "retrieval_rank": item["retrieval_rank"], "excerpt": excerpt[:300]})
         deterministic = "\n".join(fragments)
         answer_text = deterministic
         mode = "deterministic"
@@ -173,7 +202,10 @@ class DocumentRagService:
                     mode = getattr(self.model, "provider_id", "model")
                 else:
                     warnings.append({"code": "model_output_rejected", "message": "The model answer did not cite the retrieved documents; passages are shown directly."})
-        return {"question": question, "answer": answer_text, "sources": sources, "searched_at": searched_at, "generation_mode": mode, "warnings": warnings}
+        result = {"question": question, "answer": answer_text, "sources": sources, "searched_at": searched_at, "generation_mode": mode, "pipeline": pipeline, "warnings": warnings}
+        if include_trace:
+            result["trace"] = {"candidates": retrieval["candidates"], "passages": passages}
+        return result
 
     def section(self, principal: Principal, institution_id: str, document_id: str, *, page_number: int | None = None, chunk_index: int | None = None) -> dict[str, Any]:
         self._guard(principal, institution_id, Capability.DOCUMENTS_READ)

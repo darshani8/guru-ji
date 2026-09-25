@@ -197,6 +197,12 @@ class AppSettings:
     embedding_model_id: str = ""
     embedding_base_url: str | None = None
     embedding_api_key: str | None = field(default=None, repr=False)
+    rerank_provider: str = "lexical"
+    rerank_model_id: str = ""
+    rerank_base_url: str | None = None
+    rerank_api_key: str | None = field(default=None, repr=False)
+    rag_retrieve_k: int = 20
+    rag_min_rerank_score: float | None = None
     intelligence_search_provider: str = "disabled"
     intelligence_fetch_pages: bool = True
     intelligence_max_queries: int = 8
@@ -399,6 +405,12 @@ class AppSettings:
             embedding_model_id=os.getenv("SAFFRON_EMBEDDING_MODEL_ID", "").strip(),
             embedding_base_url=os.getenv("SAFFRON_EMBEDDING_BASE_URL") or None,
             embedding_api_key=os.getenv("SAFFRON_EMBEDDING_API_KEY") or None,
+            rerank_provider=os.getenv("SAFFRON_RERANK_PROVIDER", "lexical").strip().lower(),
+            rerank_model_id=os.getenv("SAFFRON_RERANK_MODEL_ID", "").strip(),
+            rerank_base_url=os.getenv("SAFFRON_RERANK_BASE_URL") or None,
+            rerank_api_key=os.getenv("SAFFRON_RERANK_API_KEY") or None,
+            rag_retrieve_k=int(os.getenv("SAFFRON_RAG_RETRIEVE_K", "20")),
+            rag_min_rerank_score=float(os.environ["SAFFRON_RAG_MIN_RERANK_SCORE"]) if os.getenv("SAFFRON_RAG_MIN_RERANK_SCORE", "").strip() else None,
             intelligence_search_provider=os.getenv("SAFFRON_INTELLIGENCE_SEARCH_PROVIDER", "disabled").strip().lower(),
             intelligence_fetch_pages=_bool_env("SAFFRON_INTELLIGENCE_FETCH_PAGES", True),
             intelligence_max_queries=int(os.getenv("SAFFRON_INTELLIGENCE_MAX_QUERIES", "8")),
@@ -757,6 +769,12 @@ class AppSettings:
             raise ValueError("SAFFRON_EMBEDDING_PROVIDER must be hashing, ollama, or openai_compatible")
         if self.embedding_provider != "hashing" and not self.embedding_base_url:
             raise ValueError("SAFFRON_EMBEDDING_BASE_URL is required for remote embedding providers")
+        if self.rerank_provider not in {"none", "lexical", "http"}:
+            raise ValueError("SAFFRON_RERANK_PROVIDER must be none, lexical, or http")
+        if self.rerank_provider == "http" and not self.rerank_base_url:
+            raise ValueError("SAFFRON_RERANK_BASE_URL is required when SAFFRON_RERANK_PROVIDER=http")
+        if not 1 <= self.rag_retrieve_k <= 50:
+            raise ValueError("SAFFRON_RAG_RETRIEVE_K must be between 1 and 50")
         if self.intelligence_search_provider not in {"disabled", "tavily"}:
             raise ValueError("SAFFRON_INTELLIGENCE_SEARCH_PROVIDER must be disabled or tavily")
         if self.intelligence_search_provider == "tavily" and not self.web_search_api_key:
