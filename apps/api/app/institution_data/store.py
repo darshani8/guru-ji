@@ -167,9 +167,12 @@ class InstitutionDataStore:
         import took over a minute that way instead of about a second. ANALYZE
         gives the planner the statistics and makes it plan the lookup again.
 
-        It runs after the write has committed and is best effort: a role that
-        does not own the table, or a lock held elsewhere, only leaves the work
-        to autovacuum. SQLite keeps no such statistics to go stale.
+        It runs after the write has committed and is best effort. A role that
+        does not own the table gets only a warning from PostgreSQL (before
+        version 17) and the key lookups rely on ``_plan_each_lookup`` instead.
+        SKIP_LOCKED returns at once when a VACUUM or another ANALYZE holds
+        the table, rather than holding the backend lock while it waits.
+        SQLite keeps no such statistics to go stale.
         """
 
         if self.backend.dialect != "postgresql" or rows_written < ANALYZE_AFTER_ROWS:
@@ -177,9 +180,23 @@ class InstitutionDataStore:
         try:
             with self.backend.transaction():
                 bound_lock_waits(self.backend)
-                self.backend.execute(f"ANALYZE {_column(table)}")
+                self.backend.execute(f"ANALYZE (SKIP_LOCKED) {_column(table)}")
         except Exception:  # noqa: BLE001 - the rows are already saved; only the statistics are late
             logger.warning("could not analyse %s after writing %d rows; autovacuum will", table, rows_written, exc_info=True)
+
+    def _plan_each_lookup(self) -> None:
+        """Plan this transaction's key lookups for the rows the table holds now.
+
+        psycopg prepares a statement it runs often, and PostgreSQL may then
+        keep one generic plan for it that was made while the table was still
+        empty: after a large import that plan reads every row of the
+        institution for each chunk of keys. A custom plan per lookup costs
+        little and does not depend on ANALYZE, which only the table owner can
+        run. Call it inside the lookup's transaction.
+        """
+
+        if self.backend.dialect == "postgresql":
+            self.backend.execute("SET LOCAL plan_cache_mode = force_custom_plan")
 
     # --------------------------------------------------------------- institutions
     def upsert_institution(self, institution_id: str, name: str, *, location: str = "", timezone_name: str = "Asia/Kolkata", settings: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -247,6 +264,7 @@ class InstitutionDataStore:
         for chunk in _chunks(keys, WRITE_CHUNK_ROWS):
             placeholders = ",".join("?" for _ in chunk)
             with self._tenant(institution_id):
+                self._plan_each_lookup()
                 rows = self.backend.fetchall(
                     f"SELECT record_key, content_hash FROM {entity.table} WHERE institution_id = ? AND record_key IN ({placeholders})",
                     (institution_id, *chunk),
@@ -325,6 +343,7 @@ class InstitutionDataStore:
             chunk = list(keys[offset:offset + 500])
             placeholders = ",".join("?" for _ in chunk)
             with self._tenant(institution_id):
+                self._plan_each_lookup()
                 rows = self.backend.fetchall(
                     f"SELECT * FROM {entity.table} WHERE institution_id = ? AND record_key IN ({placeholders})",
                     (institution_id, *chunk),
@@ -1110,14 +1129,16 @@ class InstitutionDataStore:
         with self.backend.transaction():
             return self.backend.execute("UPDATE background_jobs SET status = 'queued', started_at = NULL, heartbeat_at = NULL WHERE job_id = ? AND status = 'running'", (job_id,)) > 0
 
-    def requeue_stale_background_jobs(self, *, older_than_seconds: float, max_attempts: int = 3) -> list[dict[str, Any]]:
+    def requeue_stale_background_jobs(self, *, older_than_seconds: float, max_attempts: int = 3, exhausted: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
         """Return ``running`` jobs whose worker stopped reporting to ``queued`` so another worker resumes them.
 
         A running worker refreshes ``heartbeat_at`` while it works; a job whose
         last heartbeat (or claim) is older than ``older_than_seconds`` has no
         live worker and goes back to ``queued`` unless it has exhausted
         ``max_attempts``, in which case it is marked ``failed`` so nothing
-        loops forever. A job whose heartbeat is fresh is never touched.
+        loops forever (and appended to ``exhausted`` when a list is given, so
+        the caller can tell whoever waits on it). A job whose heartbeat is
+        fresh is never touched.
         """
 
         cutoff = (datetime.now(timezone.utc) - timedelta(seconds=max(0.001, float(older_than_seconds)))).isoformat()
@@ -1129,10 +1150,14 @@ class InstitutionDataStore:
             )
             for row in rows:
                 if int(row["attempts"] or 0) >= max_attempts:
-                    self.backend.execute(
+                    failed = self.backend.execute(
                         "UPDATE background_jobs SET status = 'failed', finished_at = ?, error = ? WHERE job_id = ? AND status = 'running'",
                         (now_iso(), "worker did not finish the job after repeated attempts", row["job_id"]),
                     )
+                    if failed and exhausted is not None:
+                        job = self.get_background_job(row["job_id"])
+                        if job:
+                            exhausted.append(job)
                     continue
                 updated = self.backend.execute(
                     "UPDATE background_jobs SET status = 'queued', started_at = NULL, heartbeat_at = NULL WHERE job_id = ? AND status = 'running'",
