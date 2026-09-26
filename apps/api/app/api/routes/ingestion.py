@@ -143,7 +143,10 @@ async def import_sheet(body: SheetImportBody, request: Request) -> dict[str, Any
 
 
 def _public_job(job: dict[str, Any]) -> dict[str, Any]:
-    return {key: job.get(key) for key in ("job_id", "institution_id", "file_id", "entity", "status", "stage", "source_kind", "requested_by", "created_at", "updated_at", "row_count", "sheet_name", "error", "mapping", "report", "options", "background_job_id")}
+    public = {key: job.get(key) for key in ("job_id", "institution_id", "file_id", "entity", "status", "stage", "source_kind", "requested_by", "created_at", "updated_at", "row_count", "sheet_name", "error", "mapping", "report", "options", "background_job_id")}
+    # The jobs other sheets of an uploaded workbook were queued as (known once the file was parsed).
+    public["sibling_job_ids"] = [item["job_id"] for item in ((job.get("report") or {}).get("sheets") or {}).get("other_jobs") or []]
+    return public
 
 
 @router.get("/jobs", summary="List ingestion jobs")

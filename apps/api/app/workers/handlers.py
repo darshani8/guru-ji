@@ -30,6 +30,14 @@ def register_handlers(
             # approved mapping, or importing) is this job's own work.
             force = bool(payload.get("force") or payload.get("resume")) or int(payload.get("_attempt") or 1) > 1
             job = await ingestion.process(str(payload["institution_id"]), str(payload["job_id"]), force=force)
+            # Sheets of the workbook that became jobs of their own are queued
+            # here, the same way in every queue mode; one the queue refuses is
+            # marked failed with the reason, so it can be retried.
+            for sibling in ingestion.queued_siblings(str(payload["institution_id"]), job):
+                try:
+                    queue.enqueue(str(payload["institution_id"]), "ingestion.process", {"institution_id": str(payload["institution_id"]), "job_id": sibling["job_id"], "requested_by": sibling["requested_by"]})
+                except RuntimeError as exc:
+                    ingestion.record_unscheduled(str(payload["institution_id"]), sibling["job_id"], f"processing could not be scheduled: {exc}")
             if notifications is not None and payload.get("requested_by"):
                 report = job.get("report", {}).get("import") or {}
                 body = f"Import job {job['job_id']} finished with status {job['status']} ({job['stage']})."

@@ -160,7 +160,8 @@ def _sheet_paths(archive: zipfile.ZipFile) -> list[tuple[str, str]]:
         target = targets.get(rel_id, "")
         if not target:
             continue
-        path = target if target.startswith("xl/") else f"xl/{target.lstrip('/')}"
+        # A target starting with / is relative to the package root, not to xl/.
+        path = target.lstrip("/") if target.startswith("/") else target if target.startswith("xl/") else f"xl/{target}"
         if sheet.get("state") == "hidden":
             continue
         sheets.append((sheet.get("name", f"Sheet{len(sheets) + 1}"), path))
@@ -205,12 +206,26 @@ def _cell_value(cell: ElementTree.Element, shared: list[str], date_styles: set[i
     return number
 
 
-def _read_sheet(archive: zipfile.ZipFile, path: str, shared: list[str], date_styles: set[int], percent_styles: set[int]) -> list[list[Any]]:
-    """Stream a worksheet row by row so the whole XML tree is never held in memory."""
+def _merged_range(ref: str) -> tuple[int, int, int, int] | None:
+    """A merged range such as D2:I2 as (first row, first column, last row, last column), 0-based."""
+
+    parts = [_CELL_REF.fullmatch(part) for part in ref.split(":")]
+    if len(parts) != 2 or not all(parts):
+        return None
+    (first_col, first_row), (last_col, last_row) = [(_column_index(part.group(0)), int(part.group(2)) - 1) for part in parts]
+    return first_row, first_col, last_row, last_col
+
+
+def _read_sheet(archive: zipfile.ZipFile, path: str, shared: list[str], date_styles: set[int], percent_styles: set[int], merged: list[tuple[int, int, int, int]] | None = None) -> list[list[Any]]:
+    """Stream a worksheet row by row so the whole XML tree is never held in memory.
+
+    Merged ranges near the top of the sheet (where the headers are) go into ``merged``.
+    """
 
     rows: list[list[Any]] = []
     row_tag = f"{{{_NS['m']}}}row"
     cell_tag = f"{{{_NS['m']}}}c"
+    merge_tag = f"{{{_NS['m']}}}mergeCell"
     values: list[Any] | None = None
     with open_entry(archive, path) as source:
         # Cells are read and released one at a time, so even a single row
@@ -227,6 +242,12 @@ def _read_sheet(archive: zipfile.ZipFile, path: str, shared: list[str], date_sty
                         while len(values) < index:
                             values.append("")
                         values.append(_cell_value(element, shared, date_styles, percent_styles))
+                element.clear()
+                continue
+            if element.tag == merge_tag:
+                span = _merged_range(element.get("ref", ""))
+                if merged is not None and span and span[0] < 40:
+                    merged.append(span)
                 element.clear()
                 continue
             if element.tag == row_tag:
@@ -257,12 +278,13 @@ def _parse_with_stdlib(file_name: str, content: bytes) -> ParseResult:
         date_styles, percent_styles = _number_styles(archive)
         result = ParseResult(file_name=file_name, file_kind=FileKind.XLSX, metadata={"engine": "stdlib"})
         for sheet_name, path in _sheet_paths(archive):
+            merged: list[tuple[int, int, int, int]] = []
             try:
-                rows = _read_sheet(archive, path, shared, date_styles, percent_styles)
+                rows = _read_sheet(archive, path, shared, date_styles, percent_styles, merged)
             except (KeyError, ElementTree.ParseError, zipfile.BadZipFile):
                 result.warnings.append(f"sheet_unreadable:{sheet_name}")
                 continue
-            table = grid_to_table(rows, name=sheet_name, source_file=file_name, sheet=sheet_name)
+            table = grid_to_table(rows, name=sheet_name, source_file=file_name, sheet=sheet_name, merged=merged)
             result.tables.append(table)
         result.page_count = len(result.tables)
     return result

@@ -32,6 +32,16 @@ _STUDENT_ID = re.compile(r"^[A-Za-z0-9/-]{4,20}$")
 _STOP_WORDS = frozenset({"of", "the", "no", "number", "and", "a", "an", "in"})
 
 
+# Columns about a person's schooling before this institution (SSLC, PUC,
+# degree-equivalent marks) describe the person, not an exam taken here; an
+# admission list with thirty of them must still read as a list of people.
+_PRIOR_EDUCATION = re.compile(r"\b(?:sslc|ssc|hsc|puc|10th|12th|x std|xii std)\b|\bequivalent\b")
+
+
+def _prior_education(header: str) -> bool:
+    return bool(_PRIOR_EDUCATION.search(normalize_header(header)))
+
+
 def normalize_header(value: str) -> str:
     text = re.sub(r"[_\-./()\[\]:]+", " ", str(value).lower())
     text = re.sub(r"[^a-z0-9%# ]+", " ", text)
@@ -200,6 +210,9 @@ class MappingEngine:
 
     def detect_entity(self, headers: Sequence[str], samples: Mapping[str, Sequence[Any]] | None = None) -> tuple[str, float, tuple[tuple[str, float], ...]]:
         scores: list[tuple[str, float]] = []
+        # Schooling history is left out of the vote; if every header is
+        # schooling history the table is scored as it stands.
+        headers = [header for header in headers if not _prior_education(header)] or list(headers)
         for entity in CANONICAL_ENTITIES.values():
             matched = 0.0
             signal_hits = 0

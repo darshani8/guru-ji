@@ -329,7 +329,9 @@
     if (job.job_id !== state.shownJob) return;
     const box = $('upload-result');
     box.hidden = false;
-    box.innerHTML = `${jobPill(job)} Job ${escapeHtml(job.job_id)} · stage ${escapeHtml(job.stage)} · entity ${escapeHtml(job.entity || 'detecting')}\n${escapeHtml(jobSummary(job))}`;
+    const more = (job.sibling_job_ids || []).length;
+    box.innerHTML = `${jobPill(job)} Job ${escapeHtml(job.job_id)} · stage ${escapeHtml(job.stage)} · entity ${escapeHtml(job.entity || 'detecting')}\n${escapeHtml(jobSummary(job))}`
+      + (more ? `\n${more} more sheet${more === 1 ? ' was' : 's were'} queued as separate jobs (see Recent jobs).` : '');
   }
 
   // After every step: show the job, then open what needs the person next, or

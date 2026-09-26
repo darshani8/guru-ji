@@ -133,6 +133,30 @@ class IngestionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((job["report"]["import"]["updated"], job["report"]["import"]["unchanged"]), (1, 1))
         self.assertEqual(self.store.get_record("college_a", "student", "1ms23mba001")["semester"], 2)
 
+    async def test_a_second_sheet_with_other_columns_keeps_what_the_first_one_supplied(self):
+        contacts = b"USN No,Name,Phone,Hostel\n1MS23MBA001,Ravi Kumar,9876500001,Yes\n1MS23MBA002,Asha Rao,9876500002,No\n"
+        emails = b"USN No,Name,Email ID,Seat Type\n1MS23MBA001,Ravi Kumar,ravi@example.org,GM\n1MS23MBA002,Asha Rao,,SNQ\n"
+        first = await self._upload("contacts.csv", contacts, entity_hint="student")
+        self.assertEqual((first["status"], first["report"]["import"]["inserted"]), (JOB_IMPORTED, 2))
+        second = await self._upload("emails.csv", emails, entity_hint="student")
+        self.assertEqual(second["status"], JOB_IMPORTED)
+        self.assertEqual((second["report"]["import"]["updated"], second["report"]["import"]["unchanged"]), (2, 0))
+        ravi = self.store.get_record("college_a", "student", "1ms23mba001")
+        self.assertEqual((ravi["phone"], ravi["email"]), ("9876500001", "ravi@example.org"))
+        self.assertEqual(ravi["attributes"], {"Hostel": "Yes", "Seat Type": "GM"})
+        asha = self.store.get_record("college_a", "student", "1ms23mba002")
+        self.assertEqual((asha["phone"], asha["email"], asha["attributes"]), ("9876500002", None, {"Hostel": "No", "Seat Type": "SNQ"}))
+        # The same sheets again change nothing.
+        for name, content in (("emails-again.csv", emails), ("contacts-again.csv", contacts)):
+            again = await self._upload(name, content, entity_hint="student")
+            self.assertEqual((again["report"]["import"]["updated"], again["report"]["import"]["unchanged"]), (0, 2), name)
+        # A real change updates only that student, and only the changed column.
+        changed = await self._upload("emails-new.csv", emails.replace(b"ravi@example.org", b"ravi.kumar@example.org"), entity_hint="student")
+        self.assertEqual((changed["report"]["import"]["updated"], changed["report"]["import"]["unchanged"]), (1, 1))
+        ravi = self.store.get_record("college_a", "student", "1ms23mba001")
+        self.assertEqual((ravi["name"], ravi["phone"], ravi["email"]), ("Ravi Kumar", "9876500001", "ravi.kumar@example.org"))
+        self.assertEqual(ravi["attributes"], {"Hostel": "Yes", "Seat Type": "GM"})
+
     async def test_manual_commit_when_auto_commit_is_off_and_failures_are_explicit(self):
         job = await self._upload("students.csv", STUDENTS, options={"auto_commit": False})
         self.assertEqual(job["status"], "ready")

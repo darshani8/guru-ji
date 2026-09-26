@@ -16,7 +16,7 @@ from app.ingestion.parsers.excel_parser import parse_xlsx
 from app.ingestion.parsers.image_parser import parse_image
 from app.ingestion.parsers.json_parser import parse_json
 from app.ingestion.parsers.ocr import OcrResult, OcrUnavailable, parse_textract_blocks
-from app.ingestion.parsers.tabular import detect_header_row
+from app.ingestion.parsers.tabular import detect_header_row, grid_to_table
 from app.ingestion.parsers.text_layout import key_value_fields, text_to_table
 from app.ingestion.registry import ParserRegistry
 from app.ingestion.service import JOB_IMPORTED, IngestionService
@@ -28,7 +28,9 @@ OPENPYXL_AVAILABLE = importlib.util.find_spec("openpyxl") is not None
 PERCENT, PERCENT_2DP, CUSTOM_PERCENT, ESCAPED_PERCENT_SIGN, QUOTED_PERCENT_SIGN = 2, 3, 4, 5, 6
 
 
-def build_xlsx(sheets: dict[str, list[list[object]]]) -> bytes:
+def build_xlsx(sheets: dict[str, list[list[object]]], merges: dict[str, list[str]] | None = None) -> bytes:
+    """A minimal workbook; a None cell is left out, and ``merges`` lists merged ranges (such as "C2:E2") per sheet."""
+
     buffer = io.BytesIO()
     with zipfile.ZipFile(buffer, "w") as archive:
         overrides = "".join(f'<Override PartName="/xl/worksheets/sheet{i}.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>' for i in range(1, len(sheets) + 1))
@@ -44,12 +46,14 @@ def build_xlsx(sheets: dict[str, list[list[object]]]) -> bytes:
         formats = '<numFmts count="3"><numFmt numFmtId="164" formatCode="[Blue]0.0%"/><numFmt numFmtId="165" formatCode="0\\%"/><numFmt numFmtId="166" formatCode="0&quot;%&quot;"/></numFmts>'
         styles = "".join(f'<xf numFmtId="{fmt}"/>' for fmt in (0, 14, 9, 10, 164, 165, 166))
         archive.writestr("xl/styles.xml", f'<?xml version="1.0"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">{formats}<cellXfs count="7">{styles}</cellXfs></styleSheet>')
-        for index, rows in enumerate(sheets.values(), start=1):
+        for index, (sheet_name, rows) in enumerate(sheets.items(), start=1):
             xml = ['<?xml version="1.0"?><worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><sheetData>']
             for r, row in enumerate(rows, start=1):
                 cells = []
                 for c, value in enumerate(row):
                     ref = f"{chr(65 + c)}{r}"
+                    if value is None:
+                        continue
                     if value == "__shared__":
                         cells.append(f'<c r="{ref}" t="s"><v>0</v></c>')
                     elif value == "__date__":
@@ -64,7 +68,11 @@ def build_xlsx(sheets: dict[str, list[list[object]]]) -> bytes:
                     else:
                         cells.append(f'<c r="{ref}" t="inlineStr"><is><t>{value}</t></is></c>')
                 xml.append(f'<row r="{r}">' + "".join(cells) + "</row>")
-            xml.append("</sheetData></worksheet>")
+            xml.append("</sheetData>")
+            ranges = (merges or {}).get(sheet_name, [])
+            if ranges:
+                xml.append(f'<mergeCells count="{len(ranges)}">' + "".join(f'<mergeCell ref="{ref}"/>' for ref in ranges) + "</mergeCells>")
+            xml.append("</worksheet>")
             archive.writestr(f"xl/worksheets/sheet{index}.xml", "".join(xml))
         del strings
     return buffer.getvalue()
@@ -135,6 +143,14 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(table.records[0].fields["Joined"], "2023-03-15")
         self.assertIs(table.records[0].fields["Active"], True)
         self.assertEqual(table.records[1].fields["Student ID"], 42)
+
+    def test_xlsx_reader_follows_sheet_paths_from_the_package_root(self):
+        # Some writers point at /xl/worksheets/sheet1.xml instead of worksheets/sheet1.xml.
+        content = rewrite_entry(build_xlsx({"S": [["USN", "Name"], ["1MS23MBA001", "Ravi"]]}), "xl/_rels/workbook.xml.rels", lambda data: data.replace(b'Target="worksheets/', b'Target="/xl/worksheets/'))
+        result = excel_parser._parse_with_stdlib("students.xlsx", content)
+        self.assertEqual(result.warnings, [])
+        self.assertEqual(result.tables[0].headers, ("USN", "Name"))
+        self.assertEqual(result.tables[0].row_count, 1)
 
     def test_percent_formatted_cells_read_as_the_percentage_shown(self):
         # Excel stores 85% as 0.85 and 100% as 1; the reader returns what the cell shows.
@@ -355,6 +371,227 @@ class PercentImportTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((job["entity"], job["status"]), ("attendance", JOB_IMPORTED))
         stored = {row["student_id"]: row["attendance_percent"] for row in store.query_records("college_a", "attendance")}
         self.assertEqual(stored, {"1MS23MBA001": 100, "1MS23MBA002": 85, "1MS23MBA003": 0.5, "1MS23MBA004": 0, "1MS23MBA005": 1})
+
+
+class HeaderRowTests(unittest.TestCase):
+    """The first data row must never be read as the headers, and no data row or column may be lost."""
+
+    def test_a_blank_header_cell_does_not_make_the_first_student_the_header(self):
+        cases = {
+            "unlabelled trailing column": ("USN,Student Name,Program,Semester,\n1MS23MBA001,Ravi Kumar,MBA,1,ok\n1MS23MBA002,Asha Rao,MBA,1,\n", ("USN", "Student Name", "Program", "Semester", "column_5")),
+            "blank cell in the middle": ("USN,Student Name,,Program,Semester\n1MS23MBA001,Ravi Kumar,A,MBA,1\n1MS23MBA002,Asha Rao,B,MBA,1\n", ("USN", "Student Name", "column_3", "Program", "Semester")),
+            "blank first cell over serial numbers": (",USN,Student Name,Semester,Mobile\n1,1MS23MBA001,Ravi Kumar,1,9876543210\n2,1MS23MBA002,Asha Rao,1,9876543211\n", ("column_1", "USN", "Student Name", "Semester", "Mobile")),
+            "blank first cell over serial numbers, text columns": (",Name,Program,Section\n1,Ravi Kumar,MBA,A\n2,Asha Rao,MCA,B\n", ("column_1", "Name", "Program", "Section")),
+            "text columns only": ("Name,Program,Section,\nRavi Kumar,MBA,A,ok\nAsha Rao,MCA,B,\n", ("Name", "Program", "Section", "column_4")),
+        }
+        for label, (content, headers) in cases.items():
+            with self.subTest(label):
+                table = parse_csv("students.csv", content.encode()).tables[0]
+                self.assertEqual(table.headers, headers)
+                self.assertEqual(table.row_count, 2)
+                self.assertNotIn("skipped_1_leading_rows", table.warnings)
+        # A key/value line above, and a blank row between the header and the students.
+        table = parse_csv("students.csv", b"Subject,Marketing\nUSN,Name,IA1,\n\n1MS23MBA001,Ravi,20,ok\n1MS23MBA002,Asha,22,\n").tables[0]
+        self.assertEqual(table.headers, ("USN", "Name", "IA1", "column_4"))
+        self.assertEqual([record.fields["USN"] for record in table.records], ["1MS23MBA001", "1MS23MBA002"])
+
+    def test_a_short_header_row_keeps_the_unlabelled_column(self):
+        # A spreadsheet row ends at its last filled cell, so the header row is one cell short.
+        workbook = build_xlsx({"Students": [["USN", "Student Name", "Program", "Semester"], ["1MS23MBA001", "Ravi Kumar", "MBA", 1, "ok"], ["1MS23MBA002", "Asha Rao", "MBA", 1, "late"]]})
+        table = parse_xlsx("students.xlsx", workbook).tables[0]
+        self.assertEqual(table.headers, ("USN", "Student Name", "Program", "Semester", "column_5"))
+        self.assertEqual([record.fields["USN"] for record in table.records], ["1MS23MBA001", "1MS23MBA002"])
+        self.assertEqual([record.fields["column_5"] for record in table.records], ["ok", "late"])
+        # Trailing blank cells in a data row do not add columns.
+        table = grid_to_table([["USN", "Name"], ["1MS23MBA001", "Ravi", "", None]], name="t", source_file="t.csv")
+        self.assertEqual(table.headers, ("USN", "Name"))
+
+    def test_year_and_day_headers_are_headers(self):
+        table = parse_csv("marks.csv", b"USN,Name,2023,2024\n1MS23MBA001,Ravi,10,20\n1MS23MBA002,Asha,11,21\n").tables[0]
+        self.assertEqual(table.headers, ("USN", "Name", "2023", "2024"))
+        self.assertEqual(table.records[0].fields["2024"], "20")
+        workbook = build_xlsx({
+            "Marks": [["USN", "Name", 2023, 2024], ["1MS23MBA001", "Ravi", 10, 20], ["1MS23MBA002", "Asha", 11, 21]],
+            "Latest": [["USN", "Name", 2023, 2024], ["1MS23MBA001", "Ravi", 10, 20]],
+            "Intake": [["Programme", 2021, 2022, 2023], ["MBA", 120, 118, 125], ["MCA", 60, 58, 61]],
+        })
+        tables = {table.name: table for table in parse_xlsx("years.xlsx", workbook).tables}
+        self.assertEqual(tables["Marks"].headers, ("USN", "Name", "2023", "2024"))
+        self.assertEqual(tables["Marks"].records[0].fields["USN"], "1MS23MBA001")
+        self.assertEqual(tables["Latest"].headers, ("USN", "Name", "2023", "2024"))
+        self.assertEqual(tables["Intake"].headers, ("Programme", "2021", "2022", "2023"))
+        self.assertEqual(tables["Intake"].row_count, 2)
+        days = ",".join(str(day) for day in range(1, 32))
+        students = "".join(f"1MS23MBA00{i},Student {i}," + ",".join("A" if (day + i) % 6 == 0 else "P" for day in range(31)) + ",26\n" for i in range(1, 4))
+        table = parse_csv("attendance.csv", f"USN,Name,{days},Total\n{students}".encode()).tables[0]
+        self.assertEqual(table.headers[:4], ("USN", "Name", "1", "2"))
+        self.assertEqual(table.headers[-2:], ("31", "Total"))
+        self.assertEqual(table.row_count, 3)
+
+    def test_xls_float_numbers_in_the_header_row(self):
+        # xlrd reads every number as a float: 2023 arrives as 2023.0 and day 1 as 1.0.
+        grids = {
+            "years": ([["USN", "Name", 2023.0, 2024.0], ["1MS23MBA001", "Ravi", 10.0, 20.0], ["1MS23MBA002", "Asha", 11.0, 21.0]], ("USN", "Name", "2023", "2024")),
+            "descending years": ([["USN", "Name", 2024.0, 2023.0], ["1MS23MBA001", "Ravi", 10.0, 20.0], ["1MS23MBA002", "Asha", 11.0, 21.0]], ("USN", "Name", "2024", "2023")),
+            "intake": ([["Programme", 2021.0, 2022.0, 2023.0], ["MBA", 120.0, 118.0, 125.0], ["MCA", 60.0, 58.0, 61.0]], ("Programme", "2021", "2022", "2023")),
+            "days": ([["USN", "Name", *[float(day) for day in range(1, 8)], "Total"], ["1MS23MBA001", "Ravi", *"PPAPPPA", 5.0], ["1MS23MBA002", "Asha", *"PPPPPAP", 6.0]], ("USN", "Name", "1", "2", "3", "4", "5", "6", "7", "Total")),
+        }
+        for label, (grid, headers) in grids.items():
+            with self.subTest(label):
+                table = grid_to_table(grid, name="Sheet1", source_file="book.xls", sheet="Sheet1")
+                self.assertEqual(table.headers, headers)
+                self.assertEqual(table.row_count, 2)
+                self.assertEqual(table.warnings, [])
+                # Data values are left as the reader gave them.
+                self.assertEqual(table.records[0].fields[headers[-1]], grid[1][-1])
+
+    def test_every_data_row_is_kept_when_the_header_repeats(self):
+        sections = "Section A,,,\nUSN,Name,Program,Semester\n1MS23MBA001,Ravi Kumar,MBA,3\n1MS23MBA002,Asha Rao,MBA,3\n1MS23MBA003,Kiran S,MBA,3\nSection B,,,\nUSN,Name,Program,Semester\n1MS23MBA004,Meena P,MBA,3\n1MS23MBA005,Arjun K,MBA,3\n"
+        table = parse_csv("sections.csv", sections.encode()).tables[0]
+        self.assertEqual(table.headers, ("USN", "Name", "Program", "Semester"))
+        self.assertEqual(table.warnings, ["skipped_1_leading_rows"])
+        self.assertTrue({f"1MS23MBA00{i}" for i in range(1, 6)} <= {record.fields["USN"] for record in table.records})
+        workbook = build_xlsx({"Students": [["Section A"], ["USN", "Name", "Program", "Semester"], ["1MS23MBA001", "Ravi Kumar", "MBA", 3], ["1MS23MBA002", "Asha Rao", "MBA", 3], ["1MS23MBA003", "Kiran S", "MBA", 3], ["Section B"], ["USN", "Name", "Program", "Semester"], ["1MS23MBA004", "Meena P", "MBA", 3]]})
+        table = parse_xlsx("sections.xlsx", workbook).tables[0]
+        self.assertEqual(table.headers, ("USN", "Name", "Program", "Semester"))
+        self.assertTrue({f"1MS23MBA00{i}" for i in range(1, 5)} <= {record.fields["USN"] for record in table.records})
+        grids = {
+            "header repeated after 2 rows (all text)": [["Name", "Program", "Section"], ["Ravi", "MBA", "A"], ["Asha", "MCA", "B"], ["Name", "Program", "Section"], ["Kiran", "MBA", "A"], ["Meena", "MCA", "B"]],
+            "header repeated after 3 rows": [["USN", "Name", "Program", "Section"], ["1MS23MBA001", "Ravi", "MBA", "A"], ["1MS23MBA002", "Asha", "MBA", "A"], ["1MS23MBA003", "Kiran", "MBA", "A"], ["USN", "Name", "Program", "Section"], ["1MS23MBA004", "Meena", "MBA", "B"]],
+            "header with a blank cell repeated": [["Name", "Program", ""], ["Ravi", "MBA", "ok"], ["Name", "Program", ""], ["Kiran", "MCA", "ok"]],
+        }
+        for label, grid in grids.items():
+            with self.subTest(label):
+                self.assertEqual(detect_header_row(grid), 0)
+
+    def test_tables_the_width_score_already_read_correctly_are_unchanged(self):
+        faculty = [["Ravi Kumar", "Professor", "Marketing"], ["Asha Rao", "Associate Professor", "Finance"], ["Kiran S", "Assistant Professor", "HR"]]
+        students = [["Ravi Kumar", "MBA", "A"], ["Asha Rao", "MCA", "B"], ["Kiran S", "BBA", "C"]]
+        timetable = [["Mon", "18MBA11", "18MBA12", "18MBA13", "18MBA14"], ["Tue", "18MBA12", "18MBA13", "18MBA14", "18MBA11"], ["Wed", "18MBA13", "18MBA14", "18MBA11", "18MBA12"]]
+        grids = {
+            "group header line above a faculty header": ([["Faculty Details", "", "Department Info"], ["Name", "Designation", "Department"], *faculty], 1),
+            "two-cell title above a faculty header": ([["ABC Institute of Management", "Bengaluru"], ["Name", "Designation", "Department"], *faculty], 1),
+            "key/value lines above a text header": ([["Department", "MBA"], ["Semester", "III"], ["Name", "Program", "Section"], *students], 2),
+            "key/value line with a colon above a text header": ([["Department:", "Management Studies"], ["Name", "Program", "Section"], *students], 1),
+            "class and faculty lines above a text header": ([["Class", "MBA III Sem"], ["Faculty", "Dr. Rao"], ["Name", "Program", "Section"], *students], 2),
+            "key/value line above a header with a blank cell": ([["Class:", "Marketing"], ["18MBA11", "CO1", "", "City"], ["O", "5", "Finance", "Bengaluru"]], 1),
+            "timetable": ([["Day", "P1", "P2", "P3", "P4"], *timetable], 0),
+            "timetable under a two-cell title": ([["Timetable", "Semester III"], ["Day", "P1", "P2", "P3", "P4"], *timetable], 1),
+            "two-line header of equal width": ([["USN", "Name", "Marks", "", ""], ["", "", "Maths", "Physics", "Chem"], ["1MS23MBA001", "Ravi", "50", "60", "70"], ["1MS23MBA002", "Asha", "55", "65", "75"]], 0),
+            "subject codes over grades": ([["USN", "Name", "18MBA11", "18MBA12", "18MBA13"], ["1MS23MBA001", "Ravi", "A", "B+", "O"], ["1MS23MBA002", "Asha", "B", "A+", "A"]], 0),
+            "answers that happen to count up": ([["Name", "Q1", "Q2", "Q3", ""], ["Ravi", "1", "2", "3", "good"], ["Asha", "4", "5", "3", "ok"]], 0),
+            "a title and a date above the header": ([["ABC College Student List", "", "Date: 01-01-2025"], ["Name", "Program", "Section"], ["Ravi", "MBA", "A"], ["Asha", "MCA", "B"]], 1),
+            "college details above the header": ([["Name of the Institution", "ABC College", "", "Academic Year", "2024-25", ""], ["USN", "Name", "Program", "Section", "Email", "Phone"], ["1MS23MBA001", "Ravi", "MBA", "A", "ravi@abc.edu", "9876543210"], ["1MS23MBA002", "Asha", "MBA", "B", "asha@abc.edu", "9876543211"]], 1),
+            "batch years as data": ([["Name", "From", "To"], ["Ravi", "2023", "2024"], ["Asha", "2023", "2024"]], 0),
+            "a header word used as a value": ([["Name", "Status", "Remarks"], ["Ravi", "Active", "Status pending"], ["Asha", "Active", "Remarks"]], 0),
+            "titles above the header": ([["ABC College"], ["Student list 2025"], ["USN", "Name", "Program"], ["1MS23MBA001", "Ravi", "MBA"]], 2),
+        }
+        for label, (grid, expected) in grids.items():
+            with self.subTest(label):
+                self.assertEqual(detect_header_row(grid), expected)
+        table = parse_csv("faculty.csv", b"Department:,Management Studies\nName,Designation,Qualification\nRavi Kumar,Professor,PhD\nAsha Rao,Associate Professor,MBA\nKiran S,Assistant Professor,M.Com\n").tables[0]
+        self.assertEqual(table.headers, ("Name", "Designation", "Qualification"))
+        self.assertEqual(table.row_count, 3)
+        # Numbers alone, even counting up, never make a header.
+        self.assertIsNone(detect_header_row([["1", "2"], ["3", "4"]]))
+        self.assertIsNone(detect_header_row([["10", "20", "30"], ["11", "21", "31"]]))
+        self.assertIsNone(detect_header_row([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]]))
+
+
+class TwoRowHeaderTests(unittest.TestCase):
+    """Grouped headers on two rows (a marks register) become one header per column."""
+
+    # A note beside the table, longer than any header label.
+    LEGEND = "Legend: marks shown in red are below the pass mark set by the university"
+
+    @staticmethod
+    def _marks_sheet(subjects: list[str]) -> tuple[list[list[object]], list[str], tuple[str, ...]]:
+        # The layout of a result analysis sheet: a title, group labels over the
+        # subjects, the subjects, the faculty initials under them, then students.
+        count = len(subjects)
+        cells = [f"{subject}\n(MB10{number})" for number, subject in enumerate(subjects, start=1)]
+        initials = ["PQ", "RS", "TU", "VW", "XY", "ZA"][:count]
+        blank = [None] * (count - 1)
+        rows: list[list[object]] = [
+            [None, "ABC College MBA Result Analysis"],
+            ["Sl. No", "USN No", "Name", "EXTERNAL MARKS", *blank, "INTERNAL MARKS", *blank, "Total", "Percentage", None, TwoRowHeaderTests.LEGEND],
+            [None, None, None, *cells, *cells, None, None, None, None, "Pass - external filled"],
+            [None, None, None, *initials, *initials, None, None, None, None, "Initials of the faculty for each subject"],
+        ]
+        for number, name in enumerate(["Ravi Kumar", "Asha Rao", "Kiran S"], start=1):
+            external = [40 + number + offset for offset in range(count)]
+            internal = [15.5 + number + offset for offset in range(count)]
+            rows.append([number, f"1MS23MBA00{number}", name, *external, *internal, sum(external) + sum(internal), 60 + number])
+        last = 3 + 2 * count  # the column after the subjects (0-based)
+        letter = lambda column: chr(65 + column)
+        merges = [f"D2:{letter(2 + count)}2", f"{letter(3 + count)}2:{letter(2 + 2 * count)}2", "A2:A4", "B2:B4", "C2:C4", f"{letter(last)}2:{letter(last)}4", f"{letter(last + 1)}2:{letter(last + 1)}4", f"B1:{letter(last + 1)}1"]
+        named = [f"{subject} (MB10{number})" for number, subject in enumerate(subjects, start=1)]
+        headers = ("Sl. No", "USN No", "Name", *[f"EXTERNAL MARKS {name}" for name in named], *[f"INTERNAL MARKS {name}" for name in named], "Total", "Percentage", f"column_{last + 3}", TwoRowHeaderTests.LEGEND, "Pass - external filled")
+        return rows, merges, headers
+
+    def _assert_marks_table(self, table, headers: tuple[str, ...]) -> None:
+        self.assertEqual(table.headers, headers)
+        self.assertEqual([record.fields["USN No"] for record in table.records], ["1MS23MBA001", "1MS23MBA002", "1MS23MBA003"])
+        self.assertEqual([record.row_number for record in table.records], [5, 6, 7])
+        self.assertEqual(table.records[0].fields[headers[3]], 41)
+        self.assertEqual(table.records[0].fields[headers[3 + (len(headers) - 8) // 2]], 16.5)
+        self.assertIn("skipped_1_leading_rows", table.warnings)
+        self.assertIn("skipped_row_4_as_annotation:blank USN No, Name; only short labels over number columns", table.warnings)
+
+    def test_grouped_subject_headers_and_the_initials_row(self):
+        # Six subjects a group: the subject row is detected and the group row above joins it.
+        # Two subjects a group: the group row is detected and the subject row below joins it.
+        for subjects in (["Accounts", "Economics", "Law", "Marketing", "Statistics", "Ethics"], ["Accounts", "Economics"]):
+            with self.subTest(subjects=len(subjects)):
+                rows, merges, headers = self._marks_sheet(subjects)
+                self._assert_marks_table(grid_to_table(rows, name="Marks", source_file="marks.xlsx", sheet="Marks"), headers)
+                workbook = build_xlsx({"Marks": rows}, merges={"Marks": merges})
+                self._assert_marks_table(excel_parser._parse_with_stdlib("marks.xlsx", workbook).tables[0], headers)
+                self._assert_marks_table(excel_parser._parse_with_stdlib("marks.xlsx", build_xlsx({"Marks": rows})).tables[0], headers)
+                if OPENPYXL_AVAILABLE:
+                    self._assert_marks_table(excel_parser._parse_with_openpyxl("marks.xlsx", workbook).tables[0], headers)
+
+    def test_a_lower_header_row_wider_than_the_upper_one(self):
+        students = [["1MS23MBA001", "Ravi", 50, 60, 70], ["1MS23MBA002", "Asha", 55, 65, 75]]
+        sheets = {
+            "under the detected row": [["USN", "Name", "Marks"], [None, None, "Maths", "Physics", "Chem"], *students],
+            "over the detected row": [["Class test"], ["USN", "Name", "Marks"], [None, None, "Maths", "Physics", "Chem"], *students],
+        }
+        for label, rows in sheets.items():
+            workbook = build_xlsx({"Marks": rows})
+            tables = {"grid": grid_to_table(rows, name="Marks", source_file="marks.xlsx", sheet="Marks"), "stdlib": excel_parser._parse_with_stdlib("marks.xlsx", workbook).tables[0]}
+            if OPENPYXL_AVAILABLE:
+                tables["openpyxl"] = excel_parser._parse_with_openpyxl("marks.xlsx", workbook).tables[0]
+            for reader, table in tables.items():
+                with self.subTest(label, reader=reader):
+                    self.assertEqual(table.headers, ("USN", "Name", "Marks Maths", "Marks Physics", "Marks Chem"))
+                    self.assertEqual([record.fields["USN"] for record in table.records], ["1MS23MBA001", "1MS23MBA002"])
+                    self.assertEqual(table.records[1].fields["Marks Chem"], 75)
+
+    def test_merged_cells_decide_how_far_a_group_label_reaches(self):
+        rows = [["USN", "Name", "Marks"], [None, None, "Maths", "Physics", "Project"], ["1MS23MBA001", "Ravi", 50, 60, 18], ["1MS23MBA002", "Asha", 55, 65, 19]]
+        merged = excel_parser._parse_with_stdlib("marks.xlsx", build_xlsx({"Marks": rows}, merges={"Marks": ["C1:D1"]})).tables[0]
+        self.assertEqual(merged.headers, ("USN", "Name", "Marks Maths", "Marks Physics", "Project"))
+        # Without merges the label reaches every labelled column up to the next label.
+        self.assertEqual(grid_to_table(rows, name="Marks", source_file="marks.csv").headers, ("USN", "Name", "Marks Maths", "Marks Physics", "Marks Project"))
+        self.assertEqual(merged.row_count, 2)
+
+    def test_single_row_headers_and_first_data_rows_are_unchanged(self):
+        students = [["Ravi Kumar", "MBA", "A"], ["Asha Rao", "MCA", "B"]]
+        grids = {
+            "title and a newline in a header": ([["ABC College"], ["USN", "Name", "Accounts\n(MB101)", "Economics"], ["1MS23MBA001", "Ravi", 45, 50], ["1MS23MBA002", "Asha", 40, 42]], ("USN", "Name", "Accounts (MB101)", "Economics"), 2, ["skipped_1_leading_rows"]),
+            "key/value lines above": ([["Class", "MBA III Sem"], ["Faculty", "Dr. Rao"], ["Name", "Program", "Section"], *students], ("Name", "Program", "Section"), 2, ["skipped_2_leading_rows"]),
+            "a spread-out title over a complete header": ([["ABC College Student List", "", "", "Date: 01-01-2025"], ["USN", "Name", "Program", "Section", "Phone"], ["1MS23MBA001", "Ravi", "MBA", "A", "9876543210"], ["1MS23MBA002", "Asha", "MBA", "B", "9876543211"]], ("USN", "Name", "Program", "Section", "Phone"), 2, ["skipped_1_leading_rows"]),
+            "a first row with no student": ([["USN", "Name", "M1", "M2", "M3", "M4", "M5", "Transport", ""], ["", "", "", "", "", "", "", "Bus", "Route 5"], ["1MS23MBA002", "Asha", 40, 41, 42, 43, 44, "Van", "Route 2"], ["1MS23MBA003", "Kiran", 30, 31, 32, 33, 34, "Bus", "Route 7"]], ("USN", "Name", "M1", "M2", "M3", "M4", "M5", "Transport", "column_9"), 3, []),
+            "a first student absent in every subject": ([["USN", "Name", "Maths", "Physics"], ["1MS23MBA001", "Ravi", "AB", "AB"], ["1MS23MBA002", "Asha", 40, 42], ["1MS23MBA003", "Kiran", 41, 43]], ("USN", "Name", "Maths", "Physics"), 3, []),
+            "a group line over a one-column label": ([["Faculty Details", "", "Department Info"], ["Name", "Designation", "Department"], ["Ravi Kumar", "Professor", "Marketing"], ["Asha Rao", "Associate Professor", "Finance"]], ("Name", "Designation", "Department"), 2, ["skipped_1_leading_rows"]),
+        }
+        for label, (grid, headers, count, warnings) in grids.items():
+            with self.subTest(label):
+                table = grid_to_table(grid, name="t", source_file="t.xlsx", sheet="t")
+                self.assertEqual(table.headers, headers)
+                self.assertEqual(table.row_count, count)
+                self.assertEqual(table.warnings, warnings)
 
 
 class WideSheetTests(unittest.TestCase):
