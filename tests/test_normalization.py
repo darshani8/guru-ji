@@ -293,3 +293,21 @@ class DegenerateBlockTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PriorEducationEntityTests(unittest.TestCase):
+    def test_an_admission_list_with_schooling_marks_reads_as_students(self):
+        from app.normalization.mapping import MappingEngine
+
+        headers = ["SL No.", "Academic Year", "USN No", "Student Name", "Father Name", "Mother Name", "Mobile No", "Gender", "DOB", "Email",
+                   "Address", "Category", "SSLC Board Name", "SSLC Roll No", "SSLC Grade System", "SSLC Total Marks", "SSLC Obtained Marks",
+                   "SSLC Percentage/CGPA", "PUC/Equivalent Roll No", "PUC/Equivalent Total Marks", "PUC/Equivalent Obtained Marks",
+                   "UG Equivalent Course Type", "UG/Equivalent Total Marks", "UG/Equivalent Obtained Marks", "Program Name"]
+        samples = {"USN No": ["U03BJ24C0001", "U03BJ24C0002"], "SSLC Obtained Marks": [512, 540], "SSLC Total Marks": [625, 625]}
+        self.assertEqual(MappingEngine().detect_entity(headers, samples)[0], "student")
+
+    def test_a_marks_sheet_still_reads_as_exam_results(self):
+        from app.normalization.mapping import MappingEngine
+
+        headers = ["USN", "Student Name", "Course Code", "Course Name", "Exam Name", "Marks Obtained", "Max Marks", "Grade"]
+        self.assertEqual(MappingEngine().detect_entity(headers, {})[0], "exam")

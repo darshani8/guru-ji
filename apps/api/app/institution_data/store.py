@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import re
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
 from typing import Any
 from uuid import uuid4
@@ -81,6 +81,39 @@ def _bool_param(item: CanonicalField, value: Any) -> Any:
         if text in {"0", "false", "no", "n", "f"}:
             return 0
     return value
+
+
+def _blank(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _row_hash(entity: CanonicalEntity, fields: Mapping[str, Any], attributes: Mapping[str, Any]) -> str:
+    """The content hash of a row written by a merging import: its non-blank fields and its attributes.
+
+    Blank columns are left out, so a row hashes alike whichever sheets
+    supplied which of its columns.
+    """
+
+    return CanonicalRecord(entity.name, {name: value for name, value in fields.items() if not _blank(value)}, dict(attributes)).content_hash
+
+
+def _merge_stored(entity: CanonicalEntity, row: dict[str, Any], record: CanonicalRecord, columns: Collection[str]) -> tuple[dict[str, Any], list[Any], list[Any], str]:
+    """A stored row with ``record`` laid over it the way a merging import writes it (see ``upsert_records``).
+
+    Returns the merged attributes, normalisation notes, issues and content hash.
+    """
+
+    stored = InstitutionDataStore._row_to_record(entity, row)
+    written = {name for name in columns if not _blank(record.fields.get(name))}
+    fields = {item.name: record.fields[item.name] if item.name in written else stored[item.name] for item in entity.fields}
+    attributes = {**stored["attributes"], **record.attributes}
+    # Notes and issues follow the values: those about a column this record
+    # rewrote are replaced by its own, those about any other column are kept.
+    notes = [note for note in _loads(row.get("normalizations_json"), []) if str(note).split(":", 1)[0] not in written]
+    notes += [note for note in record.normalizations if note not in notes]
+    issues = [issue for issue in stored["issues"] if not (isinstance(issue, dict) and issue.get("field") in written)]
+    issues += [issue for issue in record.issues if issue not in issues]
+    return attributes, notes, issues, _row_hash(entity, fields, attributes)
 
 
 def _chunks(items: Iterable[Any], size: int) -> Iterator[list[Any]]:
@@ -252,30 +285,63 @@ class InstitutionDataStore:
         }
         return record
 
-    def upsert_records(self, institution_id: str, records: Sequence[CanonicalRecord], *, skip_blocking: bool = True) -> ImportSummary:
+    def upsert_records(self, institution_id: str, records: Sequence[CanonicalRecord], *, skip_blocking: bool = True, mapped_fields: Collection[str] | None = None) -> ImportSummary:
+        """Insert new records and update existing ones, in one transaction.
+
+        Without ``mapped_fields`` an update replaces every canonical column.
+        With it (an import from a sheet that holds only some of a record's
+        columns), an update merges instead: only the columns named there are
+        written, every other column keeps its stored value, and attributes
+        are merged key by key. A blank value in a named column keeps the
+        stored value too, since spreadsheets routinely leave cells empty and
+        one must not erase what another sheet supplied; a value is cleared
+        through a record edit, not an import. The content hash then covers
+        the merged row, so importing the same sheet again reports it
+        unchanged. Inserts write the record as it is either way.
+        """
+
         if not records:
             raise ValueError("no records to import")
         entity = self._entity(records[0].entity)
         if any(item.entity != entity.name for item in records):
             raise ValueError("all records in one import must share an entity")
+        merge_columns: list[str] | None = None
+        if mapped_fields is not None:
+            unknown = sorted(set(mapped_fields) - set(entity.field_names()))
+            if unknown:
+                raise ValueError(f"not fields of {entity.name}: {', '.join(unknown)}")
+            merge_columns = [name for name in entity.field_names() if name in mapped_fields]
         summary = ImportSummary(entity=entity.name)
         keys = [item.record_key for item in records]
         existing: dict[str, str] = {}
+        # A merge needs the stored rows it is laid over, not only their hashes.
+        stored: dict[str, dict[str, Any]] = {}
+        selected = "record_key, content_hash" if merge_columns is None else "*"
         for chunk in _chunks(keys, WRITE_CHUNK_ROWS):
             placeholders = ",".join("?" for _ in chunk)
             with self._tenant(institution_id):
                 self._plan_each_lookup()
                 rows = self.backend.fetchall(
-                    f"SELECT record_key, content_hash FROM {entity.table} WHERE institution_id = ? AND record_key IN ({placeholders})",
+                    f"SELECT {selected} FROM {entity.table} WHERE institution_id = ? AND record_key IN ({placeholders})",
                     (institution_id, *chunk),
                 )
             existing.update({row["record_key"]: row["content_hash"] for row in rows})
+            if merge_columns is not None:
+                stored.update({row["record_key"]: row for row in rows})
         stamp = now_iso()
         columns = ["row_id", "institution_id", "record_key", *entity.field_names(), "attributes_json", "normalizations_json", "issues_json", "content_hash", "source_file_id", "source_file_name", "source_locator", "ingestion_job_id", "imported_at", "updated_at"]
         update_columns = [name for name in columns if name not in {"row_id", "institution_id", "record_key", "imported_at"}]
+        assignments = [f"{name} = EXCLUDED.{name}" for name in update_columns]
+        if merge_columns is not None:
+            # A merge sends NULL for a blank value and COALESCE keeps the
+            # stored one; columns outside the mapping are not assigned at all,
+            # so they stay as they are even in a row changed since the lookup.
+            field_names = set(entity.field_names())
+            assignments = [f"{name} = COALESCE(EXCLUDED.{name}, {entity.table}.{name})" for name in merge_columns]
+            assignments += [f"{name} = EXCLUDED.{name}" for name in update_columns if name not in field_names]
         sql = (
             f"INSERT INTO {entity.table} ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)}) "
-            f"ON CONFLICT (institution_id, record_key) DO UPDATE SET " + ", ".join(f"{name} = EXCLUDED.{name}" for name in update_columns)
+            f"ON CONFLICT (institution_id, record_key) DO UPDATE SET " + ", ".join(assignments)
         )
         seen: set[str] = set()
         pending: list[tuple[str, str | None, list[Any]]] = []
@@ -295,6 +361,12 @@ class InstitutionDataStore:
                 continue
             seen.add(key)
             content_hash = record.content_hash
+            attributes, notes, issues = record.attributes, list(record.normalizations), list(record.issues)
+            if merge_columns is not None:
+                if key in stored:
+                    attributes, notes, issues, content_hash = _merge_stored(entity, stored[key], record, merge_columns)
+                else:
+                    content_hash = _row_hash(entity, record.fields, attributes)
             previous = existing.get(key)
             if previous == content_hash:
                 summary.unchanged += 1
@@ -304,9 +376,11 @@ class InstitutionDataStore:
                 value = record.fields.get(item.name)
                 if item.field_type is FieldType.BOOLEAN and value is not None:
                     value = 1 if value else 0
+                if merge_columns is not None and _blank(value):
+                    value = None
                 values.append(value)
             values.extend([
-                _json(record.attributes), _json(list(record.normalizations)), _json(list(record.issues)), content_hash,
+                _json(attributes), _json(notes), _json(issues), content_hash,
                 record.lineage.source_file_id, record.lineage.source_file_name, record.lineage.source_locator, record.lineage.ingestion_job_id,
                 stamp, stamp,
             ])

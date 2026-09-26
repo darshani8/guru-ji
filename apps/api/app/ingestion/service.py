@@ -11,22 +11,23 @@ from datetime import datetime, timezone
 
 import hashlib
 import logging
+import re
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
-from uuid import uuid4
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from ..institution_data.models import CanonicalRecord, RecordLineage
 from ..institution_data.store import InstitutionDataStore
 from ..normalization.canonical import CANONICAL_ENTITIES, CanonicalEntity, FieldType
 from ..normalization.cleaning import clean_record
 from ..normalization.deduplication import find_duplicates
-from ..normalization.mapping import MappingEngine, apply_mapping, header_signature
+from ..normalization.mapping import MappingEngine, apply_mapping, header_signature, normalize_header
 from ..normalization.validation import identifier_pattern, summarize_issues, validate_record
 from ..storage.object_store import ObjectStore, build_object_key, safe_file_name
 from .detector import detect_file_kind
-from .models import ParseResult, ParsedTable, ParserError
+from .models import FileKind, IntermediateRecord, ParseResult, ParsedTable, ParserError
 from .registry import ParserRegistry
 
 JOB_QUEUED = "queued"
@@ -92,6 +93,103 @@ def _nothing_importable(rows: Sequence[Mapping[str, Any]]) -> str:
         f"none of the {len(rows)} rows can be imported ({'; '.join(reasons) or 'no row is eligible'}); "
         "check the column mapping and the file, then retry the job to map it again"
     )[:500]
+
+
+WORKBOOK_KINDS = {FileKind.XLSX, FileKind.XLS}
+# The name grid_to_table gives a column whose header cell is blank, and the
+# suffix dedupe_headers gives a repeated header ("Address (2)").
+_UNNAMED_COLUMN = re.compile(r"column_\d+")
+_REPEAT_SUFFIX = re.compile(r" \(\d+\)$")
+# Header cells that read like values (an e-mail, a long number, a date).
+_VALUE_LIKE = re.compile(r"@|\d{6,}|\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b")
+
+
+def _filled(value: Any) -> bool:
+    return value is not None and str(value).strip() != ""
+
+
+def _counts_rows(values: Sequence[Any]) -> bool:
+    """A column holding only a running count (1, 2, 3...) numbers the rows; it is not data."""
+
+    try:
+        numbers = [float(str(value).strip()) for value in values]
+    except ValueError:
+        return False
+    return all(number.is_integer() for number in numbers) and all(later == earlier + 1 for earlier, later in zip(numbers, numbers[1:]))
+
+
+def _unusable_sheet(table: ParsedTable) -> str | None:
+    """Why a sheet of a workbook has nothing to import, or ``None`` when it has."""
+
+    if not table.headers:
+        return "no header row was found (the sheet is empty or holds no table)"
+    if not table.records:
+        return "no data rows under the header"
+    if sum(1 for cell in table.headers if _VALUE_LIKE.search(cell)) >= 2:
+        return "the first row holds values (e-mail addresses, numbers or dates), so the sheet has no header row; add one and upload the sheet again"
+    data_columns = 0
+    for header in table.headers:
+        values = [record.fields.get(header) for record in table.records if _filled(record.fields.get(header))]
+        if values and not _counts_rows(values):
+            data_columns += 1
+            if data_columns == 2:
+                return None
+    return "fewer than two columns hold values (a blank form or a single list)"
+
+
+def _sheet_columns(table: ParsedTable) -> frozenset[str]:
+    """What makes two sheets "the same columns": the header names, compared the way a remembered
+    mapping compares them (case, spacing and punctuation ignored); a repeated header and a blank,
+    unnamed column do not make a sheet different."""
+
+    filled = {header for record in table.records for header, value in record.fields.items() if _filled(value)}
+    return frozenset(
+        normalize_header(_REPEAT_SUFFIX.sub("", header)) for header in table.headers
+        if header in filled or not _UNNAMED_COLUMN.fullmatch(header)
+    )
+
+
+def _merge_sheets(tables: Sequence[ParsedTable]) -> tuple[list[str], list[tuple[IntermediateRecord, dict[str, Any], int]]]:
+    """One header list and one row list for sheets with the same columns.
+
+    A header is kept under the first sheet's spelling of it ("Sl no" -> "Sl.no")
+    and a column only some sheets have is added, never merged into another one.
+    When several sheets are merged, each row gets a "Sheet" column naming its
+    sheet. ``row_number`` orders the staged rows (the store sorts by it), so each
+    sheet continues after the previous one; the locator keeps the sheet's own row.
+    """
+
+    headers: list[str] = []
+    spelling: dict[str, str] = {}
+    renames: list[dict[str, str]] = []
+    for table in tables:
+        rename: dict[str, str] = {}
+        for header in table.headers:
+            target = spelling.get(normalize_header(header), header)
+            if target in rename.values():
+                # Two columns of this sheet read alike: both are kept.
+                target = header if header not in rename.values() else f"{header} ({table.name})"
+            rename[header] = target
+            if target not in headers:
+                headers.append(target)
+                spelling.setdefault(normalize_header(target), target)
+        renames.append(rename)
+    sheet_column = None
+    if len(tables) > 1:
+        sheet_column, number = "Sheet", 2
+        while sheet_column in headers:
+            sheet_column, number = f"Sheet ({number})", number + 1
+        headers.append(sheet_column)
+    rows: list[tuple[IntermediateRecord, dict[str, Any], int]] = []
+    offset = 0
+    for table, rename in zip(tables, renames):
+        for record in table.records:
+            fields = {rename.get(key, key): value for key, value in record.fields.items()}
+            if sheet_column:
+                fields[sheet_column] = table.name
+            rows.append((record, fields, record.row_number + offset))
+        offset += max((record.row_number for record in table.records), default=0)
+    return headers, rows
 
 
 @dataclass(slots=True)
@@ -284,38 +382,100 @@ class IngestionService:
         result = self.parsers.parse(record["file_name"], content, content_type=record["content_type"])
         return result
 
-    def _select_table(self, job: dict[str, Any], result: ParseResult) -> ParsedTable:
-        wanted = (job.get("options") or {}).get("sheet")
+    def _select_tables(self, job: dict[str, Any], result: ParseResult) -> tuple[list[ParsedTable], list[list[ParsedTable]], list[dict[str, str]]]:
+        """The tables this job stages, the groups of sheets that become jobs of their own, and the sheets skipped (with why).
+
+        An explicit sheet (or the sheets a job was split off with) is the only
+        one taken. Otherwise every usable sheet of an uploaded workbook is:
+        sheets with the same columns are merged, the first group in the
+        workbook stays with this job and every other group gets its own job.
+        Any other file keeps its largest table.
+        """
+
+        options = job.get("options") or {}
+        wanted = options.get("sheet")
         candidates = [table for table in result.tables if table.headers and table.records]
         if wanted:
             for table in candidates:
                 if table.name == wanted:
-                    return table
+                    return [table], [], []
             raise IngestionError(f"sheet or table not found: {wanted}")
-        if not candidates:
-            raise IngestionError("no tabular rows were found (no table with a header row was detected); upload the file through the documents API if it is a policy or circular")
-        return max(candidates, key=lambda table: (table.row_count, len(table.headers)))
+        if options.get("sheets"):
+            found = {table.name: table for table in candidates}
+            missing = [name for name in options["sheets"] if name not in found]
+            if missing:
+                raise IngestionError(f"sheet or table not found: {', '.join(missing)}")
+            return [found[name] for name in options["sheets"]], [], []
+        if result.file_kind not in WORKBOOK_KINDS or not job.get("file_id"):
+            if not candidates:
+                raise IngestionError("no tabular rows were found (no table with a header row was detected); upload the file through the documents API if it is a policy or circular")
+            return [max(candidates, key=lambda table: (table.row_count, len(table.headers)))], [], []
+        skipped = [{"sheet": warning.split(":", 1)[1], "reason": "the sheet could not be read"} for warning in result.warnings if warning.startswith("sheet_unreadable:")]
+        groups: dict[frozenset[str], list[ParsedTable]] = {}
+        for table in result.tables:
+            reason = _unusable_sheet(table)
+            if reason:
+                skipped.append({"sheet": table.name, "reason": reason})
+            else:
+                groups.setdefault(_sheet_columns(table), []).append(table)
+        if not groups:
+            detail = "; ".join(f"{item['sheet']}: {item['reason']}" for item in skipped)
+            raise IngestionError(f"no sheet of the workbook has rows to import ({detail}); name the sheet on upload to import it anyway"[:500])
+        first, *others = groups.values()
+        return first, others, skipped
+
+    def _split_off(self, institution_id: str, job: dict[str, Any], groups: Sequence[Sequence[ParsedTable]]) -> list[dict[str, Any]]:
+        """A queued job for each other group of sheets, reading the same stored file.
+
+        The job id follows from this job and the sheets, so a parse that runs
+        again (a retry, a restart) finds the jobs it made before instead of
+        making them twice. The job queue schedules them (``queued_siblings``).
+        """
+
+        made: list[dict[str, Any]] = []
+        for group in groups:
+            sheets = [table.name for table in group]
+            sibling_id = f"job-{uuid5(NAMESPACE_URL, '|'.join([job['job_id'], *sheets])).hex}"
+            if self.store.get_job(institution_id, sibling_id) is None:
+                options = {key: value for key, value in (job.get("options") or {}).items() if key not in {"sheet", "sheets", "origin_job_id"}}
+                options.update(sheets=sheets, origin_job_id=job["job_id"])
+                self.store.create_job(institution_id, job_id=sibling_id, file_id=job["file_id"], entity=job.get("entity"), requested_by=job["requested_by"], source_kind=job.get("source_kind") or "upload", options=options)
+            made.append({"job_id": sibling_id, "sheets": sheets, "rows": sum(table.row_count for table in group)})
+        return made
+
+    def queued_siblings(self, institution_id: str, job: Mapping[str, Any]) -> list[dict[str, Any]]:
+        """The jobs split off this job's workbook that still wait for the job queue."""
+
+        listed = ((job.get("report") or {}).get("sheets") or {}).get("other_jobs") or []
+        siblings = [self.store.get_job(institution_id, str(item.get("job_id"))) for item in listed]
+        return [sibling for sibling in siblings if sibling is not None and sibling["status"] == JOB_QUEUED]
 
     def _stage_parsed_rows(self, institution_id: str, job: dict[str, Any], result: ParseResult) -> dict[str, Any]:
-        table = self._select_table(job, result)
-        rows = table.records[: self.max_rows]
+        tables, others, skipped = self._select_tables(job, result)
+        headers, merged = _merge_sheets(tables)
+        rows = merged[: self.max_rows]
         staged = [
             {
-                "row_number": record.row_number,
+                "row_number": row_number,
                 "locator": record.locator,
-                "raw": {key: (value if isinstance(value, (str, int, float, bool)) or value is None else str(value)) for key, value in record.fields.items()},
+                "raw": {key: (value if isinstance(value, (str, int, float, bool)) or value is None else str(value)) for key, value in fields.items()},
                 "normalized": {"_ocr": record.ocr, "_ocr_confidence": record.ocr_confidence},
                 "status": "parsed",
                 "action": "pending",
                 "issues": [],
             }
-            for record in rows
+            for record, fields, row_number in rows
         ]
         self.store.replace_job_records(institution_id, job["job_id"], staged)
         report = dict(job.get("report") or {})
         report["parse"] = result.as_dict()
-        report["selected_table"] = {"name": table.name, "headers": list(table.headers), "rows": len(rows), "truncated": table.row_count > len(rows), "warnings": list(table.warnings)}
-        return self.store.update_job(institution_id, job["job_id"], row_count=len(rows), sheet_name=table.name, report=report, stage=STAGE_MAPPING)
+        name = ", ".join(table.name for table in tables)
+        warnings = [warning for table in tables for warning in ([f"{table.name}: {item}" for item in table.warnings] if len(tables) > 1 else table.warnings)]
+        report["selected_table"] = {"name": name, "headers": headers, "rows": len(rows), "truncated": len(merged) > len(rows), "warnings": warnings}
+        if others or skipped or len(tables) > 1:
+            # Which sheet went where, so no sheet of the workbook goes missing unexplained.
+            report["sheets"] = {"this_job": [table.name for table in tables], "other_jobs": self._split_off(institution_id, job, others), "skipped": skipped}
+        return self.store.update_job(institution_id, job["job_id"], row_count=len(rows), sheet_name=name, report=report, stage=STAGE_MAPPING)
 
     # ----------------------------------------------------------------- mapping
     async def _map(self, institution_id: str, job: dict[str, Any], records: Sequence[Mapping[str, Any]], *, force_review: bool = False, previous_error: str | None = None) -> dict[str, Any]:
@@ -740,7 +900,13 @@ class IngestionService:
             report = dict(job.get("report") or {})
             report["import"] = {"entity": entity.name, "inserted": 0, "updated": 0, "unchanged": 0, "skipped": skipped, "skipped_reasons": dict(reasons), "committed_by": committed_by, "message": "no rows were eligible for import"}
             return self.store.update_job(institution_id, job_id, status=JOB_IMPORTED, stage=STAGE_DONE, report=report)
-        summary = self.store.upsert_records(institution_id, records)
+        # The fields this import supplies: the targets of the mapping the rows
+        # were normalised under (every normalised row carries each of them,
+        # blank or not) and what cleaning derived from them, such as a name
+        # from first and last name or a percent from counts. An update writes
+        # only these, so a sheet with some of a record's columns keeps the rest.
+        mapped_fields = {name for record in records for name in record.fields}
+        summary = self.store.upsert_records(institution_id, records, mapped_fields=mapped_fields)
         summary.skipped += skipped
         for reason, count in reasons.items():
             summary.skipped_reasons[reason] = summary.skipped_reasons.get(reason, 0) + count

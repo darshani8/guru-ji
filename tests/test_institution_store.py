@@ -35,6 +35,72 @@ class InstitutionStoreTests(unittest.TestCase):
         self.assertEqual(record["semester"], 2)
         self.assertEqual(record["lineage"]["source_locator"], "sheet=MBA;row=2")
 
+    def test_a_sheet_with_some_columns_updates_only_those_and_merges_attributes(self):
+        def sheet_a(phone="9876500001"):
+            return [
+                CanonicalRecord("student", {"student_id": "S1", "name": "Asha Rao", "phone": phone}, {"Hostel": "Yes"}, ("phone:phone_format",), ({"field": "phone", "code": "shared_phone", "severity": "warning"},)),
+                CanonicalRecord("student", {"student_id": "S2", "name": "Ravi Kumar", "phone": None}, {"Hostel": "No"}),
+            ]
+
+        def sheet_b(email="asha@example.org", seat="GM"):
+            return [
+                CanonicalRecord("student", {"student_id": "S1", "name": "Asha Rao", "email": email}, {"Seat Type": seat}, ("email:email_case",)),
+                CanonicalRecord("student", {"student_id": "S2", "name": "Ravi Kumar", "email": "ravi@example.org"}, {"Seat Type": "SNQ"}),
+            ]
+
+        a_fields, b_fields = {"student_id", "name", "phone"}, {"student_id", "name", "email"}
+        first = self.store.upsert_records("college_a", sheet_a(), mapped_fields=a_fields)
+        self.assertEqual((first.inserted, first.updated, first.unchanged), (2, 0, 0))
+        second = self.store.upsert_records("college_a", sheet_b(), mapped_fields=b_fields)
+        self.assertEqual((second.inserted, second.updated, second.unchanged), (0, 2, 0))
+        record = self.store.get_record("college_a", "student", "s1")
+        self.assertEqual((record["phone"], record["email"]), ("9876500001", "asha@example.org"))
+        self.assertEqual(record["attributes"], {"Hostel": "Yes", "Seat Type": "GM"})
+        # Notes and issues about the columns sheet B did not write are kept.
+        self.assertEqual(record["issues"], [{"field": "phone", "code": "shared_phone", "severity": "warning"}])
+        self.assertEqual(self.store.query_records("college_a", "student", {"student_id": "S1"})[0]["attributes"]["Seat Type"], "GM")
+        # Importing either sheet again changes nothing: the hash covers the merged row.
+        for sheet, fields in ((sheet_b(), b_fields), (sheet_a(), a_fields)):
+            again = self.store.upsert_records("college_a", sheet, mapped_fields=fields)
+            self.assertEqual((again.inserted, again.updated, again.unchanged), (0, 0, 2))
+        # A blank cell in a mapped column keeps the stored value (S2's phone
+        # stayed empty, and a blank email must not erase the one on file).
+        blank = self.store.upsert_records("college_a", sheet_b(email=None), mapped_fields=b_fields)
+        self.assertEqual((blank.updated, blank.unchanged), (0, 2))
+        self.assertEqual(self.store.get_record("college_a", "student", "s1")["email"], "asha@example.org")
+        # A real change updates that record and leaves its other columns intact.
+        changed = self.store.upsert_records("college_a", sheet_b(email="asha.rao@example.org", seat="SNQ"), mapped_fields=b_fields)
+        self.assertEqual((changed.updated, changed.unchanged, changed.updated_keys), (1, 1, ["s1"]))
+        record = self.store.get_record("college_a", "student", "s1")
+        self.assertEqual((record["name"], record["phone"], record["email"]), ("Asha Rao", "9876500001", "asha.rao@example.org"))
+        self.assertEqual(record["attributes"], {"Hostel": "Yes", "Seat Type": "SNQ"})
+        rewritten = self.store.upsert_records("college_a", sheet_a(phone="9876500009"), mapped_fields=a_fields)
+        self.assertEqual((rewritten.updated, rewritten.unchanged), (1, 1))
+        record = self.store.get_record("college_a", "student", "s1")
+        self.assertEqual((record["phone"], record["email"]), ("9876500009", "asha.rao@example.org"))
+        self.assertEqual(self.store.count_records("college_a", "student"), 2)
+        with self.assertRaises(ValueError):
+            self.store.upsert_records("college_a", sheet_b(), mapped_fields={"student_id", "password"})
+        # Callers that name no fields keep replacing the whole record.
+        self.store.upsert_records("college_a", [CanonicalRecord("student", {"student_id": "S2", "name": "Ravi Kumar"})])
+        self.assertIsNone(self.store.get_record("college_a", "student", "s2")["email"])
+
+    def test_a_merging_update_assigns_only_the_mapped_columns(self):
+        statements: list[str] = []
+        original = self.store.backend.executemany
+
+        def recording(sql, rows):
+            statements.append(sql)
+            return original(sql, rows)
+
+        self.store.backend.executemany = recording  # type: ignore[method-assign]
+        self.store.upsert_records("college_a", _students(1), mapped_fields={"student_id", "name"})
+        assignments = statements[-1].split("DO UPDATE SET ", 1)[1]
+        self.assertIn("name = COALESCE(EXCLUDED.name, students.name)", assignments)
+        self.assertIn("attributes_json = EXCLUDED.attributes_json", assignments)
+        for column in ("phone", "email", "program", "semester"):
+            self.assertNotIn(f"{column} =", assignments)
+
     def test_records_with_blocking_issues_or_missing_keys_are_skipped(self):
         bad = CanonicalRecord("student", {"student_id": "", "name": "Nobody"})
         blocked = CanonicalRecord("student", {"student_id": "X1", "name": "Blocked"}, issues=({"severity": "error", "code": "missing_required"},))
@@ -629,6 +695,24 @@ class PostgresStatisticsAfterBulkWriteTests(unittest.TestCase):
         # The backend lock is released between chunks instead of being held for the whole lookup.
         self.assertEqual(self.backend.events, [CUSTOM_PLANS, "commit"] * 3)
         self.assertEqual(self.backend.tenants, ["college_a"] * 3)
+
+    def test_a_merging_import_keeps_the_chunked_lookup_and_the_single_write_transaction(self):
+        records = _students(WRITE_CHUNK_ROWS + 3)
+        mapped = {"student_id", "name", "phone"}
+        self.assertEqual(self.store.upsert_records("college_a", records, mapped_fields=mapped).inserted, len(records))
+        self.backend.events.clear()
+        again = self.store.upsert_records("college_a", records, mapped_fields=mapped)
+        self.assertEqual((again.updated, again.unchanged), (0, len(records)))
+        self.assertEqual(self.backend.events, [CUSTOM_PLANS, "commit"] * 2 + ["commit"], "nothing is written for an unchanged merge")
+        for record in records:
+            record.fields = {"student_id": record.fields["student_id"], "name": record.fields["name"], "email": f"{record.fields['student_id']}@example.org"}
+        self.backend.events.clear()
+        merged = self.store.upsert_records("college_a", records, mapped_fields={"student_id", "name", "email"})
+        self.assertEqual(merged.updated, len(records))
+        self.assertEqual(self.backend.events, [CUSTOM_PLANS, "commit"] * 2 + ["write", "write", "commit"])
+        self.backend.dialect = "sqlite"
+        last = self.store.get_record("college_a", "student", records[-1].record_key)
+        self.assertEqual((last["phone"], last["program"], last["email"]), ("9876543210", "MBA", f"{records[-1].fields['student_id']}@example.org"))
 
     def test_every_key_lookup_is_planned_for_the_rows_the_table_holds_now(self):
         # A generic plan cached while the table was empty would read every row
