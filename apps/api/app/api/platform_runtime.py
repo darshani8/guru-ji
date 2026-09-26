@@ -16,6 +16,7 @@ from ..config.settings import AppSettings
 from ..data_access.service import InstitutionDataService
 from ..documents.embeddings import EmbeddingProvider, HashingEmbeddingProvider, OllamaEmbeddingProvider, OpenAICompatibleEmbeddingProvider
 from ..documents.rag import DocumentRagService
+from ..documents.rerank import HttpReranker, LexicalReranker, Reranker
 from ..gateway.gateway import ToolGateway
 from ..gateway.registry import PlatformToolRegistry
 from ..ingestion.connectors.sheets import GoogleSheetsCsvConnector
@@ -144,6 +145,14 @@ def _embeddings(settings: AppSettings) -> EmbeddingProvider:
     return HashingEmbeddingProvider()
 
 
+def _reranker(settings: AppSettings) -> Reranker | None:
+    if settings.rerank_provider == "none":
+        return None
+    if settings.rerank_provider == "http":
+        return HttpReranker(base_url=settings.rerank_base_url or "", api_key=settings.rerank_api_key or "", model_id=settings.rerank_model_id or "rerank-v3.5")
+    return LexicalReranker()
+
+
 def _job_queue(settings: AppSettings, store: InstitutionDataStore, worker_store: InstitutionDataStore | None) -> JobQueue:
     # The in-process worker gets its own store (connection and lock) whenever
     # the database allows a second connection, so a long import transaction
@@ -178,7 +187,7 @@ def _services(settings: AppSettings, store: InstitutionDataStore, intelligence_s
     reports = ReportService(store, objects)
     email = EmailService(store, objects, _email_sender(settings), allowed_domains=settings.email_allowed_domains)
     notifications = NotificationService(store, control_store)
-    documents = DocumentRagService(store, objects, parsers, embeddings=_embeddings(settings), model=model, max_document_bytes=settings.max_upload_bytes)
+    documents = DocumentRagService(store, objects, parsers, embeddings=_embeddings(settings), model=model, max_document_bytes=settings.max_upload_bytes, reranker=_reranker(settings), retrieve_k=settings.rag_retrieve_k, min_rerank_score=settings.rag_min_rerank_score)
     intelligence: InternetIntelligenceService | None = None
     monitor: ContinuousMonitor | None = None
     if provider is not None:

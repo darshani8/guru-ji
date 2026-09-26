@@ -43,6 +43,7 @@ async def readiness(request: Request) -> dict[str, object]:
             "enabled": True, "institution_database": platform.store.backend_name, "institution_database_ok": platform_ok, "object_store": platform.objects.backend_name,
             "job_queue": platform.jobs.backend_name, "platform_tools": len(platform.registry.all()), "internet_intelligence": platform.intelligence is not None,
             "ocr": platform.parsers.ocr_engine.engine_name, "embeddings": platform.documents.embeddings.provider_name,
+            "reranker": platform.documents.reranker.provider_name if platform.documents.reranker is not None else "none",
         }
         if platform is not None else {"enabled": False}
     )

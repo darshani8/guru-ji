@@ -1,0 +1,12 @@
+{
+  "description": "Sample labelled questions for the document RAG pipeline. expected_files names files in documents/; the runner turns them into document ids after ingesting.",
+  "cases": [
+    {"case_id": "attendance-minimum", "question": "What is the minimum attendance needed to write the semester exam?", "expected_files": ["attendance_policy.txt"], "expected_text": "minimum of 75% attendance", "reference_answer": "Students need a minimum of 75% attendance in every course to write the end semester examination.", "must_contain": ["75%"]},
+    {"case_id": "condonation", "question": "How do I apply for attendance condonation on medical grounds?", "expected_files": ["attendance_policy.txt"], "expected_text": "medical certificate", "reference_answer": "Students between 65% and 75% attendance submit a medical certificate to the Head of Department within seven days and pay a condonation fee of Rs. 500.", "must_contain": ["medical certificate"]},
+    {"case_id": "late-fee", "question": "What is the late fee after the due date?", "expected_files": ["fee_policy.txt"], "expected_text": "Rs. 100 per day", "reference_answer": "A late fee of Rs. 100 per day applies after the due date, up to a maximum of Rs. 3,000.", "must_contain": ["100"]},
+    {"case_id": "refund", "question": "Is the tuition fee refunded if a student withdraws after classes begin?", "expected_files": ["fee_policy.txt"], "expected_text": "50% of the tuition fee", "reference_answer": "After classes begin, 50% of the tuition fee is refunded if the student withdraws within 15 days, and nothing after 15 days."},
+    {"case_id": "pg-borrowing", "question": "How many books can postgraduate students borrow and for how long?", "expected_files": ["library_hostel_rules.txt"], "expected_text": "six books", "reference_answer": "Postgraduate students may borrow up to six books for 21 days.", "must_contain": ["six"]},
+    {"case_id": "hostel-gates", "question": "When do the hostel gates close on weekends?", "expected_files": ["library_hostel_rules.txt"], "expected_text": "10:30 pm", "reference_answer": "Hostel gates close at 10:30 pm on weekends.", "must_contain": ["10:30"]},
+    {"case_id": "unanswerable-placement", "question": "Which companies visited for campus placements in 2025?", "answerable": false}
+  ]
+}
