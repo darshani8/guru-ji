@@ -16,6 +16,10 @@ MAX_COLUMNS = 200
 _NUMBER = re.compile(r"[-+]?\d+(\.\d+)?%?")
 _DATE = re.compile(r"\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}([T ]\d{1,2}:\d{2}(:\d{2})?)?")
 _WHOLE = re.compile(r"\d{1,4}")
+# A header that names an identifier column: the USN, name, number, roll, register or id of a person.
+_IDENTIFIER_LABEL = re.compile(r"\b(usn|seat|name|no|number|roll|reg|regd|register|registration|id|enrol+ment|admission|adm|prn|ticket|student|candidate)\b", re.IGNORECASE)
+# What a mark cell holds for a student with no mark (absent, not eligible, malpractice...).
+_ABSENCE_CODES = frozenset({"A", "AB", "ABS", "ABSENT", "-", "--", "NA", "N/A", "NE", "MP", "X"})
 
 
 def _clean_header(value: Any) -> str:
@@ -254,8 +258,8 @@ def _labels_over_data(cells: Sequence[str], kinds: dict[int, str], values: dict[
     return named, data
 
 
-def _combine_header_rows(upper: Sequence[str], lower: Sequence[str], width: int, merged: dict[int, int]) -> tuple[list[str], bool] | None:
-    """One header per column from a group label row over a sub-label row, and whether any label groups columns.
+def _combine_header_rows(upper: Sequence[str], lower: Sequence[str], width: int, merged: dict[int, int]) -> tuple[list[str], list[tuple[str, ...]]] | None:
+    """One header per column from a group label row over a sub-label row, and the sub-labels under each group label.
 
     A group label covers its merged range when the reader knows the merges.
     Otherwise a label over a sub-label of its own spans rightwards over blank
@@ -265,7 +269,7 @@ def _combine_header_rows(upper: Sequence[str], lower: Sequence[str], width: int,
     """
 
     owner: dict[int, int] = {}
-    groups: set[int] = set()
+    groups: dict[int, tuple[str, ...]] = {}
     for column in range(width):
         if not _cell(upper, column) or column in owner:
             continue
@@ -276,7 +280,7 @@ def _combine_header_rows(upper: Sequence[str], lower: Sequence[str], width: int,
                 end += 1
         end = max(column, min(end, width - 1))
         if end > column:
-            groups.add(column)
+            groups[column] = tuple(_cell(lower, covered) for covered in range(column, end + 1) if _cell(lower, covered))
         for covered in range(column, end + 1):
             owner[covered] = column
     headers: list[str] = []
@@ -291,7 +295,7 @@ def _combine_header_rows(upper: Sequence[str], lower: Sequence[str], width: int,
         if label and combined in headers:
             return None
         headers.append(combined)
-    return headers, bool(groups)
+    return headers, list(groups.values())
 
 
 def _header_block(rows: Sequence[Sequence[Any]], header_index: int, merged: Sequence[tuple[int, int, int, int]]) -> tuple[int, int, list[Any]]:
@@ -325,7 +329,7 @@ def _header_block(rows: Sequence[Sequence[Any]], header_index: int, merged: Sequ
         combined = _combine_header_rows(upper, lower, width, spans(upper_index))
         if combined is None:
             continue
-        headers, grouped = combined
+        headers, groups = combined
         if upper_index == header_index:
             # The row under the detected header: sub-labels over data, never data itself.
             named, data = _labels_over_data(lower, kinds, values)
@@ -334,18 +338,29 @@ def _header_block(rows: Sequence[Sequence[Any]], header_index: int, merged: Sequ
         else:
             # The row above the detected header: group labels, and labels of its own
             # for columns the detected row leaves blank (the USN and name over a
-            # block of subjects), never a title line over a complete header.
-            fills_gap = any(cell and not _cell(lower, column) and column in kinds for column, cell in enumerate(upper))
-            if grouped and fills_gap and not _labels_over_data(upper, kinds, values)[1]:
+            # block of subjects), never a title or key/value line over a header,
+            # even one with a blank cell or two. The labels of its own lead the row
+            # ("USN | Marks..."), one of them names an identifier, while a title or
+            # key/value line starts over a labelled header cell. Or the same
+            # sub-labels sit under two group labels (the subjects under IA1 and IA2).
+            gaps = [column for column, cell in enumerate(upper) if cell and not _cell(lower, column) and column in kinds]
+            first = next((column for column, cell in enumerate(upper) if cell and (column in kinds or _cell(lower, column))), None)
+            fills_gap = first in gaps and any(_IDENTIFIER_LABEL.search(upper[column]) for column in gaps)
+            sub_labels = [labels for labels in groups if labels]
+            regrouped = len(set(sub_labels)) < len(sub_labels)
+            if groups and gaps and (fills_gap or regrouped) and not _labels_over_data(upper, kinds, values)[1]:
                 return upper_index, lower_index, headers
     return header_index, header_index, list(rows[header_index][:MAX_COLUMNS])
 
 
-def _annotation_row(cells: Sequence[str], kinds: dict[int, str]) -> list[int] | None:
+def _annotation_row(cells: Sequence[str], kinds: dict[int, str], grouped: bool = False) -> list[int] | None:
     """The identifier columns an annotation row under the headers leaves blank, or None for a data row.
 
     Such a row (the initials of the faculty under each subject) has nothing in
     the columns of ids or names and only short labels over columns of numbers.
+    A row with a name is data, and so is a row of absence codes (AB, A, -) in
+    the mark cells under a one-row header: a student with no id, never labels.
+    Under a ``grouped`` two-row header the initials may happen to read as codes (AB, MP).
     """
 
     identifiers = [column for column, kind in kinds.items() if kind in ("code", "text")]
@@ -353,6 +368,8 @@ def _annotation_row(cells: Sequence[str], kinds: dict[int, str]) -> list[int] | 
     if not identifiers or any(_cell(cells, column) for column in identifiers) or len(labels) < 2:
         return None
     if any(kinds[column] != "number" or _kind(cells[column]) != "text" or len(cells[column]) > 16 for column in labels):
+        return None
+    if not grouped and all(cells[column].upper().replace(".", "") in _ABSENCE_CODES for column in labels):
         return None
     return sorted(identifiers)
 
@@ -404,7 +421,7 @@ def grid_to_table(
     # A row of notes right under the headers (the faculty teaching each subject) is not data.
     annotation: int | None = None
     if last_header + 1 < len(rows):
-        blank = _annotation_row([_clean_header(cell) for cell in rows[last_header + 1][:len(headers)]], _column_kinds(rows, last_header + 2)[0])
+        blank = _annotation_row([_clean_header(cell) for cell in rows[last_header + 1][:len(headers)]], _column_kinds(rows, last_header + 2)[0], last_header > first_header)
         if blank:
             annotation = last_header + 2
             columns = ", ".join(headers[column] for column in blank if column < len(headers))
@@ -431,7 +448,8 @@ def grid_to_table(
         if len(records) >= MAX_ROWS:
             warnings.append("row_limit_reached")
             break
-    return ParsedTable(name=name, headers=headers, records=records, warnings=warnings, page=page, ocr=ocr)
+    title = " ".join(cell for row in rows[:first_header] for cell in map(_clean_header, row[:MAX_COLUMNS]) if cell)[:200]
+    return ParsedTable(name=name, headers=headers, records=records, warnings=warnings, page=page, ocr=ocr, title=title)
 
 
 __all__ = ["MAX_COLUMNS", "MAX_ROWS", "dedupe_headers", "detect_header_row", "grid_to_table"]

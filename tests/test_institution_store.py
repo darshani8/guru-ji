@@ -101,6 +101,81 @@ class InstitutionStoreTests(unittest.TestCase):
         for column in ("phone", "email", "program", "semester"):
             self.assertNotIn(f"{column} =", assignments)
 
+    def test_a_merge_works_derived_columns_out_again_over_the_merged_row(self):
+        statements: list[str] = []
+        original = self.store.backend.executemany
+
+        def recording(sql, rows):
+            statements.append(sql)
+            return original(sql, rows)
+
+        self.store.backend.executemany = recording  # type: ignore[method-assign]
+        register_fields = {"student_id", "fee_type", "amount_due", "amount_paid", "balance", "status"}
+        paid_fields = {"student_id", "fee_type", "amount_paid"}
+
+        def fee(student: str, **values):
+            return [CanonicalRecord("fee", {"student_id": student, "fee_type": "Tuition", **values})]
+
+        def stored(student: str):
+            row = next(row for row in self.store.query_records("college_a", "fee") if row["student_id"] == student)
+            return row["balance"], row["status"], sorted((issue["field"], issue["code"], issue["severity"], issue["value"]) for issue in row["issues"])
+
+        # A register whose balance is the total less the payment: a later payment works balance and
+        # status out again over the merged row, and the values the register stated stay in a warning.
+        self.store.upsert_records("college_a", fee("S1", amount_due=5000.0, amount_paid=1000.0, balance=4000.0, status="partial"), mapped_fields=register_fields)
+        self.assertEqual(self.store.upsert_records("college_a", fee("S1", amount_paid=5000.0), mapped_fields=paid_fields).updated, 1)
+        self.assertEqual(stored("S1"), (0.0, "paid", [("balance", "recomputed_after_partial_update", "warning", "4000.0"), ("status", "recomputed_after_partial_update", "warning", "partial")]))
+        assignments = statements[-1].split("DO UPDATE SET ", 1)[1]
+        self.assertIn("balance = EXCLUDED.balance", assignments)
+        self.assertIn("amount_paid = COALESCE(EXCLUDED.amount_paid, fees.amount_paid)", assignments)
+        self.assertNotIn("amount_due =", assignments)
+        again = self.store.upsert_records("college_a", fee("S1", amount_paid=5000.0), mapped_fields=paid_fields)
+        self.assertEqual((again.updated, again.unchanged), (0, 1))
+        # A merge that touches none of their inputs leaves them alone.
+        self.store.upsert_records("college_a", fee("S1", student_name="Asha Rao"), mapped_fields={"student_id", "fee_type", "student_name"})
+        self.assertEqual(stored("S1")[:2], (0.0, "paid"))
+        self.assertNotIn("balance =", statements[-1].split("DO UPDATE SET ", 1)[1])
+        # A balance and status the register stated that the formula does not give (a scholarship)
+        # are kept when a payment arrives, each with a warning, not replaced by the formula.
+        self.store.upsert_records("college_a", fee("S2", amount_due=100000.0, amount_paid=20000.0, balance=0.0, status="scholarship"), mapped_fields=register_fields)
+        self.store.upsert_records("college_a", fee("S2", amount_paid=30000.0), mapped_fields=paid_fields)
+        self.assertEqual(stored("S2"), (0.0, "scholarship", [("balance", "stale_after_partial_update", "warning", "0.0"), ("status", "stale_after_partial_update", "warning", "scholarship")]))
+        # A balance stated without the total cannot be worked out again: kept, with a warning,
+        # and so is the status that goes with it.
+        self.store.upsert_records("college_a", fee("S3", balance=5000.0, status="partial"), mapped_fields={"student_id", "fee_type", "balance", "status"})
+        self.store.upsert_records("college_a", fee("S3", amount_paid=5000.0), mapped_fields=paid_fields)
+        self.assertEqual(stored("S3"), (5000.0, "partial", [("balance", "stale_after_partial_update", "warning", "5000.0"), ("status", "stale_after_partial_update", "warning", "partial")]))
+        # A balance a sheet worked out from its total alone is not written over the stated one.
+        self.store.upsert_records("college_a", fee("S4", amount_due=100000.0, amount_paid=40000.0, balance=50000.0, status="partial"), mapped_fields=register_fields)
+        structure = [CanonicalRecord("fee", {"student_id": "S4", "fee_type": "Tuition", "amount_due": 100000.0, "balance": 100000.0, "status": "pending"}, normalizations=("balance:derived_from_due_minus_paid", "status:derived_from_balance"))]
+        result = self.store.upsert_records("college_a", structure, mapped_fields={"student_id", "fee_type", "amount_due", "balance", "status"})
+        self.assertEqual((result.updated, result.unchanged), (0, 1))
+        self.assertEqual(stored("S4"), (50000.0, "partial", []))
+        # A derived percent the merged counts no longer give is cleared with a warning, not kept.
+        counts = CanonicalRecord("attendance", {"student_id": "S1", "course_code": "MBA201", "period": "Aug", "classes_held": 40, "classes_attended": 20, "attendance_percent": 50.0}, normalizations=("attendance_percent:derived_from_counts",))
+        attendance_fields = {"student_id", "course_code", "period", "classes_held", "classes_attended", "attendance_percent"}
+        self.store.upsert_records("college_a", [counts], mapped_fields=attendance_fields)
+        none_held = CanonicalRecord("attendance", {"student_id": "S1", "course_code": "MBA201", "period": "Aug", "classes_held": 0, "classes_attended": 0})
+        self.store.upsert_records("college_a", [none_held], mapped_fields={"student_id", "course_code", "period", "classes_held", "classes_attended"})
+        [row] = self.store.query_records("college_a", "attendance")
+        self.assertIsNone(row["attendance_percent"])
+        self.assertIn({"field": "attendance_percent", "code": "stale_after_partial_update", "severity": "warning", "value": "50.0"}, row["issues"])
+        # Counts that contradict each other once merged are skipped, and the report says which.
+        over = CanonicalRecord("attendance", {"student_id": "S1", "course_code": "MBA201", "period": "Aug", "classes_attended": 3})
+        skipped = self.store.upsert_records("college_a", [over], mapped_fields={"student_id", "course_code", "period", "classes_attended"})
+        self.assertEqual((skipped.updated, skipped.skipped_reasons), (0, {"blocking_issues_after_merge": 1}))
+        self.assertEqual([(item["record_key"], [issue["code"] for issue in item["issues"]]) for item in skipped.skipped_keys], [("s1|mba201|aug", ["attended_exceeds_held"])])
+
+    def test_a_merge_keeps_the_stored_value_of_a_kept_attribute(self):
+        first = CanonicalRecord("student", {"student_id": "S1", "phone": "9000000001"}, {"Sheet": "GM", "Hostel": "Yes"})
+        self.store.upsert_records("college_a", [first], mapped_fields={"student_id", "phone"}, kept_attributes={"Sheet"})
+        later = CanonicalRecord("student", {"student_id": "S1", "email": "asha@example.com"}, {"Sheet": "ID Card GM", "Hostel": "No"})
+        self.store.upsert_records("college_a", [later], mapped_fields={"student_id", "email"}, kept_attributes={"Sheet"})
+        self.assertEqual(self.store.get_record("college_a", "student", "s1")["attributes"], {"Sheet": "GM", "Hostel": "No"})
+        again = self.store.upsert_records("college_a", [first], mapped_fields={"student_id", "phone"}, kept_attributes={"Sheet"})
+        self.assertEqual(self.store.get_record("college_a", "student", "s1")["attributes"], {"Sheet": "GM", "Hostel": "Yes"})
+        self.assertEqual(again.updated, 1)
+
     def test_records_with_blocking_issues_or_missing_keys_are_skipped(self):
         bad = CanonicalRecord("student", {"student_id": "", "name": "Nobody"})
         blocked = CanonicalRecord("student", {"student_id": "X1", "name": "Blocked"}, issues=({"severity": "error", "code": "missing_required"},))

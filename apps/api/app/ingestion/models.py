@@ -59,6 +59,8 @@ class ParsedTable:
     warnings: list[str] = field(default_factory=list)
     page: int | None = None
     ocr: bool = False
+    # The text of the title lines above the header row ("MBA II SEM RESULT"), if any.
+    title: str = ""
 
     @property
     def row_count(self) -> int:

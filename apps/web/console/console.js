@@ -465,7 +465,9 @@
     block.className = 'result-box';
     const reasons = (payload.review_required || []).map((item) => `${item.source_header} (${item.reason || 'uncertain'})`).join('; ') || 'none';
     const doubt = (payload.previous_error ? `The last attempt failed: ${payload.previous_error}. ` : '')
-      + (payload.entity_uncertain ? `The records were detected as ${payload.entity}, but not with certainty: check the kind of records. ` : '');
+      + (payload.entity_uncertain ? `The records were detected as ${payload.entity}, but not with certainty: check the kind of records. ` : '')
+      // A wide marks sheet was turned into one row per student, course and exam: say how, before anything is imported.
+      + (payload.reshaped_marks || []).map((item) => `Sheet ${item.sheet}: ${item.wide_rows} rows with a column per subject became ${item.exam_rows} exam rows${item.truncated ? `, of which only the first ${item.staged_rows} are staged (the row limit)` : ''} (exams: ${(item.exam_names || []).join(', ')}; courses: ${(item.courses || []).join(', ')}; left out: ${(item.left_out_columns || []).join(', ') || 'none'}). `).join('');
     const entities = entityChoices(payload).map((name) => `<option value="${escapeHtml(name)}"${name === payload.entity ? ' selected' : ''}>${escapeHtml(name)}</option>`).join('');
     const rows = payload.headers.map((header) => `<div>${escapeHtml(header)}</div><div><select data-header="${escapeHtml(header)}">${fieldOptions(payload.entity, payload.proposed_mapping[header])}</select></div><div class="muted">${escapeHtml((payload.samples[header] || []).join(' | ').slice(0, 40))}</div>`).join('');
     block.innerHTML = `<strong>Column mapping</strong><div class="field-row stack-sm"><label>Records in this file <select data-entity>${entities}</select></label></div><div class="muted stack-sm">${escapeHtml(doubt)}Review required: ${escapeHtml(reasons)}. Missing required: <span data-missing></span>.</div><div class="mapping-grid stack-sm"><div class="muted">Source header</div><div class="muted">Canonical field</div><div class="muted">Sample</div>${rows}</div><div class="stack"><button class="btn" data-approve type="button">Approve mapping</button></div>`;
@@ -520,9 +522,12 @@
     const payload = review.payload;
     // Two copies of one identifier can only become one record: the choice is which copy.
     const conflict = payload.kind === 'conflicting_key';
-    const [title, keep, other] = conflict
-      ? ['Same identifier, different details', 'Keep the earlier row (skip this one)', 'Use this row instead']
-      : ['Possible duplicate', 'Same person (skip the new row)', 'Different people (import)'];
+    // A row of a marks sheet whose other copy is the record already stored: its marks would be replaced.
+    const [title, keep, other] = conflict && payload.evidence?.stored
+      ? ['Marks already stored for this exam', 'Keep the stored marks (skip this row)', 'Replace them with this row']
+      : conflict
+        ? ['Same identifier, different details', 'Keep the earlier row (skip this one)', 'Use this row instead']
+        : ['Possible duplicate', 'Same person (skip the new row)', 'Different people (import)'];
     const differing = conflict && payload.evidence?.differing_fields?.length ? ` · differs in ${payload.evidence.differing_fields.join(', ')}` : '';
     const block = document.createElement('div');
     block.className = 'result-box';

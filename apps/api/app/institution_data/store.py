@@ -12,10 +12,12 @@ import logging
 import re
 from collections.abc import Collection, Iterable, Iterator, Mapping, Sequence
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, NamedTuple
 from uuid import uuid4
 
 from ..normalization.canonical import CANONICAL_ENTITIES, CanonicalEntity, CanonicalField, FieldType, entity as canonical_entity
+from ..normalization.cleaning import DERIVED_FIELDS, derive_fields
+from ..normalization.validation import CROSS_FIELD_CODES, cross_field_issues
 from ..persistence.sql_backend import SqlBackend, open_backend
 from .models import CanonicalRecord, ImportSummary
 from ..persistence.schema_tools import add_missing_columns, apply_schema, begin_migration, bound_lock_waits, existing_policies, row_level_security_state, tenant_isolation_statements
@@ -97,23 +99,113 @@ def _row_hash(entity: CanonicalEntity, fields: Mapping[str, Any], attributes: Ma
     return CanonicalRecord(entity.name, {name: value for name, value in fields.items() if not _blank(value)}, dict(attributes)).content_hash
 
 
-def _merge_stored(entity: CanonicalEntity, row: dict[str, Any], record: CanonicalRecord, columns: Collection[str]) -> tuple[dict[str, Any], list[Any], list[Any], str]:
-    """A stored row with ``record`` laid over it the way a merging import writes it (see ``upsert_records``).
+class _Merged(NamedTuple):
+    """A stored row with a record laid over it (see ``_merge_stored``)."""
 
-    Returns the merged attributes, normalisation notes, issues and content hash.
-    """
+    fields: dict[str, Any]
+    attributes: dict[str, Any]
+    notes: list[Any]
+    issues: list[Any]
+    content_hash: str
+    # Derived columns worked out again over the merged row: they are written
+    # as they are here, NULL included, not merged with the stored value.
+    rederived: frozenset[str]
+    # Derived columns the record worked out from its own sheet alone and that
+    # are not worked out again: they are not written, the stored value stays.
+    held_back: frozenset[str]
+    # The merged row fails a check across its columns that blocks an import.
+    blocking: bool
+
+
+# The issues a merge raises about a derived column; each merge raises them afresh.
+_MERGE_CODES = frozenset({"stale_after_partial_update", "recomputed_after_partial_update"})
+
+
+def _derived_note(notes: Iterable[Any], name: str) -> bool:
+    return any(str(note).startswith(f"{name}:derived_from_") for note in notes)
+
+
+def _about(item: Any) -> Any:
+    """The column a normalisation note or an issue is about."""
+
+    return item.get("field") if isinstance(item, dict) else str(item).split(":", 1)[0]
+
+
+def _agrees(left: Any, right: Any) -> bool:
+    """Whether a derived column holds what its formula gives, up to the rounding a sheet applies (85 for 85.4%)."""
+
+    if left is None or right is None:
+        return left is None and right is None
+    try:
+        return abs(float(left) - float(right)) <= 0.5
+    except (TypeError, ValueError):
+        return str(left).strip().casefold() == str(right).strip().casefold()
+
+
+def _merge_stored(entity: CanonicalEntity, row: dict[str, Any], record: CanonicalRecord, columns: Collection[str], kept_attributes: Collection[str] = ()) -> _Merged:
+    """A stored row with ``record`` laid over it the way a merging import writes it (see ``upsert_records``)."""
 
     stored = InstitutionDataStore._row_to_record(entity, row)
-    written = {name for name in columns if not _blank(record.fields.get(name))}
+    derivations = DERIVED_FIELDS.get(entity.name, {})
+    # A derived column the record worked out from its own sheet alone (a
+    # balance from a total with no payment column) says nothing the stored
+    # row does not know better: it is not written, only worked out again
+    # over the merged row below.
+    own = {name for name in derivations if _derived_note(record.normalizations, name)}
+    written = {name for name in columns if name not in own and not _blank(record.fields.get(name))}
     fields = {item.name: record.fields[item.name] if item.name in written else stored[item.name] for item in entity.fields}
-    attributes = {**stored["attributes"], **record.attributes}
+    attributes = {**stored["attributes"], **{key: value for key, value in record.attributes.items() if key not in kept_attributes or key not in stored["attributes"]}}
     # Notes and issues follow the values: those about a column this record
     # rewrote are replaced by its own, those about any other column are kept.
-    notes = [note for note in _loads(row.get("normalizations_json"), []) if str(note).split(":", 1)[0] not in written]
-    notes += [note for note in record.normalizations if note not in notes]
-    issues = [issue for issue in stored["issues"] if not (isinstance(issue, dict) and issue.get("field") in written)]
-    issues += [issue for issue in record.issues if issue not in issues]
-    return attributes, notes, issues, _row_hash(entity, fields, attributes)
+    stored_notes = _loads(row.get("normalizations_json"), [])
+    notes = [note for note in stored_notes if _about(note) not in written]
+    notes += [note for note in record.normalizations if note not in notes and _about(note) not in own]
+    issues = [issue for issue in stored["issues"] if _about(issue) not in written]
+    issues += [issue for issue in record.issues if issue not in issues and _about(issue) not in own]
+    # A derived column (fee balance and status, attendance percent) the
+    # record did not read itself is looked at again when the record wrote a
+    # column it depends on. Only a value that was itself derived (it says so,
+    # or it is what the stored row gives) is worked out again over the merged
+    # row, with a warning keeping a replaced value a sheet stated. A value a
+    # sheet stated that the stored row does not bear out (a concession, a
+    # condoned attendance, a status word) or cannot tell is kept, with a
+    # warning when the merged row gives another value or none; a value then
+    # worked out from such a kept one is in doubt too and warned about.
+    stored_fields = {item.name: stored[item.name] for item in entity.fields}
+    changed = {name for name in written if fields[name] != stored[name]}
+    rederived: set[str] = set()
+    doubtful: set[str] = set()
+    for name, inputs in derivations.items():  # a column comes before those worked out from it
+        before, noted = stored[name], _derived_note(stored_notes, name)
+        if name in written or not written.intersection(inputs) or not (changed.intersection(inputs) or _blank(before) or noted):
+            continue
+        worked, worked_notes = derive_fields(entity, {**fields, name: None})
+        value, doubt = worked[name], bool(doubtful.intersection(inputs))
+        issues = [issue for issue in issues if not (_about(issue) == name and isinstance(issue, dict) and issue.get("code") in _MERGE_CODES)]
+        if not _blank(before) and ((value is None and not noted) or not (noted or _agrees(derive_fields(entity, {**stored_fields, name: None})[0][name], before))):
+            if doubt or not _agrees(value, before):
+                issues.append({"field": name, "code": "stale_after_partial_update", "severity": "warning", "value": str(before)[:40]})
+                doubtful.add(name)
+            continue
+        replaced = value != before and not (_blank(before) and value is None)
+        if replaced:
+            fields[name] = value
+            rederived.add(name)
+            notes = [note for note in notes if _about(note) != name] + [note for note in worked_notes if _about(note) == name]
+            issues = [issue for issue in issues if _about(issue) != name]
+        if doubt and value is not None:
+            issues.append({"field": name, "code": "stale_after_partial_update", "severity": "warning", "value": str(value if _blank(before) else before)[:40]})
+            doubtful.add(name)
+        elif replaced and value is None:
+            issues.append({"field": name, "code": "stale_after_partial_update", "severity": "warning", "value": str(before)[:40]})
+        elif replaced and not _blank(before) and not noted:
+            issues.append({"field": name, "code": "recomputed_after_partial_update", "severity": "warning", "value": str(before)[:40]})
+    # Checks across columns (attended above held, marks above the maximum)
+    # are made again on the merged row, which one sheet alone never showed.
+    checks = cross_field_issues(entity, fields)
+    issues = [issue for issue in issues if not (isinstance(issue, dict) and issue.get("code") in CROSS_FIELD_CODES)] + checks
+    blocking = any(issue.get("severity") == "error" for issue in checks)
+    return _Merged(fields, attributes, notes, issues, _row_hash(entity, fields, attributes), frozenset(rederived), frozenset(own - rederived), blocking)
 
 
 def _chunks(items: Iterable[Any], size: int) -> Iterator[list[Any]]:
@@ -285,7 +377,7 @@ class InstitutionDataStore:
         }
         return record
 
-    def upsert_records(self, institution_id: str, records: Sequence[CanonicalRecord], *, skip_blocking: bool = True, mapped_fields: Collection[str] | None = None) -> ImportSummary:
+    def upsert_records(self, institution_id: str, records: Sequence[CanonicalRecord], *, skip_blocking: bool = True, mapped_fields: Collection[str] | None = None, kept_attributes: Collection[str] = ()) -> ImportSummary:
         """Insert new records and update existing ones, in one transaction.
 
         Without ``mapped_fields`` an update replaces every canonical column.
@@ -295,9 +387,16 @@ class InstitutionDataStore:
         are merged key by key. A blank value in a named column keeps the
         stored value too, since spreadsheets routinely leave cells empty and
         one must not erase what another sheet supplied; a value is cleared
-        through a record edit, not an import. The content hash then covers
-        the merged row, so importing the same sheet again reports it
-        unchanged. Inserts write the record as it is either way.
+        through a record edit, not an import. Derived columns (fee balance
+        and status, attendance percent) that were derived are worked out
+        again over the merged row; one a sheet stated is kept, with a warning
+        when the merged row gives another value (see ``_merge_stored``). A
+        merged row that fails a blocking check across its columns (attended
+        above held) is skipped, leaving the stored row as it was, and its key
+        is listed in ``skipped_keys``. Attributes named in ``kept_attributes``
+        (the sheet a row came from) keep their stored value. The content hash
+        then covers the merged row, so importing the same sheet again reports
+        it unchanged. Inserts write the record as it is either way.
         """
 
         if not records:
@@ -331,20 +430,26 @@ class InstitutionDataStore:
         stamp = now_iso()
         columns = ["row_id", "institution_id", "record_key", *entity.field_names(), "attributes_json", "normalizations_json", "issues_json", "content_hash", "source_file_id", "source_file_name", "source_locator", "ingestion_job_id", "imported_at", "updated_at"]
         update_columns = [name for name in columns if name not in {"row_id", "institution_id", "record_key", "imported_at"}]
-        assignments = [f"{name} = EXCLUDED.{name}" for name in update_columns]
-        if merge_columns is not None:
-            # A merge sends NULL for a blank value and COALESCE keeps the
-            # stored one; columns outside the mapping are not assigned at all,
-            # so they stay as they are even in a row changed since the lookup.
-            field_names = set(entity.field_names())
-            assignments = [f"{name} = COALESCE(EXCLUDED.{name}, {entity.table}.{name})" for name in merge_columns]
-            assignments += [f"{name} = EXCLUDED.{name}" for name in update_columns if name not in field_names]
-        sql = (
-            f"INSERT INTO {entity.table} ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)}) "
-            f"ON CONFLICT (institution_id, record_key) DO UPDATE SET " + ", ".join(assignments)
-        )
+
+        def statement(rederived: frozenset[str]) -> str:
+            assignments = [f"{name} = EXCLUDED.{name}" for name in update_columns]
+            if merge_columns is not None:
+                # A merge sends NULL for a blank value and COALESCE keeps the
+                # stored one; columns outside the mapping are not assigned at
+                # all, so they stay as they are even in a row changed since
+                # the lookup. Derived columns worked out again over the merged
+                # row are assigned as they are, since NULL clears a stale one.
+                field_names = set(entity.field_names())
+                assignments = [f"{name} = COALESCE(EXCLUDED.{name}, {entity.table}.{name})" for name in merge_columns if name not in rederived]
+                assignments += [f"{name} = EXCLUDED.{name}" for name in entity.field_names() if name in rederived]
+                assignments += [f"{name} = EXCLUDED.{name}" for name in update_columns if name not in field_names]
+            return (
+                f"INSERT INTO {entity.table} ({', '.join(columns)}) VALUES ({', '.join('?' for _ in columns)}) "
+                f"ON CONFLICT (institution_id, record_key) DO UPDATE SET " + ", ".join(assignments)
+            )
+
         seen: set[str] = set()
-        pending: list[tuple[str, str | None, list[Any]]] = []
+        pending: list[tuple[str, str | None, list[Any], frozenset[str]]] = []
         for record in records:
             key = record.record_key
             if not key.strip("|"):
@@ -362,9 +467,21 @@ class InstitutionDataStore:
             seen.add(key)
             content_hash = record.content_hash
             attributes, notes, issues = record.attributes, list(record.normalizations), list(record.issues)
+            merged_fields: dict[str, Any] = {}
+            rederived: frozenset[str] = frozenset()
+            held_back: frozenset[str] = frozenset()
             if merge_columns is not None:
                 if key in stored:
-                    attributes, notes, issues, content_hash = _merge_stored(entity, stored[key], record, merge_columns)
+                    merged = _merge_stored(entity, stored[key], record, merge_columns, kept_attributes)
+                    if skip_blocking and merged.blocking:
+                        summary.skipped += 1
+                        summary.skipped_reasons["blocking_issues_after_merge"] = summary.skipped_reasons.get("blocking_issues_after_merge", 0) + 1
+                        if len(summary.skipped_keys) < 50:
+                            blocking = [issue for issue in merged.issues if isinstance(issue, dict) and issue.get("severity") == "error"]
+                            summary.skipped_keys.append({"record_key": key, "reason": "blocking_issues_after_merge", "issues": blocking})
+                        continue
+                    attributes, notes, issues, content_hash = merged.attributes, merged.notes, merged.issues, merged.content_hash
+                    merged_fields, rederived, held_back = merged.fields, merged.rederived, merged.held_back
                 else:
                     content_hash = _row_hash(entity, record.fields, attributes)
             previous = existing.get(key)
@@ -373,7 +490,7 @@ class InstitutionDataStore:
                 continue
             values: list[Any] = [f"{entity.name}-{uuid4().hex}", institution_id, key]
             for item in entity.fields:
-                value = record.fields.get(item.name)
+                value = merged_fields[item.name] if item.name in rederived else None if item.name in held_back else record.fields.get(item.name)
                 if item.field_type is FieldType.BOOLEAN and value is not None:
                     value = 1 if value else 0
                 if merge_columns is not None and _blank(value):
@@ -384,17 +501,24 @@ class InstitutionDataStore:
                 record.lineage.source_file_id, record.lineage.source_file_name, record.lineage.source_locator, record.lineage.ingestion_job_id,
                 stamp, stamp,
             ])
-            pending.append((key, previous, values))
+            pending.append((key, previous, values, rederived))
         # One transaction for the whole write, sent in bounded batches: the
         # import lands whole or not at all, so a failure can never leave rows
         # attributed to a job whose report says nothing was imported. Request
         # handlers call the store off the event loop, so holding the backend
         # lock for the import delays other store calls, never the API loop.
+        # Rows whose derived columns were worked out again need a statement
+        # assigning those columns; there are a handful of such statements.
+        by_statement: dict[frozenset[str], list[list[Any]]] = {}
+        for _, _, values, rederived in pending:
+            by_statement.setdefault(rederived, []).append(values)
         with self._tenant(institution_id):
-            for chunk in _chunks(pending, WRITE_CHUNK_ROWS):
-                self.backend.executemany(sql, [values for _, _, values in chunk])
+            for rederived, rows in by_statement.items():
+                sql = statement(rederived)
+                for chunk in _chunks(rows, WRITE_CHUNK_ROWS):
+                    self.backend.executemany(sql, chunk)
         self._analyze_after_bulk_write(entity.table, len(pending))
-        for key, previous, _ in pending:
+        for key, previous, _, _ in pending:
             if previous is None:
                 summary.inserted += 1
                 if len(summary.inserted_keys) < 50:

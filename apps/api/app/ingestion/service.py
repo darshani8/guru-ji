@@ -22,7 +22,7 @@ from ..institution_data.models import CanonicalRecord, RecordLineage
 from ..institution_data.store import InstitutionDataStore
 from ..normalization.canonical import CANONICAL_ENTITIES, CanonicalEntity, FieldType
 from ..normalization.cleaning import clean_record
-from ..normalization.deduplication import find_duplicates
+from ..normalization.deduplication import DuplicateCandidate, find_duplicates
 from ..normalization.mapping import MappingEngine, apply_mapping, header_signature, normalize_header
 from ..normalization.validation import identifier_pattern, summarize_issues, validate_record
 from ..storage.object_store import ObjectStore, build_object_key, safe_file_name
@@ -96,6 +96,53 @@ def _nothing_importable(rows: Sequence[Mapping[str, Any]]) -> str:
     )[:500]
 
 
+# The fields of an exam record that hold its marks.
+_MARK_FIELDS = ("marks_obtained", "max_marks", "grade", "result_status")
+
+
+def _same_value(new: Any, stored: Any) -> bool:
+    if stored is None or stored == "":
+        return False
+    try:
+        return float(new) == float(stored)
+    except (TypeError, ValueError):
+        return str(new).strip().lower() == str(stored).strip().lower()
+
+
+def _stored_marks_replaced(records: Sequence[CanonicalRecord], actions: dict[int, str], existing: Mapping[str, Mapping[str, Any]]) -> list[DuplicateCandidate]:
+    """Rows of a reshaped marks sheet that would change the marks stored for the same student, course and exam.
+
+    The reshape names an exam after a group label, the sheet, its title or the file
+    name, which may not tell two exams apart (IA 1 and IA 2 on sheets both called
+    "2nd Sem"): replacing marks already stored is then a person's decision, asked
+    like a conflicting copy of a key (approve keeps the stored marks, reject uses
+    the row). Such a row's action becomes ``replaces_stored_marks`` in ``actions``;
+    the same marks again stay an update, which imports as unchanged.
+    """
+
+    found: list[DuplicateCandidate] = []
+    for index, action in actions.items():
+        if action != "update":
+            continue
+        record = records[index]
+        stored = existing.get(record.record_key) or {}
+        differing = [name for name in _MARK_FIELDS if record.fields.get(name) not in (None, "") and not _same_value(record.fields[name], stored.get(name))]
+        if not differing:
+            continue
+        actions[index] = "replaces_stored_marks"
+        found.append(DuplicateCandidate("conflicting_key", record.lineage.source_locator or f"row={index + 1}", None, record.record_key, 0.95, {
+            "differing_fields": differing, "exam_name": record.fields.get("exam_name"),
+            "stored": {name: stored.get(name) for name in differing}, "new": {name: record.fields.get(name) for name in differing},
+        }))
+    return found
+
+
+def _wide_row(locator: str) -> str | None:
+    """The sheet row an exam row was reshaped from ("sheet=2nd Sem;row=5"), else None."""
+
+    return locator.rsplit(";col=", 1)[0] if ";col=" in locator else None
+
+
 WORKBOOK_KINDS = {FileKind.XLSX, FileKind.XLS}
 # The name grid_to_table gives a column whose header cell is blank, and the
 # suffix dedupe_headers gives a repeated header ("Address (2)").
@@ -121,6 +168,37 @@ def _counts_rows(values: Sequence[Any]) -> bool:
     except ValueError:
         return False
     return all(number.is_integer() for number in numbers) and all(later == earlier + 1 for earlier, later in zip(numbers, numbers[1:]))
+
+
+def _sheet_column(job: Mapping[str, Any]) -> str | None:
+    """The column _merge_sheets adds (last) naming each row's sheet, when the job holds several sheets."""
+
+    report = job.get("report") or {}
+    headers = (report.get("selected_table") or {}).get("headers") or []
+    return headers[-1] if headers and len((report.get("sheets") or {}).get("this_job") or []) > 1 else None
+
+
+def _row_number_columns(rows: Sequence[Mapping[str, Any]], sheet_column: str | None) -> set[str]:
+    """The row-number columns ("Sl.no", "S. No", "#") of staged rows: a serial header counting 1, 2, 3... down each sheet.
+
+    They only say where a row sat in its sheet, so two sheets describing the
+    same record give them different values; kept as attributes they would
+    flip the stored record on every import of an unchanged workbook. The
+    sheet and row are in the record's lineage locator. A column under such
+    a header holding anything else (room numbers under "No") is data.
+    """
+
+    values: dict[tuple[str, Any], list[Any]] = {}
+    seen: set[tuple[str, Any, Any]] = set()
+    for row in rows:
+        raw = row.get("raw") or {}
+        sheet = raw.get(sheet_column) if sheet_column else None
+        for header, value in raw.items():
+            # Rows reshaped from one wide marks row share its row number and its serial.
+            if normalize_header(header) in _SERIAL_HEADERS and _filled(value) and (header, sheet, row.get("row_number")) not in seen:
+                seen.add((header, sheet, row.get("row_number")))
+                values.setdefault((header, sheet), []).append(str(value).strip().strip("()").rstrip("."))
+    return {header for header, _ in values} - {header for (header, _), column in values.items() if not (_counts_rows(column) and float(column[0]) == 1)}
 
 
 def _unusable_sheet(table: ParsedTable) -> str | None:
@@ -460,6 +538,10 @@ class IngestionService:
         tables, others, skipped = self._select_tables(job, result)
         headers, merged = _merge_sheets(tables)
         rows = merged[: self.max_rows]
+        if len(merged) > len(rows) and (cut := _wide_row(merged[len(rows)][0].locator)):
+            # A student's row of a wide marks sheet is staged whole or not at all, never some of its courses.
+            while rows and _wide_row(rows[-1][0].locator) == cut:
+                rows.pop()
         staged = [
             {
                 "row_number": row_number,
@@ -478,6 +560,16 @@ class IngestionService:
         name = ", ".join(table.name for table in tables)
         warnings = [warning for table in tables for warning in ([f"{table.name}: {item}" for item in table.warnings] if len(tables) > 1 else table.warnings)]
         report["selected_table"] = {"name": name, "headers": headers, "rows": len(rows), "truncated": len(merged) > len(rows), "warnings": warnings}
+        # What the reshape of a wide marks sheet did (rows, exams, courses, columns left
+        # out): the mapping review shows it, since such a job is never imported unseen.
+        report.pop("reshaped_marks", None)
+        reshaped = [summary for summary in result.metadata.get("reshaped_marks") or [] if summary.get("sheet") in {table.name for table in tables}]
+        if reshaped:
+            # The rows the row limit leaves of each reshaped sheet, which are all the review may count on.
+            sheet_of = {id(record): table.name for table in tables for record in table.records}
+            kept = Counter(sheet_of.get(id(record)) for record, _, _ in rows)
+            reshaped = [{**summary, "staged_rows": kept[summary["sheet"]], "truncated": kept[summary["sheet"]] < summary["exam_rows"]} for summary in reshaped]
+            report["reshaped_marks"] = reshaped
         if others or skipped or len(tables) > 1:
             # Which sheet went where, so no sheet of the workbook goes missing unexplained.
             report["sheets"] = {"this_job": [table.name for table in tables], "other_jobs": self._split_off(institution_id, job, others), "skipped": skipped}
@@ -488,8 +580,11 @@ class IngestionService:
         headers = list(job.get("report", {}).get("selected_table", {}).get("headers") or list(records[0]["raw"].keys()))
         samples = {header: [row["raw"].get(header) for row in records[:50]] for header in headers}
         entity_hint = job.get("entity") or reshaped_entity(headers)
+        # Rows reshaped from a wide marks sheet always wait for a person, whatever was
+        # remembered: the reshape itself (which columns, which exams) is what they check.
+        reshaped = list((job.get("report") or {}).get("reshaped_marks") or [])
         signature = header_signature(headers)
-        if force_review:
+        if force_review or reshaped:
             profile = None
         elif entity_hint:
             profile = self.store.find_mapping_profile(institution_id, entity_hint, signature)
@@ -510,7 +605,7 @@ class IngestionService:
         mapping_state["profile_incomplete"] = profile_incomplete
         entity_uncertain = not entity_hint and not proposal.profile_applied and proposal.entity_confidence < self.mapping.threshold
         mapping_state["entity_uncertain"] = entity_uncertain
-        needs_review = bool(force_review or proposal.review_required() or proposal.missing_required() or entity_uncertain)
+        needs_review = bool(force_review or reshaped or proposal.review_required() or proposal.missing_required() or entity_uncertain)
         if needs_review:
             review_payload = {
                 "entity": proposal.entity,
@@ -524,6 +619,7 @@ class IngestionService:
                 "headers": headers,
                 "samples": {header: [str(value)[:60] for value in values[:3] if value not in (None, "")] for header, values in samples.items()},
                 "previous_error": previous_error,
+                "reshaped_marks": reshaped,
             }
             self.store.add_review_items(institution_id, job["job_id"], [{"kind": "mapping", "payload": review_payload}])
             return self.store.update_job(institution_id, job["job_id"], status=JOB_NEEDS_REVIEW, stage=STAGE_MAPPING_REVIEW, entity=proposal.entity, mapping=mapping_state)
@@ -654,6 +750,10 @@ class IngestionService:
                 id_values.append(str(cleaned[id_field]))
             lineage = RecordLineage(source_file_id=source_file_id, source_file_name=source_name, source_locator=row["locator"], ingestion_job_id=job["job_id"])
             prepared.append((row, CanonicalRecord(entity.name, cleaned, extras, tuple(notes), tuple(issues), lineage)))
+        # Judged over the rows that are records: a footer ("Total") has no key.
+        row_numbers = _row_number_columns([row for row, record in prepared if record.record_key.strip("|")], _sheet_column(job))
+        for _, record in prepared:
+            record.attributes = {header: value for header, value in record.attributes.items() if header not in row_numbers}
         pattern = identifier_pattern(id_values) if id_values else None
         # The OCR flags staged with the parsed row are carried into the row
         # rewritten below, so normalising it again validates the same way.
@@ -683,6 +783,12 @@ class IngestionService:
         importable = [index for index, record in enumerate(records) if not record.has_blocking_issues()]
         candidates, found, duplicate_warnings = find_duplicates([records[index] for index in importable], existing)
         actions = {importable[position]: action for position, action in found.items()}
+        if entity.name == "exam" and (job.get("report") or {}).get("reshaped_marks"):
+            replacing = _stored_marks_replaced(records, actions, existing)
+            if replacing:
+                candidates.extend(replacing)
+                exams = ", ".join(sorted({str(item.evidence.get("exam_name")) for item in replacing}))
+                duplicate_warnings.append(f"{len(replacing)} rows would replace marks already stored for exam {exams}; each waits for a decision: keep the stored marks or use the row")
         self._heartbeat(institution_id, job["job_id"])
         updated_rows: list[dict[str, Any]] = []
         for index, (row, record) in enumerate(prepared):
@@ -690,8 +796,8 @@ class IngestionService:
             status = "ready"
             if record.has_blocking_issues():
                 status = "rejected"
-            elif action in {"conflict_in_batch", "duplicate_in_batch", "missing_key"}:
-                status = "skipped" if action != "conflict_in_batch" else "review"
+            elif action in {"conflict_in_batch", "replaces_stored_marks", "duplicate_in_batch", "missing_key"}:
+                status = "skipped" if action in {"duplicate_in_batch", "missing_key"} else "review"
             updated_rows.append({
                 "row_number": row["row_number"], "locator": row["locator"], "raw": row["raw"],
                 "normalized": {"fields": record.fields, "attributes": record.attributes, "normalizations": list(record.normalizations), "_ocr": row_ocr[index], "_ocr_confidence": row_confidence[index]},
@@ -911,8 +1017,11 @@ class IngestionService:
         # blank or not) and what cleaning derived from them, such as a name
         # from first and last name or a percent from counts. An update writes
         # only these, so a sheet with some of a record's columns keeps the rest.
+        # The sheet a record came from stays the one it was first imported
+        # from, so a workbook whose sheets share records imports unchanged.
         mapped_fields = {name for record in records for name in record.fields}
-        summary = self.store.upsert_records(institution_id, records, mapped_fields=mapped_fields)
+        sheet_column = _sheet_column(job)
+        summary = self.store.upsert_records(institution_id, records, mapped_fields=mapped_fields, kept_attributes={sheet_column} if sheet_column else ())
         summary.skipped += skipped
         for reason, count in reasons.items():
             summary.skipped_reasons[reason] = summary.skipped_reasons.get(reason, 0) + count
@@ -920,6 +1029,13 @@ class IngestionService:
         import_report = summary.as_dict()
         import_report["committed_by"] = committed_by
         import_report["rows_considered"] = len(staged)
+        after_merge = summary.skipped_reasons.get("blocking_issues_after_merge", 0)
+        if after_merge:
+            checks = Counter(f"{issue.get('field')} {issue.get('code')}" for item in summary.skipped_keys for issue in item["issues"])
+            import_report["message"] = (
+                f"{after_merge} rows were not imported: with the values already stored they fail a check "
+                f"({', '.join(name for name, _ in checks.most_common(3))}; see skipped_keys_sample), so those records were left as they were"
+            )[:500]
         report["import"] = import_report
         return self.store.update_job(institution_id, job_id, status=JOB_IMPORTED, stage=STAGE_DONE, report=report)
 
