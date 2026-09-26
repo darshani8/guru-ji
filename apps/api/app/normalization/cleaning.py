@@ -46,6 +46,9 @@ def normalize_person_name(value: str) -> tuple[str, bool]:
     return cleaned, cleaned != value
 
 
+_NUMERIC_LABEL = re.compile(r"-?\d+(\.\d+)?%?")
+
+
 def normalize_program(value: str) -> tuple[str, bool]:
     cleaned = normalize_whitespace(value)
     key = re.sub(r"[^a-z0-9]", "", cleaned.lower())
@@ -201,6 +204,9 @@ def clean_value(field_type: FieldType, name: str, value: Any) -> tuple[Any, list
                 notes.append(f"{name}:name_case")
             return cleaned, notes, issues
         if name == "program":
+            if _NUMERIC_LABEL.fullmatch(str(value).strip()):
+                issues.append({"field": name, "code": "numeric_program", "severity": "warning", "value": str(value)[:40]})
+                return None, notes, issues
             cleaned, changed = normalize_program(str(value))
             if changed:
                 notes.append(f"{name}:program_alias")

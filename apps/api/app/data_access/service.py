@@ -54,7 +54,8 @@ class InstitutionDataService:
     # --------------------------------------------------------- vocabulary
     def known_programs(self, institution_id: str) -> list[str]:
         values = self.store.distinct_values(institution_id, "program", "code") + self.store.distinct_values(institution_id, "student", "program")
-        return sorted({value.upper() for value in values if value})
+        # Skip bare numbers: they come from a mis-mapped marks column, not a program.
+        return sorted({value.upper() for value in values if value and not re.fullmatch(r"-?\d+(\.\d+)?%?", str(value).strip())})
 
     def known_departments(self, institution_id: str) -> list[str]:
         values = self.store.distinct_values(institution_id, "department", "name") + self.store.distinct_values(institution_id, "student", "department") + self.store.distinct_values(institution_id, "faculty", "department")
