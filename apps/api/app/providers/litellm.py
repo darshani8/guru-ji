@@ -1,6 +1,6 @@
 """Optional LiteLLM SDK adapter.
 
-LiteLLM is kept behind the Agentic Saffron model protocol. Its response objects never
+LiteLLM is kept behind the Agent Saffron model protocol. Its response objects never
 cross the orchestration or HTTP boundary, and importing the adapter does not
 make the dependency mandatory for deterministic or Ollama deployments.
 """
@@ -11,12 +11,12 @@ from collections.abc import AsyncIterator, Iterable
 from dataclasses import dataclass
 from typing import Any
 
-from ..domain.errors import ErrorCode, AgenticSaffronError, PublicError
+from ..domain.errors import ErrorCode, AgentSaffronError, PublicError
 from .model_base import ModelEvent, ProviderCapabilities
 
 
-def _provider_error(message: str) -> AgenticSaffronError:
-    return AgenticSaffronError(PublicError(ErrorCode.SERVICE_UNAVAILABLE, message, "provider"))
+def _provider_error(message: str) -> AgentSaffronError:
+    return AgentSaffronError(PublicError(ErrorCode.SERVICE_UNAVAILABLE, message, "provider"))
 
 
 def _content(response: object) -> str:
@@ -163,7 +163,7 @@ class LiteLLMProvider:
                         type="delta", text=text, is_final=True,
                         provider_id=self.provider_id, model_id=self.model_id,
                     )
-        except AgenticSaffronError:
+        except AgentSaffronError:
             raise
         except Exception as exc:
             raise _provider_error("The configured LiteLLM provider is unavailable.") from exc

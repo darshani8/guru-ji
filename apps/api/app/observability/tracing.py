@@ -1,4 +1,4 @@
-"""Redaction-safe tracing protocol for Agentic Saffron.
+"""Redaction-safe tracing protocol for Agent Saffron.
 
 The recorder is deliberately backend-neutral. OTLP, Phoenix, Langfuse, or a
 local collector can be added later without making any of them canonical for

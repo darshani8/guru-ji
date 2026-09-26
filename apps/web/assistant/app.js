@@ -1,5 +1,5 @@
 /*
- * Agentic Saffron client assistant.
+ * Agent Saffron client assistant.
  *
  * Text and two-way voice conversation with the institutional agent. Chats are
  * kept in this browser (IndexedDB), per signed-in account; the server keeps
@@ -892,7 +892,7 @@ function renderConversation() {
   markLatest();
   setEmpty(!conversation.messages.length);
   $('chat-title').textContent = conversation.messages.length ? conversation.title : 'New chat';
-  document.title = conversation.messages.length ? `${conversation.title} — Agentic Saffron` : 'Agentic Saffron — Assistant';
+  document.title = conversation.messages.length ? `${conversation.title} — Agent Saffron` : 'Agent Saffron — Assistant';
   renderHistoryList();
   if (state.inFlight.has(conversation.id)) state.textThinking.set(conversation.id, showThinking());
   updateSendButton();
@@ -1591,7 +1591,7 @@ function renderVoiceState(message = '') {
   button.classList.toggle('active', active);
   button.setAttribute('aria-pressed', String(active));
   $('voice-button-label').textContent = active ? 'Stop voice' : 'Voice';
-  button.title = active ? 'Stop the voice conversation' : 'Talk to Agentic Saffron';
+  button.title = active ? 'Stop the voice conversation' : 'Talk to Agent Saffron';
   $('voice-status-line').textContent = message;
   $('interrupt-button').hidden = !(active && state.speaking);
 }
@@ -1628,7 +1628,7 @@ function unlockAudio() {
   }
 }
 
-// Agentic Saffron speaks as an Indian man: the male Indian voices of Edge
+// Agent Saffron speaks as an Indian man: the male Indian voices of Edge
 // (Prabhat, Madhur, Gagan), Windows (Ravi, Hemant) and Apple (Rishi) come first.
 const VOICE_PREFERENCES = {
   'en-IN': [/prabhat/i, /\bravi\b/i, /rishi/i, /\bmale\b/i],

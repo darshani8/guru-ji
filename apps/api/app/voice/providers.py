@@ -1,6 +1,6 @@
 """Provider-neutral voice event normalization.
 
-LiveKit and Pipecat integrations may emit different event names. Agentic Saffron
+LiveKit and Pipecat integrations may emit different event names. Agent Saffron
 normalizes only lifecycle/transcript/answer metadata; raw audio stays in the
 provider transport and is never stored by this adapter.
 """

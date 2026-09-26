@@ -1,6 +1,6 @@
 """Check the real voice services before a demo: Polly, the conversation model and web search.
 
-A wrong key or a missing IAM permission does not break Agentic Saffron; it quietly
+A wrong key or a missing IAM permission does not break Agent Saffron; it quietly
 falls back to the browser voice, fixed replies or no web search. Run this in
 the deployed task, with the same environment as the API, to see which one is
 in effect:
@@ -25,7 +25,7 @@ from app.conversation.streaming import stream_reply
 from app.internet_intelligence.search import IntelligenceSearchUnavailable, TavilyIntelligenceSearchProvider
 from app.voice.tts import build_synthesizer
 
-VOICE_SAMPLES = (("en-IN", "Hello, I am Agentic Saffron. How can I help you today?"), ("hi-IN", "नमस्ते, मैं एजेंटिक सैफ्रन हूँ।"))
+VOICE_SAMPLES = (("en-IN", "Hello, I am Agent Saffron. How can I help you today?"), ("hi-IN", "नमस्ते, मैं एजेंट सैफ्रन हूँ।"))
 MODEL_PROMPT = "Greet a college student in one short, friendly sentence."
 WEB_QUERY = "weather in Bengaluru today"
 

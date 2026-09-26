@@ -1,1 +1,1 @@
-"""Agentic Saffron institution connector service."""
+"""Agent Saffron institution connector service."""

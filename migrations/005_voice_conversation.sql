@@ -1,4 +1,4 @@
--- Agentic Saffron control-plane schema v005: voice sessions and per-person usage counters.
+-- Agent Saffron control-plane schema v005: voice sessions and per-person usage counters.
 -- A voice session row lets the request that opens a session and the WebSocket
 -- that uses it reach different API tasks; its one-use ticket is stored only as
 -- a SHA-256 digest. No transcript, answer or audio is ever stored here.

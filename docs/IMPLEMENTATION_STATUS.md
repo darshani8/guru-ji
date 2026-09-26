@@ -1,4 +1,4 @@
-# Agentic Saffron all-phase implementation status
+# Agent Saffron all-phase implementation status
 
 ## Repository implementation completed
 
@@ -47,7 +47,7 @@ All six roadmap phases now have code, contracts, tests, and deployment reference
 - Added an optional LiteLLM adapter with normalized async streaming events and usage metadata; it is enabled only by explicit configuration and optional dependency installation.
 - Added redaction-safe HTTP trace export for internal collectors. Export failures are best effort and never alter authorization or answer behavior.
 - Added provider capability declarations and runtime configuration guards for production model selection.
-- Renamed the product from Guru Ji to Agentic Saffron. Settings are read as `SAFFRON_*`; `app/config/legacy_env.py` copies each `GURU_*` variable to its unset `SAFFRON_*` name (a `SAFFRON_*` value always wins), and the connector falls back to `GURU_CONNECTOR_*`, so existing deployments keep working. Names that are contracts with outside systems keep the old spelling: OIDC claims (`guru_role`, `guru_capabilities`, `guru_scopes`, `guru_parental_consent`, `guru_revoked`), the reporting views `public.guru_student_overview` and `public.guru_attendance_summary`, the `guruji-verification` ownership protocol, the `X-Guru-*` headers and LMS identity paths, the Cerbos policy versions, and the development suppression key. The crawler User-Agent is `AgenticSaffron-InstitutionIntelligence/1.0`, and robots.txt groups for `GuruJi-InstitutionIntelligence` still apply to it.
+- Renamed the product from Guru Ji to Agent Saffron. Settings are read as `SAFFRON_*`; `app/config/legacy_env.py` copies each `GURU_*` variable to its unset `SAFFRON_*` name (a `SAFFRON_*` value always wins), and the connector falls back to `GURU_CONNECTOR_*`, so existing deployments keep working. Names that are contracts with outside systems keep the old spelling: OIDC claims (`guru_role`, `guru_capabilities`, `guru_scopes`, `guru_parental_consent`, `guru_revoked`), the reporting views `public.guru_student_overview` and `public.guru_attendance_summary`, the `guruji-verification` ownership protocol, the `X-Guru-*` headers and LMS identity paths, the Cerbos policy versions, and the development suppression key. The crawler User-Agent is `AgenticSaffron-InstitutionIntelligence/1.0`, and robots.txt groups for `GuruJi-InstitutionIntelligence` still apply to it.
 
 ### P6 — edge and full integration boundaries
 

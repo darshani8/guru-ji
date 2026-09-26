@@ -20,7 +20,7 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..domain.errors import ErrorCode, AgenticSaffronError, PublicError
+from ..domain.errors import ErrorCode, AgentSaffronError, PublicError
 from .model_base import ModelEvent, ProviderCapabilities
 
 logger = logging.getLogger(__name__)
@@ -64,8 +64,8 @@ def _pool() -> ThreadPoolExecutor:
         return _executor
 
 
-def _provider_error() -> AgenticSaffronError:
-    return AgenticSaffronError(PublicError(ErrorCode.SERVICE_UNAVAILABLE, _PUBLIC_MESSAGE, "provider"))
+def _provider_error() -> AgentSaffronError:
+    return AgentSaffronError(PublicError(ErrorCode.SERVICE_UNAVAILABLE, _PUBLIC_MESSAGE, "provider"))
 
 
 def _describe_failure(exc: BaseException) -> str:
@@ -136,7 +136,7 @@ class BedrockConverseModel:
     def capabilities(self) -> ProviderCapabilities:
         return ProviderCapabilities(supports_streaming=True, cost_metadata="bedrock_usage")
 
-    def _unavailable(self, reason: str) -> AgenticSaffronError:
+    def _unavailable(self, reason: str) -> AgentSaffronError:
         logger.warning("Bedrock model %s unavailable: %s", self.model_id, reason)
         return _provider_error()
 
@@ -198,7 +198,7 @@ class BedrockConverseModel:
                 response = await self._off_loop(self._converse, request)
         except TimeoutError as exc:
             raise self._unavailable(f"no answer within {self.timeout_seconds:g}s") from exc
-        except AgenticSaffronError:
+        except AgentSaffronError:
             raise
         except Exception as exc:  # noqa: BLE001 - classified by _describe_failure
             raise self._unavailable(_describe_failure(exc)) from exc
@@ -233,7 +233,7 @@ class BedrockConverseModel:
                 elif any(key.endswith("Exception") for key in event):
                     # botocore raises these itself; a raw error event is handled the same way.
                     raise self._unavailable(f"the stream failed: {', '.join(event)}")
-        except AgenticSaffronError:
+        except AgentSaffronError:
             raise
         except Exception as exc:  # noqa: BLE001 - classified by _describe_failure
             raise self._unavailable(_describe_failure(exc)) from exc

@@ -35,7 +35,7 @@ from typing import Any
 from ..actions.reports import ReportService
 from ..agents.contracts import AgentCommand, AgentResponse, StepResult
 from ..conversation.web_search import ist_day
-from ..domain.errors import AgenticSaffronError
+from ..domain.errors import AgentSaffronError
 from ..domain.principals import Capability, Principal
 from ..gateway.gateway import ToolGateway
 from ..gateway.registry import PlatformToolRegistry
@@ -52,7 +52,7 @@ REPORT_TOOL_NAME = "open_task"
 USAGE_COUNTER = "open_task"
 MAX_ANSWER_CHARS = 4_000
 
-SYSTEM_PROMPT = """You are the open-task agent of Agentic Saffron, an assistant used by an educational institution in India. A member of the institution has asked for work that the assistant's fixed tools cannot do on their own. Do the work end to end and deliver the result.
+SYSTEM_PROMPT = """You are the open-task agent of Agent Saffron, an assistant used by an educational institution in India. A member of the institution has asked for work that the assistant's fixed tools cannot do on their own. Do the work end to end and deliver the result.
 
 How you work:
 - Facts about the institution come only from the data tools. Call them for everything the request needs. Each call returns a summary and a short preview; the full result is saved in the workspace as data/<name>.json and, when it is a table, data/<name>.csv.
@@ -347,7 +347,7 @@ class OpenTaskAgent:
             except TimeoutError:
                 stop = "deadline"
                 break
-            except AgenticSaffronError:
+            except AgentSaffronError:
                 stop = "unavailable"
                 break
             run.add_usage(message)

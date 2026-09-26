@@ -268,7 +268,7 @@ def _generated_line(row_count: int, shown: int, subtitle: str | None) -> str:
     generated = datetime.now(timezone.utc).strftime("%d %b %Y, %H:%M UTC")
     rows = f"{row_count:,} row{'s' if row_count != 1 else ''}"
     parts = [subtitle.strip()] if subtitle and subtitle.strip() else []
-    parts += [rows, f"Generated {generated} by Agentic Saffron"]
+    parts += [rows, f"Generated {generated} by Agent Saffron"]
     line = " · ".join(parts)
     if shown < row_count:
         line += f". Showing the first {shown:,}; ask for an Excel file to get every row."
@@ -281,7 +281,7 @@ def _core_properties(title: str) -> str:
         '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
         '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/" '
         'xmlns:dcterms="http://purl.org/dc/terms/" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">'
-        f"<dc:title>{_xml(title)}</dc:title><dc:creator>Agentic Saffron</dc:creator>"
+        f"<dc:title>{_xml(title)}</dc:title><dc:creator>Agent Saffron</dc:creator>"
         f'<dcterms:created xsi:type="dcterms:W3CDTF">{created}</dcterms:created></cp:coreProperties>'
     )
 
@@ -428,7 +428,7 @@ def _pptx_table(columns: Sequence[str], rows: Sequence[Mapping[str, Any]], *, x:
 
 _PPTX_THEME = (
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
-    '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Agentic Saffron"><a:themeElements>'
+    '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Agent Saffron"><a:themeElements>'
     f'<a:clrScheme name="Saffron"><a:dk1><a:srgbClr val="{_INK}"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="3D3530"/></a:dk2><a:lt2><a:srgbClr val="FAF6F0"/></a:lt2>'
     f'<a:accent1><a:srgbClr val="{_ACCENT}"/></a:accent1><a:accent2><a:srgbClr val="B85A0A"/></a:accent2><a:accent3><a:srgbClr val="138808"/></a:accent3>'
     '<a:accent4><a:srgbClr val="000080"/></a:accent4><a:accent5><a:srgbClr val="F4B26B"/></a:accent5><a:accent6><a:srgbClr val="6B645C"/></a:accent6>'

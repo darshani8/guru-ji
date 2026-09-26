@@ -1,4 +1,4 @@
-"""Agentic Saffron application package."""
+"""Agent Saffron application package."""
 
 from .config.legacy_env import adopt_legacy_names
 

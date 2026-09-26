@@ -1,8 +1,8 @@
 {
   "id": "/",
-  "name": "Agentic Saffron — Institutional assistant",
-  "short_name": "Agentic Saffron",
-  "description": "Agentic Saffron institutional text and voice assistant",
+  "name": "Agent Saffron — Institutional assistant",
+  "short_name": "Agent Saffron",
+  "description": "Agent Saffron institutional text and voice assistant",
   "lang": "en-IN",
   "start_url": "/",
   "scope": "/",

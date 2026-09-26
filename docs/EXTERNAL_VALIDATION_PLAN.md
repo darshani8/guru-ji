@@ -1,4 +1,4 @@
-# Agentic Saffron deployment-specific external validation plan
+# Agent Saffron deployment-specific external validation plan
 
 Status: prepared for execution; no deployment, production write, migration, credential creation, or external-system change was performed while preparing this plan.
 
@@ -8,7 +8,7 @@ This plan converts the remaining external gates in `IMPLEMENTATION_STATUS.md` in
 
 1. Use synthetic users and synthetic institutional aggregates in staging. Do not use real student records in test payloads, logs, screenshots, tickets, or chat.
 2. Store credentials only in the approved deployment secret manager. Do not place secrets in `.env` files, CI logs, test fixtures, curl history, or this document.
-3. Validate the complete trust chain: browser/API identity -> Agentic Saffron authorization -> Cerbos decision -> connector scope enforcement -> approved reporting view -> redacted response.
+3. Validate the complete trust chain: browser/API identity -> Agent Saffron authorization -> Cerbos decision -> connector scope enforcement -> approved reporting view -> redacted response.
 4. A dependency outage must deny or degrade safely. It must never widen scope, enable a client-supplied role, expose raw identity fields, or silently switch production to deterministic demo data.
 5. Capture request IDs and version/image digests for every test. Record only redacted evidence.
 6. A failed security test blocks progression even if functional tests pass.
@@ -297,7 +297,7 @@ Run only the adapters approved for this deployment. Each adapter must have a nam
 
 - Authentication and session scope match the text path.
 - Lifecycle and final-transcript metadata are captured as designed.
-- Raw audio is not persisted by Agentic Saffron.
+- Raw audio is not persisted by Agent Saffron.
 - Disconnect, reconnect, timeout, unauthorized room, and provider outage are safe.
 - The 10-concurrent-session cap is enforced or enforced by the approved edge layer.
 

@@ -11,7 +11,7 @@ from app.api.dependencies import _build_conversation_model, _build_model, _build
 from app.config.legacy_env import adopt_legacy_names
 from app.config.settings import AppSettings
 from app.conversation.streaming import stream_reply
-from app.domain.errors import AgenticSaffronError
+from app.domain.errors import AgentSaffronError
 from app.orchestration.answer_synthesizer import AssistantAnswer, apply_model_wording
 from app.providers.anthropic import LATENCY_SENSITIVE_SYSTEM, AnthropicProvider
 from app.providers.bedrock_converse import MIN_MAX_TOKENS, BedrockConverseModel, is_claude_model
@@ -134,14 +134,14 @@ class BedrockConverseTests(unittest.IsolatedAsyncioTestCase):
     async def test_cut_off_filtered_or_empty_answers_are_provider_failures(self):
         for reply in (_reply(stop_reason="max_tokens"), _reply(stop_reason="guardrail_intervened"), _reply(stop_reason="content_filtered"), _reply(text="")):
             with self.subTest(stop_reason=reply["stopReason"]), self.assertLogs("app.providers.bedrock_converse", "WARNING"):
-                with self.assertRaises(AgenticSaffronError) as context:
+                with self.assertRaises(AgentSaffronError) as context:
                     await _nova(_FakeBedrock(reply)).complete("approved answer")
                 self.assertEqual(context.exception.public_error.message, PUBLIC_MESSAGE)
 
     async def test_a_slow_answer_is_abandoned_at_the_deadline(self):
         model = _nova(_FakeBedrock(_reply(), delay=0.5), timeout_seconds=0.05)
         started = time.monotonic()
-        with self.assertLogs("app.providers.bedrock_converse", "WARNING") as logs, self.assertRaises(AgenticSaffronError):
+        with self.assertLogs("app.providers.bedrock_converse", "WARNING") as logs, self.assertRaises(AgentSaffronError):
             await model.complete("approved answer")
         self.assertLess(time.monotonic() - started, 0.4)
         self.assertIn("no answer within 0.05s", logs.output[0])
@@ -156,7 +156,7 @@ class BedrockConverseTests(unittest.IsolatedAsyncioTestCase):
         )
         for error, reason in cases:
             with self.subTest(reason=reason), self.assertLogs("app.providers.bedrock_converse", "WARNING") as logs:
-                with self.assertRaises(AgenticSaffronError) as context:
+                with self.assertRaises(AgentSaffronError) as context:
                     await _nova(_FakeBedrock(error=error)).complete("approved answer")
                 self.assertIn(reason, logs.output[0])
                 self.assertEqual(context.exception.public_error.message, PUBLIC_MESSAGE)
@@ -164,7 +164,7 @@ class BedrockConverseTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_boto3_is_a_provider_failure_not_a_crash(self):
         with patch.dict(sys.modules, {"boto3": None}), self.assertLogs("app.providers.bedrock_converse", "WARNING") as logs:
-            with self.assertRaises(AgenticSaffronError):
+            with self.assertRaises(AgentSaffronError):
                 await BedrockConverseModel(model_id=NOVA).complete("approved answer")
         self.assertIn("boto3 is not installed", logs.output[0])
 
@@ -198,14 +198,14 @@ class BedrockConverseTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_stream_failures_are_provider_failures_and_close_the_stream(self):
         failing = _EventStream(_events("Hel")[:2], error=_ClientError("ModelStreamErrorException", "stream broke"))
-        with self.assertLogs("app.providers.bedrock_converse", "WARNING") as logs, self.assertRaises(AgenticSaffronError):
+        with self.assertLogs("app.providers.bedrock_converse", "WARNING") as logs, self.assertRaises(AgentSaffronError):
             [event async for event in _nova(_FakeBedrock(stream=failing)).stream("approved answer")]
         self.assertIn("ModelStreamErrorException: stream broke", logs.output[0])
         self.assertTrue(failing.closed)
-        with self.assertLogs("app.providers.bedrock_converse", "WARNING") as logs, self.assertRaises(AgenticSaffronError):
+        with self.assertLogs("app.providers.bedrock_converse", "WARNING") as logs, self.assertRaises(AgentSaffronError):
             [event async for event in _nova(_FakeBedrock(error=_ClientError("AccessDeniedException", "denied"))).stream("approved answer")]
         self.assertIn("access denied", logs.output[0])
-        with self.assertLogs("app.providers.bedrock_converse", "WARNING") as logs, self.assertRaises(AgenticSaffronError):
+        with self.assertLogs("app.providers.bedrock_converse", "WARNING") as logs, self.assertRaises(AgentSaffronError):
             [event async for event in _nova(_FakeBedrock(stream=_EventStream([{"throttlingException": {"message": "slow down"}}]))).stream("approved answer")]
         self.assertIn("throttlingException", logs.output[0])
 
@@ -218,7 +218,7 @@ class BedrockConverseTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_a_stream_that_never_starts_is_abandoned_at_the_deadline(self):
         model = _nova(_FakeBedrock(stream=_EventStream(_events("late")), delay=0.5), timeout_seconds=0.05)
-        with self.assertLogs("app.providers.bedrock_converse", "WARNING") as logs, self.assertRaises(AgenticSaffronError):
+        with self.assertLogs("app.providers.bedrock_converse", "WARNING") as logs, self.assertRaises(AgentSaffronError):
             [event async for event in model.stream("approved answer")]
         self.assertIn("no answer within 0.05s", logs.output[0])
 

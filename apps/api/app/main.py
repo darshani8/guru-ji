@@ -14,7 +14,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 from .api.dependencies import build_runtime
-from .api.error_handlers import agentic_saffron_error_handler, http_exception_handler, validation_exception_handler
+from .api.error_handlers import agent_saffron_error_handler, http_exception_handler, validation_exception_handler
 from .api.routes.agent import router as agent_router
 from .api.routes.audit import router as audit_router
 from .api.routes.auth import router as auth_router
@@ -31,7 +31,7 @@ from .api.routes.research import router as research_router
 from .api.routes.sources import router as sources_router
 from .api.routes.voice import router as voice_router
 from .config.settings import AppSettings
-from .domain.errors import AgenticSaffronError
+from .domain.errors import AgentSaffronError
 from .middleware.rate_limit import RateLimitMiddleware
 from .middleware.request_id import RequestIdMiddleware
 from .middleware.request_size import RequestSizeLimitMiddleware
@@ -68,7 +68,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 app = FastAPI(title=settings.app_name, description="AI-powered institutional intelligence platform: ingestion, canonical data, policy-bound agents, and internet intelligence", version=settings.version, lifespan=lifespan)
 app.state.runtime = build_runtime(settings, start_workers=True)  # the API process runs the thread queue, if configured
 atexit.register(app.state.runtime.close)
-app.add_exception_handler(AgenticSaffronError, agentic_saffron_error_handler)  # type: ignore[arg-type]
+app.add_exception_handler(AgentSaffronError, agent_saffron_error_handler)  # type: ignore[arg-type]
 app.add_exception_handler(HTTPException, http_exception_handler)  # type: ignore[arg-type]
 app.add_exception_handler(RequestValidationError, validation_exception_handler)  # type: ignore[arg-type]
 app.add_middleware(RequestIdMiddleware)

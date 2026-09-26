@@ -21,7 +21,7 @@ from uuid import uuid4
 
 from ..agents.contracts import AgentCommand, AgentResponse
 from ..domain.audit import AuditEvent, AuditOutcome
-from ..domain.errors import AgenticSaffronError
+from ..domain.errors import AgentSaffronError
 from ..domain.principals import Capability
 from ..domain.requests import ChatRequest, InteractionChannel
 from ..observability.tracing import TraceRecorder
@@ -119,7 +119,7 @@ class DialogueManager:
             return None
         try:
             text = await asyncio.wait_for(model.complete(prompt, max_tokens=self.max_tokens), timeout=self.timeout_seconds)
-        except (AgenticSaffronError, TimeoutError, asyncio.TimeoutError, ValueError) as exc:
+        except (AgentSaffronError, TimeoutError, asyncio.TimeoutError, ValueError) as exc:
             logger.warning("conversation model unavailable: %s", type(exc).__name__)
             return None
         except Exception:  # noqa: BLE001 - a provider bug must not end the conversation

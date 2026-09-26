@@ -1,4 +1,4 @@
--- Agentic Saffron internet intelligence schema 003_internet_intelligence
+-- Agent Saffron internet intelligence schema 003_internet_intelligence
 -- Generated from app.internet_intelligence.store; edit the store, not this file.
 CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS institution_profiles ( institution_id TEXT PRIMARY KEY, profile_json TEXT NOT NULL, updated_by TEXT NOT NULL, updated_at TEXT NOT NULL );

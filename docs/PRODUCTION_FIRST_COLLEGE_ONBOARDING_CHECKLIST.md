@@ -4,7 +4,7 @@
 
 **Purpose:** Move one approved college from contract review through a limited production canary without widening institutional access, placing secrets in source control, or confusing a green local test suite with production readiness.
 
-**Scope:** One college, one institution-local connector service, read-only aggregate reporting, and the central Agentic Saffron API registry. This checklist does not authorize a merge, deployment, credential creation, data migration, or external system change by itself.
+**Scope:** One college, one institution-local connector service, read-only aggregate reporting, and the central Agent Saffron API registry. This checklist does not authorize a merge, deployment, credential creation, data migration, or external system change by itself.
 
 ## Non-negotiable boundaries
 
@@ -37,7 +37,7 @@ Record the names, contact paths, and approval date before collecting credentials
 Use stable identifiers approved by the institution. Do not invent identifiers from a display name after deployment begins.
 
 - [ ] `institution_id`: `____________________`
-- [ ] `source_id` (globally unique in the Agentic Saffron deployment): `____________________`
+- [ ] `source_id` (globally unique in the Agent Saffron deployment): `____________________`
 - [ ] Connector display name: `____________________`
 - [ ] Approved College ID: `____________________`
 - [ ] Approved Department IDs, if the first rollout is narrower than the college: `____________________`
@@ -277,7 +277,7 @@ For each gate, attach only redacted evidence and a link or ticket ID.
 
 ### Voice conversation and internet search
 
-- [ ] The institution has approved, in its privacy notice, that the browser vendor (Google for Chrome, Microsoft for Edge, Apple for Safari) turns microphone audio into text, and that only the text reaches Agentic Saffron.
+- [ ] The institution has approved, in its privacy notice, that the browser vendor (Google for Chrome, Microsoft for Edge, Apple for Safari) turns microphone audio into text, and that only the text reaches Agent Saffron.
 - [ ] The institution has approved that open-web search queries (never personal data; the assistant refuses those) are sent to Tavily, and has recorded `SAFFRON_WEB_SEARCHES_PER_PERSON_PER_DAY`.
 - [ ] If spoken replies use Amazon Polly (`SAFFRON_VOICE_TTS_PROVIDER=polly`): the ECS task role has `polly:SynthesizeSpeech` in ap-south-1, and one spoken reply with Kajal was checked in English and in Hindi. Kannada replies are spoken by the device's own voice or shown as text.
 - [ ] `PYTHONPATH=apps/api python scripts/voice_preflight.py`, run in the deployed task, ends with `VOICE_PREFLIGHT_OK` and shows OK (not WARN) for every service the institution expects: Polly voice, conversation model, web search.
