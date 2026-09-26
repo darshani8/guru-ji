@@ -815,8 +815,9 @@ class InstitutionDataStore:
             clause = " AND status = ?"
             params.append(status)
         with self._tenant(institution_id):
+            # Rows reshaped from one wide marks row share its row number; the locator (their cell) keeps pages stable.
             rows = self.backend.fetchall(
-                f"SELECT * FROM ingestion_records WHERE institution_id = ? AND job_id = ?{clause} ORDER BY row_number LIMIT ? OFFSET ?",
+                f"SELECT * FROM ingestion_records WHERE institution_id = ? AND job_id = ?{clause} ORDER BY row_number, locator LIMIT ? OFFSET ?",
                 (*params, _clamp_limit(limit, 50_000), max(0, offset)),
             )
         for row in rows:

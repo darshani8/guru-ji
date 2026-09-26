@@ -36,7 +36,7 @@ def register_handlers(
             for sibling in ingestion.queued_siblings(str(payload["institution_id"]), job):
                 try:
                     queue.enqueue(str(payload["institution_id"]), "ingestion.process", {"institution_id": str(payload["institution_id"]), "job_id": sibling["job_id"], "requested_by": sibling["requested_by"]})
-                except RuntimeError as exc:
+                except Exception as exc:  # noqa: BLE001 - one sheet the queue refuses must not strand the others
                     ingestion.record_unscheduled(str(payload["institution_id"]), sibling["job_id"], f"processing could not be scheduled: {exc}")
             if notifications is not None and payload.get("requested_by"):
                 report = job.get("report", {}).get("import") or {}
