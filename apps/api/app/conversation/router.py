@@ -16,6 +16,8 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
+from ..normalization.spoken import normalize_spoken
+
 Intent = Literal["small_talk", "web", "task"]
 SmallTalkKind = Literal["greeting", "how_are_you", "thanks", "identity", "help", "goodbye", "ack"]
 
@@ -99,7 +101,8 @@ _OUR_INSTITUTION = re.compile(
 _INSTITUTIONAL = re.compile(
     r"\b(attendance|attendence|present|absent|students?|faculty|staff|teachers?|hod|principal|fees?|dues|results?|marks|exams?|grades?|"
     r"semester|sem|department|dept|programs?|courses?|admissions?|placements?|college|institution|institute|campus|overview|summary|"
-    r"source|health|availability|report|policy|policies|circular|notice|syllabus|timetable|events?|at risk)\b"
+    r"source|health|availability|report|policy|policies|circular|notice|syllabus|timetable|events?|at risk|"
+    r"bca|bcom|bba|mba|mca|usn|collection|collected|financial year|academic year)\b"
     r"|हाज़िरी|हाजिरी|उपस्थिति|छात्र|फ़ीस|फीस|परिणाम|रिज़ल्ट|परीक्षा|कॉलेज|विभाग|ಹಾಜರಾತಿ|ವಿದ್ಯಾರ್ಥಿ|ಶುಲ್ಕ|ಫಲಿತಾಂಶ|ಪರೀಕ್ಷೆ|ಕಾಲೇಜು|ವಿಭಾಗ"
 )
 
@@ -119,7 +122,7 @@ class Classification:
 
 
 def _normalise(text: str) -> str:
-    return " ".join(_PUNCTUATION.sub(" ", text.lower()).split())
+    return " ".join(_PUNCTUATION.sub(" ", normalize_spoken(text).lower()).split())
 
 
 def _small_talk(normalised: str) -> SmallTalkKind | None:

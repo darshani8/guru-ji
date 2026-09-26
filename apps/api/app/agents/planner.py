@@ -17,6 +17,7 @@ from typing import Any
 from ..gateway.registry import PlatformToolRegistry
 from ..gateway.spec import PlatformToolSpec, ToolArgumentError
 from ..normalization.canonical import PROGRAM_ALIASES
+from ..normalization.spoken import normalize_spoken
 from ..providers.model_base import TextModel
 from .bindings import is_reference
 from .contracts import MAX_PLAN_STEPS, AgentPlan, PlanStep
@@ -38,6 +39,7 @@ class ExtractedEntities:
     threshold: float | None = None
     department: str | None = None
     student_id: str | None = None
+    academic_year: str | None = None
     window_days: int | None = None
     report_format: str | None = None
     recipients: list[str] = field(default_factory=list)
@@ -64,6 +66,24 @@ def _extract_program(text: str, vocabulary: Vocabulary) -> str | None:
             return PROGRAM_ALIASES[compact]
         if compact in {"me", "ma", "ba", "be"} and re.search(rf"\b{compact}\b\s+(students?|program|programme|department|semester|sem)", lowered):
             return PROGRAM_ALIASES[compact]
+    return None
+
+
+def _extract_academic_year(text: str) -> str | None:
+    """"2024-25", "2024 to 2025", "24-25", "FY 2024 2025" or a bare "2024" as a label like "2024-25"."""
+    lowered = text.lower()
+    match = re.search(r"(?<![\w-])(20\d{2})\s*(?:-|–|/|to|and|\s)\s*(20\d{2}|\d{2})(?![\w-])", lowered)
+    if match:
+        start, end = int(match.group(1)), int(match.group(2)[-2:])
+        if end == (start + 1) % 100:
+            return f"{start}-{end:02d}"
+    match = re.search(r"(?<![\w-])(\d{2})\s*(?:-|–|/|to)\s*(\d{2})(?![\w%-])", lowered)
+    if match and 15 <= int(match.group(1)) <= 60 and int(match.group(2)) == int(match.group(1)) + 1:
+        return f"20{match.group(1)}-{match.group(2)}"
+    match = re.search(r"(?<![\w-])(20[1-6]\d)(?![\w-])", lowered)
+    if match:
+        start = int(match.group(1))
+        return f"{start}-{(start + 1) % 100:02d}"
     return None
 
 
@@ -244,7 +264,7 @@ def extract_entities(text: str, vocabulary: Vocabulary) -> ExtractedEntities:
     program = _extract_program(text, vocabulary)
     entities = ExtractedEntities(
         program=program, semester=_extract_semester(text), threshold=_extract_threshold(text), department=_extract_department(text, vocabulary, program),
-        student_id=_extract_student_id(text), window_days=_extract_window(text),
+        student_id=_extract_student_id(text), window_days=_extract_window(text), academic_year=_extract_academic_year(text),
     )
     if re.search(r"\b(excel|xlsx|spreadsheet)\b", lowered):
         entities.report_format = "xlsx"
@@ -272,6 +292,7 @@ class DeterministicPlanner:
 
     def plan(self, text: str, tools: Sequence[PlatformToolSpec], vocabulary: Vocabulary) -> AgentPlan:
         available = {tool.name: tool for tool in tools}
+        text = normalize_spoken(text)
         entities = extract_entities(text, vocabulary)
         lowered = text.lower()
         steps: list[PlanStep] = []
@@ -341,18 +362,21 @@ class DeterministicPlanner:
                     return plan
                 add("get_attendance_summary", filters, "summarise attendance")
         # -- 5. fees --------------------------------------------------------------
-        elif re.search(r"\b(fee|fees|dues|unpaid|outstanding|pending payment|defaulters?|balance)\b", lowered):
-            if re.search(r"\b(collection|collected|summary|total fee|how much)\b", lowered) and not re.search(r"\b(pending|outstanding|dues|unpaid)\b", lowered):
+        elif re.search(r"\b(fee|fees|dues|unpaid|outstanding|pending payment|defaulters?|balance)\b", lowered) or (
+            # "BCA collection", "2024-25 financial year collected": money words with a program or year but no "fee".
+            re.search(r"\b(collection|collected|revenue|financial year|fy)\b", lowered) and (entities.program or entities.academic_year)
+        ):
+            if not re.search(r"\b(pending|outstanding|dues|unpaid|defaulters?|balance|not paid|yet to pay)\b", lowered):
                 intent = "fee_summary"
                 if (plan := missing("get_fee_summary")):
                     return plan
-                add("get_fee_summary", {"program": entities.program, "semester": entities.semester}, "summarise fee collection")
+                add("get_fee_summary", {"program": entities.program, "semester": entities.semester, "academic_year": entities.academic_year}, "summarise fee collection")
             else:
                 intent = "pending_fees"
                 if (plan := missing("get_pending_fees")):
                     return plan
                 include = list_needed or not entities.wants_count
-                primary = add("get_pending_fees", {"program": entities.program, "semester": entities.semester, "include_students": include, "limit": 500 if (entities.wants_report or entities.wants_email) else 100}, "find students with pending fees")
+                primary = add("get_pending_fees", {"program": entities.program, "semester": entities.semester, "academic_year": entities.academic_year, "include_students": include, "limit": 500 if (entities.wants_report or entities.wants_email) else 100}, "find students with pending fees")
                 rows_ref, rows_columns = f"${primary}.data.students", ["student_id", "name", "program", "semester", "balance", "amount_due", "amount_paid", "earliest_due_date"]
                 report_title = "Students with pending fees" + (f" - {entities.program}" if entities.program else "")
         # -- 6. exams ---------------------------------------------------------------

@@ -61,6 +61,24 @@ class InstitutionDataService:
         values = self.store.distinct_values(institution_id, "department", "name") + self.store.distinct_values(institution_id, "student", "department") + self.store.distinct_values(institution_id, "faculty", "department")
         return sorted({value for value in values if value}, key=str.lower)
 
+    def resolve_academic_year(self, institution_id: str, text: str | None) -> str | None:
+        """Match "2024", "2024-2025", "24-25" or "2024 to 2025" to a stored label such as "2024-25"."""
+        if not text:
+            return None
+        cleaned = str(text).strip()
+        known = [value for value in self.store.distinct_values(institution_id, "fee", "academic_year") if value]
+        if cleaned in known:
+            return cleaned
+        match = re.search(r"(\d{2,4})(?:\s*(?:-|–|/|to|and|\s)\s*(\d{2,4}))?", cleaned)
+        if not match:
+            return cleaned
+        start = int(match.group(1))
+        start = start + 2000 if start < 100 else start
+        for value in known:
+            if re.match(rf"\s*{start}\b", value) or re.match(rf"\s*{start}\D", value):
+                return value
+        return f"{start}-{(start + 1) % 100:02d}"
+
     def resolve_program(self, institution_id: str, text: str | None) -> str | None:
         if not text:
             return None
@@ -255,10 +273,12 @@ class InstitutionDataService:
     # --------------------------------------------------------------- fees
     def pending_fees(self, principal: Principal, institution_id: str, *, program: str | None = None, semester: Any = None, academic_year: str | None = None, limit: int | None = None, include_students: bool = True) -> dict[str, Any]:
         self._guard(principal, institution_id, Capability.FEES_READ)
+        academic_year = self.resolve_academic_year(institution_id, academic_year)
         rollup = self.store.fee_rollup(institution_id, program=self.resolve_program(institution_id, program), semester=self.resolve_semester(semester), academic_year=academic_year)
         pending = [item for item in rollup if item["balance"] > 0]
         result: dict[str, Any] = {
             "count": len(pending), "total_outstanding": round(sum(item["balance"] for item in pending), 2), "students_evaluated": len(rollup),
+            "dues_recorded": any(item["amount_due"] for item in rollup),
             "filters": {"program": self.resolve_program(institution_id, program), "semester": self.resolve_semester(semester), "academic_year": academic_year},
         }
         if include_students:
@@ -271,13 +291,28 @@ class InstitutionDataService:
 
     def fee_summary(self, principal: Principal, institution_id: str, *, program: str | None = None, semester: Any = None, academic_year: str | None = None) -> dict[str, Any]:
         self._guard(principal, institution_id, Capability.FEES_READ)
-        rollup = self.store.fee_rollup(institution_id, program=self.resolve_program(institution_id, program), semester=self.resolve_semester(semester), academic_year=academic_year)
+        program = self.resolve_program(institution_id, program)
+        academic_year = self.resolve_academic_year(institution_id, academic_year)
+        rollup = self.store.fee_rollup(institution_id, program=program, semester=self.resolve_semester(semester), academic_year=academic_year)
         due = round(sum(item["amount_due"] for item in rollup), 2)
         paid = round(sum(item["amount_paid"] for item in rollup), 2)
+        breakdown = self.store.fee_breakdown(institution_id, program=program, academic_year=academic_year)
+
+        def totals(key: str) -> list[dict[str, Any]]:
+            grouped: dict[str, dict[str, Any]] = {}
+            for item in breakdown:
+                label = item[key] or "unspecified"
+                entry = grouped.setdefault(label, {key: label, "students": 0, "amount_due": 0.0, "amount_paid": 0.0})
+                entry["students"] += item["students"]
+                entry["amount_due"] = round(entry["amount_due"] + item["amount_due"], 2)
+                entry["amount_paid"] = round(entry["amount_paid"] + item["amount_paid"], 2)
+            return sorted(grouped.values(), key=lambda entry: str(entry[key]))
+
         return {
             "students_evaluated": len(rollup), "total_due": due, "total_paid": paid, "total_outstanding": round(sum(item["balance"] for item in rollup if item["balance"] > 0), 2),
             "collection_percent": round(paid / due * 100, 2) if due else None, "students_with_dues": sum(1 for item in rollup if item["balance"] > 0),
-            "filters": {"program": self.resolve_program(institution_id, program), "semester": self.resolve_semester(semester), "academic_year": academic_year},
+            "by_program": totals("program"), "by_academic_year": totals("academic_year"), "breakdown": breakdown,
+            "filters": {"program": program, "semester": self.resolve_semester(semester), "academic_year": academic_year},
         }
 
     # -------------------------------------------------------------- exams
