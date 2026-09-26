@@ -29,6 +29,7 @@ from ..storage.object_store import ObjectStore, build_object_key, safe_file_name
 from .detector import detect_file_kind
 from .models import FileKind, IntermediateRecord, ParseResult, ParsedTable, ParserError
 from .registry import ParserRegistry
+from .wide_marks import reshape_marks_sheets, reshaped_entity
 
 JOB_QUEUED = "queued"
 JOB_PROCESSING = "processing"
@@ -101,6 +102,10 @@ WORKBOOK_KINDS = {FileKind.XLSX, FileKind.XLS}
 _UNNAMED_COLUMN = re.compile(r"column_\d+")
 _REPEAT_SUFFIX = re.compile(r" \(\d+\)$")
 # Header cells that read like values (an e-mail, a long number, a date).
+# Headers of a row-number column ("Sl.No", "S. No", "Sr No", "#"). Only such a
+# column counting 1, 2, 3... is discounted when deciding whether a sheet is a
+# blank form; a data column that happens to count (Semester 1, 2, 3) still counts.
+_SERIAL_HEADERS = frozenset({"sl", "sl no", "s no", "sr no", "si no", "sno", "slno", "srno", "serial no", "serial number", "no", "#"})
 _VALUE_LIKE = re.compile(r"@|\d{6,}|\b\d{1,2}[./-]\d{1,2}[./-]\d{2,4}\b")
 
 
@@ -130,7 +135,7 @@ def _unusable_sheet(table: ParsedTable) -> str | None:
     data_columns = 0
     for header in table.headers:
         values = [record.fields.get(header) for record in table.records if _filled(record.fields.get(header))]
-        if values and not _counts_rows(values):
+        if values and not (normalize_header(header) in _SERIAL_HEADERS and _counts_rows(values)):
             data_columns += 1
             if data_columns == 2:
                 return None
@@ -235,7 +240,7 @@ class IngestionService:
         job_options.setdefault("auto_commit", self.auto_commit)
         job_options["source_label"] = result.file_name
         job = self.store.create_job(institution_id, job_id=job_id, file_id=None, entity=entity_hint, requested_by=principal_id, source_kind=source_kind, options=job_options)
-        self._stage_parsed_rows(institution_id, job, result)
+        self._stage_parsed_rows(institution_id, job, reshape_marks_sheets(result, entity=entity_hint))
         return self.store.get_job(institution_id, job_id) or job
 
     # ----------------------------------------------------------------- process
@@ -380,7 +385,8 @@ class IngestionService:
             raise IngestionError("the uploaded file record is missing")
         content = self.objects.get(record["object_key"])
         result = self.parsers.parse(record["file_name"], content, content_type=record["content_type"])
-        return result
+        # A wide marks sheet (one column per subject) is staged as one exam row per student, course and exam.
+        return reshape_marks_sheets(result, entity=job.get("entity"))
 
     def _select_tables(self, job: dict[str, Any], result: ParseResult) -> tuple[list[ParsedTable], list[list[ParsedTable]], list[dict[str, str]]]:
         """The tables this job stages, the groups of sheets that become jobs of their own, and the sheets skipped (with why).
@@ -481,7 +487,7 @@ class IngestionService:
     async def _map(self, institution_id: str, job: dict[str, Any], records: Sequence[Mapping[str, Any]], *, force_review: bool = False, previous_error: str | None = None) -> dict[str, Any]:
         headers = list(job.get("report", {}).get("selected_table", {}).get("headers") or list(records[0]["raw"].keys()))
         samples = {header: [row["raw"].get(header) for row in records[:50]] for header in headers}
-        entity_hint = job.get("entity") or None
+        entity_hint = job.get("entity") or reshaped_entity(headers)
         signature = header_signature(headers)
         if force_review:
             profile = None
