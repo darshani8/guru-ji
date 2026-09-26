@@ -87,6 +87,35 @@ class MultiSheetUploadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([item["job_id"] for item in again["report"]["sheets"]["other_jobs"]], [other["job_id"]])
         self.assertEqual(len(self.store.list_jobs("college_a")), 2)
 
+    async def test_an_unchanged_workbook_whose_sheets_share_students_imports_again_as_unchanged(self):
+        # Phones in two sheets (one job, so its rows carry a Sheet column) and e-mails in two
+        # others listing the same students in another order: each sheet numbers its own rows.
+        queue = InlineJobQueue(self.store)
+        register_handlers(queue, ingestion=self.service)
+        phones = ["Sl.no", "Name", "USN No", "Student phone no"]
+        cards = ["Sl.no", "Name", "USN No", "Mail ID", "Blood group"]
+        workbook = {
+            "GM": roster("GM", phones, [[1, "Asha Rao", "1AB25MBA001", "9000000001"], [2, "Ravi Kumar", "1AB25MBA002", "9000000002"]]),
+            "DM": roster("DM", phones, [[1, "Kiran Shah", "1AB25MBA101", "9000000101"]]),
+            "ID Card GM": roster("ID GM", cards, [[1, "Ravi Kumar", "1AB25MBA002", "ravi@example.com", "B+"], [2, "Asha Rao", "1AB25MBA001", "asha@example.com", "O+"]]),
+            "ID Card DM": roster("ID DM", cards, [[1, "Kiran Shah", "1AB25MBA101", "kiran@example.com", "A+"]]),
+        }
+        runs = []
+        for _ in range(2):
+            upload = self._upload(workbook, entity_hint="student")
+            queue.enqueue("college_a", "ingestion.process", {"institution_id": "college_a", "job_id": upload["job_id"], "requested_by": "staff-1"})
+            parent = self.store.get_job("college_a", upload["job_id"])
+            jobs = [parent] + [self.store.get_job("college_a", other["job_id"]) for other in parent["report"]["sheets"]["other_jobs"]]
+            runs.append([(job["options"].get("sheets") or job["report"]["sheets"]["this_job"], job["status"], *(job["report"]["import"][k] for k in ("inserted", "updated", "unchanged"))) for job in jobs])
+        self.assertEqual(runs[0], [(["GM", "DM"], JOB_IMPORTED, 3, 0, 0), (["ID Card GM", "ID Card DM"], JOB_IMPORTED, 0, 3, 0)])
+        self.assertEqual(runs[1], [(["GM", "DM"], JOB_IMPORTED, 0, 0, 3), (["ID Card GM", "ID Card DM"], JOB_IMPORTED, 0, 0, 3)])
+        record = self.store.get_record("college_a", "student", "1ab25mba001")
+        self.assertEqual((record["phone"], record["email"], record["blood_group"]), ("9000000001", "asha@example.com", "O+"))
+        # The row number is not an attribute of the student (the lineage locator keeps it), and
+        # the sheet stays the one the student was first imported from.
+        self.assertEqual(record["attributes"], {"Sheet": "GM"})
+        self.assertEqual(record["lineage"]["source_locator"], "sheet=ID Card GM;row=7")
+
     async def test_a_deferred_queue_runs_the_sibling_later_and_a_refusal_is_recorded(self):
         queue = JobQueue(self.store)  # records jobs until a worker picks them up
         register_handlers(queue, ingestion=self.service)

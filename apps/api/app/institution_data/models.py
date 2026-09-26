@@ -80,6 +80,9 @@ class ImportSummary:
     inserted_keys: list[str] = field(default_factory=list)
     updated_keys: list[str] = field(default_factory=list)
     skipped_reasons: dict[str, int] = field(default_factory=dict)
+    # Records skipped for a reason only the store sees (merged with the
+    # stored row they fail a check), with that reason and the issues.
+    skipped_keys: list[dict[str, Any]] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -91,6 +94,7 @@ class ImportSummary:
             "inserted_keys_sample": self.inserted_keys[:50],
             "updated_keys_sample": self.updated_keys[:50],
             "skipped_reasons": dict(self.skipped_reasons),
+            "skipped_keys_sample": list(self.skipped_keys[:50]),
         }
 
 

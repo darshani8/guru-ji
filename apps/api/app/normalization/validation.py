@@ -92,6 +92,27 @@ def validate_record(entity: CanonicalEntity, fields: dict[str, Any], *, ocr: boo
                 issues.append(_issue(item.name, "negative_count", "error", value))
             if item.name == "admission_year" and not 1900 <= int(value) <= 2100:
                 issues.append(_issue(item.name, "year_out_of_range", "warning", value))
+    issues.extend(cross_field_issues(entity, fields))
+    if ocr:
+        if ocr_confidence is not None and ocr_confidence < 0.75:
+            issues.append(_issue("*", "low_ocr_confidence", "warning", ocr_confidence))
+        else:
+            issues.append(_issue("*", "ocr_source_verify", "info"))
+    return issues
+
+
+# The codes cross_field_issues raises.
+CROSS_FIELD_CODES = frozenset({"attended_exceeds_held", "attendance_unknown", "marks_exceed_maximum", "paid_far_exceeds_due"})
+
+
+def cross_field_issues(entity: CanonicalEntity, fields: dict[str, Any]) -> list[dict[str, Any]]:
+    """The checks that compare columns of one record (codes in ``CROSS_FIELD_CODES``).
+
+    A merging import runs them again on the merged row, since a sheet holding
+    only some of a record's columns cannot check them against the rest.
+    """
+
+    issues: list[dict[str, Any]] = []
     if entity.name == "attendance":
         held, attended = fields.get("classes_held"), fields.get("classes_attended")
         if held is not None and attended is not None and int(attended) > int(held):
@@ -106,11 +127,6 @@ def validate_record(entity: CanonicalEntity, fields: dict[str, Any], *, ocr: boo
         due, paid = fields.get("amount_due"), fields.get("amount_paid")
         if due is not None and paid is not None and float(paid) > float(due) * 1.5 and float(due) > 0:
             issues.append(_issue("amount_paid", "paid_far_exceeds_due", "warning", paid, amount_due=due))
-    if ocr:
-        if ocr_confidence is not None and ocr_confidence < 0.75:
-            issues.append(_issue("*", "low_ocr_confidence", "warning", ocr_confidence))
-        else:
-            issues.append(_issue("*", "ocr_source_verify", "info"))
     return issues
 
 
@@ -127,4 +143,4 @@ def summarize_issues(issues_by_row: Sequence[Sequence[dict[str, Any]]]) -> dict[
     return {"rows_with_errors": rows_with_errors, "by_code": dict(counter.most_common(30)), "by_severity": dict(severities)}
 
 
-__all__ = ["identifier_pattern", "ocr_suspicion", "summarize_issues", "validate_record"]
+__all__ = ["CROSS_FIELD_CODES", "cross_field_issues", "identifier_pattern", "ocr_suspicion", "summarize_issues", "validate_record"]

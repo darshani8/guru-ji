@@ -46,6 +46,22 @@ def main() -> None:
         exact = [row for row in store.fee_rollup(institution) if row["student_id"] == "S2"][0]
         assert exact["amount_due"] == round(87654.32 * 20, 2), exact
         assert exact["rows_used"] == 20
+        # A merging import (a sheet with some of a record's columns) keeps the others, works the
+        # derived ones out again over the merged row, and reports an unchanged sheet as unchanged.
+        phones = [CanonicalRecord("student", {"student_id": "M1", "name": "Merge One", "phone": "9000000001"})]
+        emails = [CanonicalRecord("student", {"student_id": "M1", "name": "Merge One", "email": "m1@example.org"})]
+        assert store.upsert_records(institution, phones, mapped_fields={"student_id", "name", "phone"}).inserted == 1
+        assert store.upsert_records(institution, emails, mapped_fields={"student_id", "name", "email"}).updated == 1
+        assert store.upsert_records(institution, emails, mapped_fields={"student_id", "name", "email"}).unchanged == 1
+        merged = store.get_record(institution, "student", "m1")
+        assert (merged["phone"], merged["email"]) == ("9000000001", "m1@example.org"), merged
+        register = [CanonicalRecord("fee", {"student_id": "M1", "fee_type": "Tuition", "amount_due": 1000.0, "amount_paid": 400.0, "balance": 600.0, "status": "partial"}, normalizations=("balance:derived_from_due_minus_paid", "status:derived_from_balance"))]
+        payment = [CanonicalRecord("fee", {"student_id": "M1", "fee_type": "Tuition", "amount_paid": 1000.0})]
+        assert store.upsert_records(institution, register, mapped_fields={"student_id", "fee_type", "amount_due", "amount_paid", "balance", "status"}).inserted == 1
+        assert store.upsert_records(institution, payment, mapped_fields={"student_id", "fee_type", "amount_paid"}).updated == 1
+        assert store.upsert_records(institution, payment, mapped_fields={"student_id", "fee_type", "amount_paid"}).unchanged == 1
+        fee = [row for row in store.query_records(institution, "fee") if row["student_id"] == "M1"][0]
+        assert (fee["amount_due"], fee["amount_paid"], fee["balance"], fee["status"]) == (1000.0, 1000.0, 0.0, "paid"), fee
         # Boolean filters must bind as the 1/0 integers the column stores, not as PostgreSQL booleans.
         store.upsert_records(institution, [
             CanonicalRecord("faculty", {"faculty_id": "F1", "name": "Head", "department": "MBA", "is_hod": True}),
@@ -71,7 +87,7 @@ def main() -> None:
             assert hidden == 0, "row-level security must hide rows when no tenant is set"
             connection.execute("SELECT set_config('app.institution_id', %s, true)", (institution,))
             visible = connection.execute("SELECT count(*) FROM students WHERE institution_id = %s", (institution,)).fetchone()[0]
-            assert visible == 3
+            assert visible == 4  # S1-S3 and the merged M1
         for entity in ("student", "faculty", "attendance", "fee", "exam"):
             store.delete_by_job(institution, entity, "none")
         print("PLATFORM_POSTGRES_SMOKE_OK")

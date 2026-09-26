@@ -302,28 +302,59 @@ def clean_record(entity: CanonicalEntity, fields: dict[str, Any]) -> tuple[dict[
         cleaned[item.name] = value
         notes.extend(field_notes)
         issues.extend(field_issues)
-    # Derived attendance percent when only counts were supplied.
-    if entity.name == "attendance":
-        held, attended, absent = cleaned.get("classes_held"), cleaned.get("classes_attended"), cleaned.get("classes_absent")
-        if attended is None and held is not None and absent is not None:
-            cleaned["classes_attended"] = max(0, int(held) - int(absent))
-            notes.append("classes_attended:derived_from_absent")
-            attended = cleaned["classes_attended"]
-        if cleaned.get("attendance_percent") is None and held and attended is not None:
-            cleaned["attendance_percent"] = round(float(attended) / float(held) * 100.0, 2)
-            notes.append("attendance_percent:derived_from_counts")
-    if entity.name == "fee":
-        due, paid, balance = cleaned.get("amount_due"), cleaned.get("amount_paid"), cleaned.get("balance")
-        if balance is None and due is not None:
-            cleaned["balance"] = round(float(due) - float(paid or 0.0), 2)
-            notes.append("balance:derived_from_due_minus_paid")
-        if cleaned.get("status") is None and cleaned.get("balance") is not None:
-            cleaned["status"] = "paid" if float(cleaned["balance"]) <= 0 else ("partial" if paid else "pending")
-            notes.append("status:derived_from_balance")
+    cleaned, derived_notes = derive_fields(entity, cleaned)
+    notes.extend(derived_notes)
     return cleaned, notes, issues
 
 
+# The columns derive_fields can fill, per entity, each with every column its
+# value depends on (directly or through another derived column).
+DERIVED_FIELDS: dict[str, dict[str, tuple[str, ...]]] = {
+    "attendance": {
+        "classes_attended": ("classes_held", "classes_absent"),
+        "attendance_percent": ("classes_held", "classes_attended", "classes_absent"),
+    },
+    "fee": {
+        "balance": ("amount_due", "amount_paid"),
+        "status": ("amount_due", "amount_paid", "balance"),
+    },
+}
+
+
+def derive_fields(entity: CanonicalEntity, fields: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Fill the blank columns that follow from others (see ``DERIVED_FIELDS``).
+
+    Returns a copy of ``fields`` and a ``<column>:derived_from_...`` note per
+    value filled; a value that is present is never replaced. Cleaning calls
+    it on each row, and a merging import calls it again on the merged row
+    (``InstitutionDataStore.upsert_records``), since a sheet holding only some
+    of a record's columns cannot derive them from the rest.
+    """
+
+    derived = dict(fields)
+    notes: list[str] = []
+    # Derived attendance percent when only counts were supplied.
+    if entity.name == "attendance":
+        held, attended, absent = derived.get("classes_held"), derived.get("classes_attended"), derived.get("classes_absent")
+        if attended is None and held is not None and absent is not None:
+            derived["classes_attended"] = max(0, int(held) - int(absent))
+            notes.append("classes_attended:derived_from_absent")
+            attended = derived["classes_attended"]
+        if derived.get("attendance_percent") is None and held and attended is not None:
+            derived["attendance_percent"] = round(float(attended) / float(held) * 100.0, 2)
+            notes.append("attendance_percent:derived_from_counts")
+    if entity.name == "fee":
+        due, paid, balance = derived.get("amount_due"), derived.get("amount_paid"), derived.get("balance")
+        if balance is None and due is not None:
+            derived["balance"] = round(float(due) - float(paid or 0.0), 2)
+            notes.append("balance:derived_from_due_minus_paid")
+        if derived.get("status") is None and derived.get("balance") is not None:
+            derived["status"] = "paid" if float(derived["balance"]) <= 0 else ("partial" if paid else "pending")
+            notes.append("status:derived_from_balance")
+    return derived, notes
+
+
 __all__ = [
-    "clean_record", "clean_value", "normalize_date", "normalize_email", "normalize_person_name", "normalize_phone",
+    "DERIVED_FIELDS", "clean_record", "clean_value", "derive_fields", "normalize_date", "normalize_email", "normalize_person_name", "normalize_phone",
     "normalize_program", "normalize_semester", "normalize_whitespace",
 ]

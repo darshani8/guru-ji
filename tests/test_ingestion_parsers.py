@@ -578,6 +578,7 @@ class TwoRowHeaderTests(unittest.TestCase):
 
     def test_single_row_headers_and_first_data_rows_are_unchanged(self):
         students = [["Ravi Kumar", "MBA", "A"], ["Asha Rao", "MCA", "B"]]
+        phones = [["1MS23MBA001", "Ravi", "MBA", "9876543210"], ["1MS23MBA002", "Asha", "MBA", "9876543211"], ["1MS23MBA003", "Kiran", "MCA", "9876543212"]]
         grids = {
             "title and a newline in a header": ([["ABC College"], ["USN", "Name", "Accounts\n(MB101)", "Economics"], ["1MS23MBA001", "Ravi", 45, 50], ["1MS23MBA002", "Asha", 40, 42]], ("USN", "Name", "Accounts (MB101)", "Economics"), 2, ["skipped_1_leading_rows"]),
             "key/value lines above": ([["Class", "MBA III Sem"], ["Faculty", "Dr. Rao"], ["Name", "Program", "Section"], *students], ("Name", "Program", "Section"), 2, ["skipped_2_leading_rows"]),
@@ -585,6 +586,16 @@ class TwoRowHeaderTests(unittest.TestCase):
             "a first row with no student": ([["USN", "Name", "M1", "M2", "M3", "M4", "M5", "Transport", ""], ["", "", "", "", "", "", "", "Bus", "Route 5"], ["1MS23MBA002", "Asha", 40, 41, 42, 43, 44, "Van", "Route 2"], ["1MS23MBA003", "Kiran", 30, 31, 32, 33, 34, "Bus", "Route 7"]], ("USN", "Name", "M1", "M2", "M3", "M4", "M5", "Transport", "column_9"), 3, []),
             "a first student absent in every subject": ([["USN", "Name", "Maths", "Physics"], ["1MS23MBA001", "Ravi", "AB", "AB"], ["1MS23MBA002", "Asha", 40, 42], ["1MS23MBA003", "Kiran", 41, 43]], ("USN", "Name", "Maths", "Physics"), 3, []),
             "a group line over a one-column label": ([["Faculty Details", "", "Department Info"], ["Name", "Designation", "Department"], ["Ravi Kumar", "Professor", "Marketing"], ["Asha Rao", "Associate Professor", "Finance"]], ("Name", "Designation", "Department"), 2, ["skipped_1_leading_rows"]),
+            # A title or key/value line never joins a header that leaves a cell blank.
+            "a title and a date over a header with a blank cell": ([["ABC College Student List", "", "", "Date: 01-01-2025"], ["USN", "Name", "Program", ""], *phones], ("USN", "Name", "Program", "column_4"), 3, ["skipped_1_leading_rows"]),
+            "a key/value line over a header with a blank cell": ([["Class", "", "", "MBA III"], ["USN", "Name", "Program", ""], *phones], ("USN", "Name", "Program", "column_4"), 3, ["skipped_1_leading_rows"]),
+            "a department line over a header with a blank cell": ([["Department: MBA", "", "", "AY 2024-25"], ["USN", "Name", "Program", ""], *phones], ("USN", "Name", "Program", "column_4"), 3, ["skipped_1_leading_rows"]),
+            "a staff title over a header with a blank cell": ([["Staff Details", "", "", "Updated on 01-Jan-2025"], ["Name", "Designation", "Department", ""], ["Ravi Kumar", "Professor", "Marketing", "9876543210"], ["Asha Rao", "Associate Professor", "Finance", "9876543211"]], ("Name", "Designation", "Department", "column_4"), 2, ["skipped_1_leading_rows"]),
+            # A first student with no id and absence codes for marks is a student, not faculty initials.
+            "a first student absent with no USN": ([["USN", "IA1", "IA2"], ["", "AB", "AB"], ["1MS23MBA002", 20, 21], ["1MS23MBA003", 22, 23]], ("USN", "IA1", "IA2"), 3, []),
+            "a first student absent with no USN, codes with dots": ([["USN", "IA1", "IA2"], ["", "Abs.", "N.A."], ["1MS23MBA002", 20, 21], ["1MS23MBA003", 22, 23]], ("USN", "IA1", "IA2"), 3, []),
+            "a first student absent with no roll number or name": ([["Roll", "Name", "IA1", "IA2", "IA3"], ["", "", "AB", "NE", "-"], [2, "Asha", 20, 21, 19], [3, "Kiran", 22, 23, 18]], ("Roll", "Name", "IA1", "IA2", "IA3"), 3, []),
+            "a first student absent with a name": ([["USN", "Name", "IA1", "IA2"], ["", "Ravi Kumar", "AB", "A"], ["1MS23MBA002", "Asha", 20, 21], ["1MS23MBA003", "Kiran", 22, 23]], ("USN", "Name", "IA1", "IA2"), 3, []),
         }
         for label, (grid, headers, count, warnings) in grids.items():
             with self.subTest(label):
@@ -592,6 +603,75 @@ class TwoRowHeaderTests(unittest.TestCase):
                 self.assertEqual(table.headers, headers)
                 self.assertEqual(table.row_count, count)
                 self.assertEqual(table.warnings, warnings)
+
+    def test_a_merged_title_never_joins_a_header_with_a_blank_cell(self):
+        rows = [["ABC College Student List", None, None, "Date: 01-01-2025"], ["USN", "Name", "Program"], ["1MS23MBA001", "Ravi", "MBA", "9876543210"], ["1MS23MBA002", "Asha", "MBA", "9876543211"]]
+        workbook = build_xlsx({"Students": rows}, merges={"Students": ["A1:C1"]})
+        tables = {"stdlib": excel_parser._parse_with_stdlib("students.xlsx", workbook).tables[0]}
+        if OPENPYXL_AVAILABLE:
+            tables["openpyxl"] = excel_parser._parse_with_openpyxl("students.xlsx", workbook).tables[0]
+        for reader, table in tables.items():
+            with self.subTest(reader=reader):
+                self.assertEqual(table.headers, ("USN", "Name", "Program", "column_4"))
+                self.assertEqual([record.fields["USN"] for record in table.records], ["1MS23MBA001", "1MS23MBA002"])
+                self.assertEqual(table.warnings, ["skipped_1_leading_rows"])
+
+    def test_the_same_subjects_under_two_group_labels_join_one_identifier(self):
+        rows = [["Class test"], ["USN", "IA1", None, "IA2", None], [None, "Maths", "Physics", "Maths", "Physics"], ["1MS23MBA001", 50, 60, 70, 80], ["1MS23MBA002", 55, 65, 75, 85]]
+        table = grid_to_table(rows, name="Marks", source_file="marks.xlsx", sheet="Marks")
+        self.assertEqual(table.headers, ("USN", "IA1 Maths", "IA1 Physics", "IA2 Maths", "IA2 Physics"))
+        self.assertEqual(table.warnings, ["skipped_1_leading_rows", "headers_combined_from_rows_2_and_3"])
+        self.assertEqual(table.records[1].fields["IA2 Physics"], 85)
+
+    @staticmethod
+    def _read_with_every_reader(rows: list[list[object]], merges: list[str]) -> dict[str, object]:
+        workbook = build_xlsx({"Sheet": rows}, merges={"Sheet": merges})
+        tables = {"grid": grid_to_table(rows, name="Sheet", source_file="sheet.xlsx", sheet="Sheet"), "stdlib": excel_parser._parse_with_stdlib("sheet.xlsx", workbook).tables[0]}
+        if OPENPYXL_AVAILABLE:
+            tables["openpyxl"] = excel_parser._parse_with_openpyxl("sheet.xlsx", workbook).tables[0]
+        return tables
+
+    def test_one_identifier_column_joins_a_single_group_label(self):
+        # "USN" merged over both header rows, then one "Marks" group over the subjects.
+        subjects = ["Maths", "Physics", "Chemistry", "Biology", "English", "Kannada"]
+        students = ["1MS23MBA001", "1MS23MBA002", "1MS23MBA003"]
+        layouts = {
+            "USN": ([["USN", "Marks", *[None] * 5], [None, *subjects], *[[usn, 40 + row, 41, 42, 43, 44, 45] for row, usn in enumerate(students)]], ["A1:A2", "B1:G1"], ("USN",)),
+            "Sl. No and Hall Ticket No": ([["Sl. No", "Hall Ticket No", "Marks", *[None] * 5], [None, None, *subjects], *[[row + 1, usn, 40 + row, 41, 42, 43, 44, 45] for row, usn in enumerate(students)]], ["A1:A2", "B1:B2", "C1:H1"], ("Sl. No", "Hall Ticket No")),
+        }
+        for label, (rows, merges, identifiers) in layouts.items():
+            for reader, table in self._read_with_every_reader(rows, merges).items():
+                with self.subTest(label, reader=reader):
+                    self.assertEqual(table.headers, (*identifiers, *[f"Marks {subject}" for subject in subjects]))
+                    self.assertEqual(table.warnings, ["headers_combined_from_rows_1_and_2"])
+                    self.assertEqual([record.fields[identifiers[-1]] for record in table.records], students)
+                    self.assertEqual(table.records[2].fields["Marks Maths"], 42)
+
+    def test_a_key_value_line_with_a_name_never_joins_a_header_with_blank_cells(self):
+        # The key or value holds "Name" and two data columns have no header of their own.
+        header = ["USN", "Name", "Program", "Section", "Batch", "Gender", "Category", "Quota"]
+        students = [[f"1MS23MBA00{row}", name, "MBA", "A", "2024", "M", "GM", "CET", f"987654321{row}", f"s{row}@example.edu"] for row, name in enumerate(["Ravi Kumar", "Asha Rao", "Kiran S"], start=1)]
+        for above in (["Class: MBA III", *[None] * 7, "Faculty Name", "Dr. Rao"], ["Department of Commerce", *[None] * 7, "Name of HOD", "Dr. Rao"]):
+            for reader, table in self._read_with_every_reader([above, header, *students], []).items():
+                with self.subTest(above[0], reader=reader):
+                    self.assertEqual(table.headers, (*header, "column_9", "column_10"))
+                    self.assertEqual(table.warnings, ["skipped_1_leading_rows"])
+                    self.assertEqual([record.fields["USN"] for record in table.records], ["1MS23MBA001", "1MS23MBA002", "1MS23MBA003"])
+
+    def test_faculty_initials_that_read_as_absence_codes_under_a_grouped_header(self):
+        subjects = ["Accounts (MB101)", "Economics (MB102)"]
+        rows = [
+            [None, "Result"],
+            ["Sl. No", "USN No", "Name", "EXTERNAL MARKS", None, "INTERNAL MARKS", None],
+            [None, None, None, *subjects, *subjects],
+            [None, None, None, "AB", "MP", "AB", "MP"],
+            *[[row, f"1MS23MBA00{row}", name, 40 + row, 42, 16, 17] for row, name in enumerate(["Ravi Kumar", "Asha Rao", "Kiran S"], start=1)],
+        ]
+        for reader, table in self._read_with_every_reader(rows, ["A2:A4", "B2:B4", "C2:C4", "D2:E2", "F2:G2"]).items():
+            with self.subTest(reader=reader):
+                self.assertEqual(table.headers, ("Sl. No", "USN No", "Name", *[f"EXTERNAL MARKS {subject}" for subject in subjects], *[f"INTERNAL MARKS {subject}" for subject in subjects]))
+                self.assertEqual([record.row_number for record in table.records], [5, 6, 7])
+                self.assertIn("skipped_row_4_as_annotation:blank USN No, Name; only short labels over number columns", table.warnings)
 
 
 class WideSheetTests(unittest.TestCase):

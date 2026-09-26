@@ -157,6 +157,92 @@ class IngestionServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((ravi["name"], ravi["phone"], ravi["email"]), ("Ravi Kumar", "9876500001", "ravi.kumar@example.org"))
         self.assertEqual(ravi["attributes"], {"Hostel": "Yes", "Seat Type": "GM"})
 
+    async def test_a_payments_sheet_after_the_fee_register_recomputes_balance_and_status(self):
+        register = b"USN,Name,Fee Type,Total Fee,Amount Paid\n1MS23MBA001,Ravi Kumar,Tuition,100000,40000\n1MS23MBA002,Asha Rao,Tuition,100000,0\n"
+        payments = b"USN,Name,Fee Type,Amount Paid\n1MS23MBA001,Ravi Kumar,Tuition,100000\n1MS23MBA002,Asha Rao,Tuition,25000\n"
+        first = await self._upload("fees.csv", register, entity_hint="fee")
+        self.assertEqual((first["status"], first["report"]["import"]["inserted"]), (JOB_IMPORTED, 2))
+        fee = lambda usn: next(row for row in self.store.query_records("college_a", "fee") if row["student_id"] == usn)  # noqa: E731
+        self.assertEqual({k: fee("1MS23MBA001")[k] for k in ("balance", "status")}, {"balance": 60000.0, "status": "partial"})
+        second = await self._upload("payments.csv", payments, entity_hint="fee")
+        self.assertEqual((second["status"], second["report"]["import"]["updated"]), (JOB_IMPORTED, 2))
+        ravi, asha = fee("1MS23MBA001"), fee("1MS23MBA002")
+        # The balance and status describe the merged row, not the one the register gave.
+        self.assertEqual({k: ravi[k] for k in ("amount_due", "amount_paid", "balance", "status")}, {"amount_due": 100000.0, "amount_paid": 100000.0, "balance": 0.0, "status": "paid"})
+        self.assertEqual({k: asha[k] for k in ("amount_due", "amount_paid", "balance", "status")}, {"amount_due": 100000.0, "amount_paid": 25000.0, "balance": 75000.0, "status": "partial"})
+        self.assertEqual(self.store.count_records("college_a", "fee"), 2)
+        # Either sheet again changes nothing.
+        again = await self._upload("payments-again.csv", payments, entity_hint="fee")
+        self.assertEqual((again["report"]["import"]["updated"], again["report"]["import"]["unchanged"]), (0, 2))
+
+    async def test_an_attendance_sheet_with_new_counts_recomputes_the_percent(self):
+        counts = b"USN,Name,Subject,Month,Classes Held,Classes Attended\n1MS23MBA001,Ravi Kumar,MBA201,Aug,40,20\n"
+        first = await self._upload("attendance.csv", counts, entity_hint="attendance")
+        self.assertEqual(first["report"]["import"]["inserted"], 1)
+        attended = b"USN,Name,Subject,Month,Classes Attended\n1MS23MBA001,Ravi Kumar,MBA201,Aug,38\n"
+        second = await self._upload("attended.csv", attended, entity_hint="attendance")
+        self.assertEqual(second["report"]["import"]["updated"], 1)
+        [row] = self.store.query_records("college_a", "attendance")
+        self.assertEqual((row["classes_held"], row["classes_attended"], row["attendance_percent"]), (40, 38, 95.0))
+        # The sheet alone could not tell the percent; the merged row can, so no warning stays.
+        self.assertEqual(row["issues"], [])
+        held = await self._upload("held.csv", b"USN,Name,Subject,Month,Classes Held\n1MS23MBA001,Ravi Kumar,MBA201,Aug,50\n", entity_hint="attendance")
+        self.assertEqual(held["report"]["import"]["updated"], 1)
+        [row] = self.store.query_records("college_a", "attendance")
+        self.assertEqual((row["classes_held"], row["classes_attended"], row["attendance_percent"]), (50, 38, 76.0))
+        # The attended count may be older than the classes held now: it is kept, and it and the
+        # percent worked out from it carry a warning.
+        self.assertEqual(sorted((issue["field"], issue["code"], issue["severity"]) for issue in row["issues"]), [
+            ("attendance_percent", "stale_after_partial_update", "warning"), ("classes_attended", "stale_after_partial_update", "warning"),
+        ])
+        # Counts that contradict each other once merged are not imported, and the report says which and why.
+        over = await self._upload("over.csv", attended.replace(b",38", b",55"), entity_hint="attendance")
+        self.assertEqual(over["report"]["import"]["skipped_reasons"], {"blocking_issues_after_merge": 1})
+        [skipped] = over["report"]["import"]["skipped_keys_sample"]
+        self.assertEqual((skipped["record_key"], skipped["reason"], [issue["code"] for issue in skipped["issues"]]), ("1ms23mba001|mba201|aug", "blocking_issues_after_merge", ["attended_exceeds_held"]))
+        self.assertIn("classes_attended attended_exceeds_held", over["report"]["import"]["message"])
+        [row] = self.store.query_records("college_a", "attendance")
+        self.assertEqual((row["classes_held"], row["classes_attended"], row["attendance_percent"]), (50, 38, 76.0))
+
+    async def test_a_value_a_sheet_stated_is_kept_when_a_later_sheet_changes_what_it_follows_from(self):
+        fee = lambda usn: next(row for row in self.store.query_records("college_a", "fee") if row["student_id"] == usn)  # noqa: E731
+        warnings = lambda row: sorted((issue["field"], issue["code"], issue["severity"], issue["value"]) for issue in row["issues"])  # noqa: E731
+        # A register stating the balance, then a fee structure with the same totals: the balance
+        # that sheet works out from the total alone does not replace the stated one.
+        register = b"USN,Name,Fee Type,Total Fee,Amount Paid,Balance\n1MS23MBA001,Ravi Kumar,Tuition,100000,40000,60000\n1MS23MBA002,Asha Rao,Tuition,100000,40000,50000\n"
+        structure = b"USN,Name,Fee Type,Total Fee\n1MS23MBA001,Ravi Kumar,Tuition,100000\n1MS23MBA002,Asha Rao,Tuition,100000\n"
+        await self._upload("register.csv", register, entity_hint="fee")
+        for name, content in (("structure.csv", structure), ("register-again.csv", register), ("structure-again.csv", structure)):
+            job = await self._upload(name, content, entity_hint="fee")
+            self.assertEqual((job["report"]["import"]["updated"], job["report"]["import"]["unchanged"]), (0, 2), name)
+        blank = register.replace(b"100000,40000,60000", b"100000,,")
+        self.assertEqual((await self._upload("register-blanks.csv", blank, entity_hint="fee"))["report"]["import"]["unchanged"], 2)
+        self.assertEqual([(fee(usn)["amount_paid"], fee(usn)["balance"], fee(usn)["status"], fee(usn)["issues"]) for usn in ("1MS23MBA001", "1MS23MBA002")], [(40000.0, 60000.0, "partial", []), (40000.0, 50000.0, "partial", [])])
+        # A payment: the balance that was the total less the payment is worked out again, with a
+        # warning keeping the stated value; a scholarship's balance and status are kept, with warnings.
+        await self._upload("scholarship.csv", b"USN,Name,Fee Type,Total Fee,Amount Paid,Balance,Status\n1MS23MBA003,Kiran Shah,Tuition,100000,20000,0,Scholarship\n", entity_hint="fee")
+        payments = b"USN,Name,Fee Type,Amount Paid\n1MS23MBA001,Ravi Kumar,Tuition,70000\n1MS23MBA003,Kiran Shah,Tuition,30000\n"
+        self.assertEqual((await self._upload("payments.csv", payments, entity_hint="fee"))["report"]["import"]["updated"], 2)
+        ravi, kiran = fee("1MS23MBA001"), fee("1MS23MBA003")
+        self.assertEqual((ravi["balance"], ravi["status"]), (30000.0, "partial"))
+        self.assertEqual(warnings(ravi), [("balance", "recomputed_after_partial_update", "warning", "60000.0")])
+        self.assertEqual((kiran["amount_paid"], kiran["balance"], kiran["status"]), (30000.0, 0.0, "scholarship"))
+        self.assertEqual(warnings(kiran), [("balance", "stale_after_partial_update", "warning", "0.0"), ("status", "stale_after_partial_update", "warning", "scholarship")])
+        self.assertEqual((await self._upload("payments-again.csv", payments, entity_hint="fee"))["report"]["import"]["unchanged"], 2)
+        # An attendance percent stated above what the counts give (leave counted) is kept, with a warning.
+        await self._upload("attendance.csv", b"USN,Name,Subject,Month,Classes Held,Classes Attended,Attendance %\n1MS23MBA001,Ravi Kumar,MBA201,Aug,40,30,85\n", entity_hint="attendance")
+        await self._upload("attended.csv", b"USN,Name,Subject,Month,Classes Attended\n1MS23MBA001,Ravi Kumar,MBA201,Aug,32\n", entity_hint="attendance")
+        [row] = self.store.query_records("college_a", "attendance")
+        self.assertEqual((row["classes_attended"], row["attendance_percent"]), (32, 85.0))
+        self.assertEqual(warnings(row), [("attendance_percent", "stale_after_partial_update", "warning", "85.0")])
+
+    async def test_a_row_number_column_is_not_kept_but_a_column_under_such_a_header_holding_data_is(self):
+        # The footer row is no record, so its word does not make the serial column data.
+        content = b"Sl No,USN,Name,Phone,No\n(1),1MS23MBA001,Ravi Kumar,9876500001,214\n(2),1MS23MBA002,Asha Rao,9876500002,108\nTotal,,,,2\n"
+        job = await self._upload("hostel.csv", content, entity_hint="student")
+        self.assertEqual((job["report"]["import"]["inserted"], job["report"]["import"]["skipped"]), (2, 1))
+        self.assertEqual([row["attributes"] for row in self.store.query_records("college_a", "student")], [{"No": "214"}, {"No": "108"}])
+
     async def test_manual_commit_when_auto_commit_is_off_and_failures_are_explicit(self):
         job = await self._upload("students.csv", STUDENTS, options={"auto_commit": False})
         self.assertEqual(job["status"], "ready")
