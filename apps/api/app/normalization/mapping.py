@@ -122,6 +122,9 @@ class MappingProposal:
         }
 
 
+_CATEGORICAL_LABELS = frozenset({"program", "department"})
+
+
 def _value_shape(values: Sequence[Any]) -> dict[str, float]:
     """Fraction of sample values that look like each field type."""
 
@@ -157,7 +160,12 @@ def _shape_bonus(field_def: CanonicalField, shape: Mapping[str, float]) -> float
     if field_def.field_type is FieldType.IDENTIFIER:
         return 0.2 * shape.get("identifier", 0) - 0.3 * shape.get("email", 0)
     if field_def.field_type is FieldType.STRING:
-        return -0.25 * shape.get("email", 0) - 0.25 * shape.get("phone", 0)
+        penalty = 0.25 * shape.get("email", 0) + 0.25 * shape.get("phone", 0)
+        # Program/department labels are never bare numbers; a numeric column
+        # headed "Course %" or "Course Marks" must not land on program.
+        if field_def.name in _CATEGORICAL_LABELS:
+            penalty += 0.6 * shape.get("number", 0)
+        return -penalty
     return 0.0
 
 
