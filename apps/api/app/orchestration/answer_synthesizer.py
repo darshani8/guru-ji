@@ -6,7 +6,7 @@ from dataclasses import dataclass, replace
 import re
 from collections import Counter
 
-from ..domain.errors import AgenticSaffronError
+from ..domain.errors import AgentSaffronError
 from ..domain.provenance import Provenance
 from ..providers.model_base import TextModel
 from ..domain.results import ResultStatus, ToolResult
@@ -117,7 +117,7 @@ async def apply_model_wording(
     )
     try:
         candidate = await model.complete(prompt, max_tokens=max_tokens)
-    except (AgenticSaffronError, TimeoutError, ValueError):
+    except (AgentSaffronError, TimeoutError, ValueError):
         return replace(
             answer,
             warnings=answer.warnings + ({

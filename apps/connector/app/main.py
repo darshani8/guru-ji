@@ -171,7 +171,7 @@ def _authorize(settings: ConnectorSettings, body: ExecuteBody, authorization: st
 def create_app(settings: ConnectorSettings | None = None, repository: ReportingRepository | None = None) -> FastAPI:
     settings = settings or ConnectorSettings()
     repository = repository or settings.repository
-    app = FastAPI(title="Agentic Saffron Institution Connector", version="0.2.0")
+    app = FastAPI(title="Agent Saffron Institution Connector", version="0.2.0")
     app.state.settings = settings
     app.state.repository = repository
 

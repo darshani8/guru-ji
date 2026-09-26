@@ -166,7 +166,7 @@ def _rls(state: Mapping[str, tuple[bool, bool]], policies: Iterable[tuple[str, s
 
 
 def render_sql_migration() -> str:
-    lines = [f"-- Agentic Saffron internet intelligence schema {SCHEMA_VERSION}", "-- Generated from app.internet_intelligence.store; edit the store, not this file."]
+    lines = [f"-- Agent Saffron internet intelligence schema {SCHEMA_VERSION}", "-- Generated from app.internet_intelligence.store; edit the store, not this file."]
     lines.extend(" ".join(statement.split()) + ";" for statement in _STATEMENTS)
     lines.extend(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {column_type};" for table, column, column_type in ADDED_COLUMNS)
     lines.append("-- PostgreSQL row-level security (skipped on SQLite); institution_profiles stays outside it for the scheduler")

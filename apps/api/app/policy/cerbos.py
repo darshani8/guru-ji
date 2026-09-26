@@ -1,6 +1,6 @@
 """HTTP Cerbos PDP adapter.
 
-Agentic Saffron keeps the policy decision point behind its own narrow protocol. This
+Agent Saffron keeps the policy decision point behind its own narrow protocol. This
 adapter accepts the Cerbos HTTP check contract, validates the response instead
 of trusting an allow bit, and denies on timeout, malformed decisions, missing
 policy metadata, or stale policy status.

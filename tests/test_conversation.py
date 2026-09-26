@@ -69,13 +69,13 @@ class _StreamingModel(_Model):
         return self._stream()
 
     async def _stream(self):
-        from app.domain.errors import ErrorCode, AgenticSaffronError, PublicError
+        from app.domain.errors import ErrorCode, AgentSaffronError, PublicError
         from app.providers.model_base import ModelEvent
 
         await asyncio.sleep(self.first_delay)
         for index, piece in enumerate(self.pieces):
             if self.fail_after is not None and index == self.fail_after:
-                raise AgenticSaffronError(PublicError(ErrorCode.SERVICE_UNAVAILABLE, "declined", "provider"))
+                raise AgentSaffronError(PublicError(ErrorCode.SERVICE_UNAVAILABLE, "declined", "provider"))
             await asyncio.sleep(self.delay)
             self.log.append(f"model:{piece}")
             yield ModelEvent(type="delta", text=piece)
@@ -108,7 +108,7 @@ def _turn(text: str, who: Principal | None = None, **kwargs) -> Turn:
 class RouterTests(unittest.TestCase):
     def test_routes_in_four_languages(self) -> None:
         cases = {
-            "hello": ("small_talk", "greeting"), "Namaste Agentic Saffron": ("small_talk", "greeting"), "नमस्ते": ("small_talk", "greeting"), "ನಮಸ್ಕಾರ": ("small_talk", "greeting"),
+            "hello": ("small_talk", "greeting"), "Namaste Agent Saffron": ("small_talk", "greeting"), "नमस्ते": ("small_talk", "greeting"), "ನಮಸ್ಕಾರ": ("small_talk", "greeting"),
             "kaise ho": ("small_talk", "how_are_you"), "thank you so much": ("small_talk", "thanks"), "who are you": ("small_talk", "identity"),
             "what can you do": ("small_talk", "help"), "bye guru ji": ("small_talk", "goodbye"), "ok": ("small_talk", "ack"),
             "search the internet for ISRO latest launch": ("web", None), "Google who won the IPL final": ("web", None), "weather in Bengaluru today": ("web", None),
@@ -240,7 +240,7 @@ class DialogueTests(unittest.IsolatedAsyncioTestCase):
     async def test_small_talk_is_answered_at_once_in_the_persons_language(self) -> None:
         model = _Model("unused")
         dialogue = self._dialogue(model=model)
-        for text, language, fragment in (("hello", "en-IN", "Agentic Saffron"), ("नमस्ते", "hi-IN", "एजेंटिक सैफ्रन"), ("ನಮಸ್ಕಾರ", "kn-IN", "ಏಜೆಂಟಿಕ್ ಸ್ಯಾಫ್ರನ್"), ("thank you", "en-IN", "welcome")):
+        for text, language, fragment in (("hello", "en-IN", "Agent Saffron"), ("नमस्ते", "hi-IN", "एजेंट सैफ्रन"), ("ನಮಸ್ಕಾರ", "kn-IN", "ಏಜೆಂಟ್ ಸ್ಯಾಫ್ರನ್"), ("thank you", "en-IN", "welcome")):
             reply = await dialogue.respond(_turn(text, channel="voice"))
             self.assertEqual((reply.route, reply.language, reply.status), ("small_talk", language, "complete"), text)
             self.assertTrue(fragment in reply.response.answer or fragment.lower() in reply.response.answer.lower() or reply.route == "small_talk")

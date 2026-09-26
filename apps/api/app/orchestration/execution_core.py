@@ -88,7 +88,7 @@ def build_read_only_plan(request: ChatRequest, principal: Principal) -> Executio
             PlanStep(
                 step_id="classify",
                 kind=PlanStepKind.CLASSIFY_REQUEST,
-                description="Classify the request against approved Agentic Saffron capabilities.",
+                description="Classify the request against approved Agent Saffron capabilities.",
             ),
             PlanStep(
                 step_id="retrieve",

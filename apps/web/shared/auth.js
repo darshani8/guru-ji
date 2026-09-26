@@ -1,5 +1,5 @@
 /*
- * Browser-side identity for Agentic Saffron.
+ * Browser-side identity for Agent Saffron.
  *
  * The server decides which scheme it will accept and publishes that at
  * /v1/auth/config. In `demo` mode (local development only) the old fixed

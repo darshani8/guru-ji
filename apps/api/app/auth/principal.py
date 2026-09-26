@@ -1,4 +1,4 @@
-"""Environment-specific identity adapter for Agentic Saffron."""
+"""Environment-specific identity adapter for Agent Saffron."""
 
 from __future__ import annotations
 

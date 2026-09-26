@@ -1,4 +1,4 @@
--- Agentic Saffron control-plane schema v001
+-- Agent Saffron control-plane schema v001
 -- Institutional data remains behind read-only connector boundaries.
 CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS audit_events (event_id TEXT PRIMARY KEY, event_type TEXT NOT NULL, request_id TEXT NOT NULL, occurred_at TEXT NOT NULL, principal_id TEXT, endpoint TEXT, conversation_id TEXT, source_ids_json TEXT NOT NULL, tool_names_json TEXT NOT NULL, outcome TEXT NOT NULL, redactions_json TEXT NOT NULL, decision_metadata_json TEXT NOT NULL DEFAULT '{}', duration_ms INTEGER);

@@ -1,4 +1,4 @@
-# The Agentic Saffron internet map: a guide for institution web administrators
+# The Agent Saffron internet map: a guide for institution web administrators
 
 The internet map keeps a graded list of an institution's official websites
 and social accounts, so that staff, students and families can tell the real

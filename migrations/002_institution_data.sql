@@ -1,4 +1,4 @@
--- Agentic Saffron institution data schema 002_institution_data
+-- Agent Saffron institution data schema 002_institution_data
 -- Generated from app.normalization.canonical; edit the model, not this file.
 CREATE TABLE IF NOT EXISTS schema_migrations (version TEXT PRIMARY KEY, applied_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS institutions ( institution_id TEXT PRIMARY KEY, name TEXT NOT NULL, location TEXT NOT NULL DEFAULT '', timezone TEXT NOT NULL DEFAULT 'Asia/Kolkata', status TEXT NOT NULL DEFAULT 'active', settings_json TEXT NOT NULL DEFAULT '{}', created_at TEXT NOT NULL, updated_at TEXT NOT NULL );

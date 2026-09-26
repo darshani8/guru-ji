@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from app.agents.contracts import AgentCommand, AgentPlan, PlanStep
 from app.agents.planner import DeterministicPlanner, ModelPlanner, Vocabulary
 from app.config.settings import AppSettings
-from app.domain.errors import ErrorCode, AgenticSaffronError, PublicError
+from app.domain.errors import ErrorCode, AgentSaffronError, PublicError
 from app.domain.principals import InstitutionScope, PrincipalType
 from app.open_task.agent import RUN_PYTHON, SYSTEM_PROMPT, OpenTaskAgent, OpenTaskLimits
 from app.open_task.routing import asks_for_work, requested_format_beyond_tools, route_to_open_task
@@ -290,7 +290,7 @@ class OpenTaskAgentTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("today's 1 open tasks", second.answer)
 
     async def test_an_unavailable_model_or_a_refusal_creates_nothing(self):
-        error = AgenticSaffronError(PublicError(ErrorCode.SERVICE_UNAVAILABLE, "down", "provider"))
+        error = AgentSaffronError(PublicError(ErrorCode.SERVICE_UNAVAILABLE, "down", "provider"))
         failed = await _agent(self.fx, ScriptedModel(error)).run(_command("Make a chart"))
         self.assertEqual(failed.status, "failed")
         self.assertIn("Nothing was created", failed.answer)

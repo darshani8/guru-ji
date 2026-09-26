@@ -180,7 +180,7 @@ class WebAssetTests(unittest.TestCase):
         self.assertIn("rememberToken(parsed.idToken)", auth)
 
     def test_voice_is_a_two_way_conversation(self):
-        # The microphone stays on while Agentic Saffron speaks; talking over a reply
+        # The microphone stays on while Agent Saffron speaks; talking over a reply
         # stops it and tells the server, which cancels what it was preparing.
         js = (ASSISTANT / "app.js").read_text(encoding="utf-8")
         self.assertIn("features: ['thinking', 'speech', 'interrupt']", js)
@@ -305,7 +305,7 @@ class AppServingTests(unittest.TestCase):
         client = _client()
         page = client.get("/")
         self.assertEqual(page.status_code, 200)
-        self.assertIn("<title>Agentic Saffron — Assistant</title>", page.text)
+        self.assertIn("<title>Agent Saffron — Assistant</title>", page.text)
         for path in ("/app.js", "/shared/auth.js", "/shared/styles.css"):
             self.assertEqual(client.get(path).status_code, 200, path)
 
@@ -319,7 +319,7 @@ class AppServingTests(unittest.TestCase):
         client = _client()
         page = client.get("/console/")
         self.assertEqual(page.status_code, 200)
-        self.assertIn("<title>Agentic Saffron — Platform console</title>", page.text)
+        self.assertIn("<title>Agent Saffron — Platform console</title>", page.text)
         for path in ("/console/console.js", "/console/console.css"):
             self.assertEqual(client.get(path).status_code, 200, path)
         for path in ("/console", "/platform.html"):

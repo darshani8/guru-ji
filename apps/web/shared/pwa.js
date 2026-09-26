@@ -46,7 +46,7 @@
     banner.id = 'install-banner';
     banner.className = 'install-banner';
     banner.setAttribute('role', 'region');
-    banner.setAttribute('aria-label', 'Install Agentic Saffron');
+    banner.setAttribute('aria-label', 'Install Agent Saffron');
 
     const icon = document.createElement('img');
     icon.className = 'install-icon';
@@ -98,7 +98,7 @@
     event.preventDefault();
     deferredPrompt = event;
     if (dismissed()) return;
-    showBanner('Install Agentic Saffron as an app for quicker access.', 'Install', async () => {
+    showBanner('Install Agent Saffron as an app for quicker access.', 'Install', async () => {
       const prompt = deferredPrompt;
       deferredPrompt = null;
       if (!prompt) return;
@@ -120,7 +120,7 @@
   const isSafari = /Safari/.test(navigator.userAgent) && !/CriOS|FxiOS|EdgiOS|OPiOS/.test(navigator.userAgent);
   if (isIos && isSafari && !isStandalone && !dismissed()) {
     window.addEventListener('load', () => {
-      showBanner('Install Agentic Saffron: tap Share, then “Add to Home Screen”.', null, null);
+      showBanner('Install Agent Saffron: tap Share, then “Add to Home Screen”.', null, null);
     });
   }
 

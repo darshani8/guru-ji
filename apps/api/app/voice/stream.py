@@ -1,6 +1,6 @@
 """One live voice conversation over a WebSocket, full duplex.
 
-The socket keeps reading while Agentic Saffron thinks and speaks, so the person can
+The socket keeps reading while Agent Saffron thinks and speaks, so the person can
 talk over a reply: an ``interrupt`` (or a new utterance) stops the reply that
 is playing. Each turn runs as its own task and every send goes through one
 lock. A conversational or web turn is cancelled outright; a turn that reached

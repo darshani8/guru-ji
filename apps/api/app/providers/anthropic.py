@@ -18,7 +18,7 @@ from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from typing import Any
 
-from ..domain.errors import ErrorCode, AgenticSaffronError, PublicError
+from ..domain.errors import ErrorCode, AgentSaffronError, PublicError
 from .model_base import ModelEvent, ProviderCapabilities
 
 logger = logging.getLogger(__name__)
@@ -57,8 +57,8 @@ def _base_model(model_id: str) -> str:
     return model_id.split("anthropic.")[-1]
 
 
-def _provider_error() -> AgenticSaffronError:
-    return AgenticSaffronError(PublicError(ErrorCode.SERVICE_UNAVAILABLE, _PUBLIC_MESSAGE, "provider"))
+def _provider_error() -> AgentSaffronError:
+    return AgentSaffronError(PublicError(ErrorCode.SERVICE_UNAVAILABLE, _PUBLIC_MESSAGE, "provider"))
 
 
 def _describe_failure(exc: Exception) -> str:
@@ -204,7 +204,7 @@ class AnthropicProvider:
             request["fallbacks"] = "default"
         return request
 
-    def _unavailable(self, reason: str) -> AgenticSaffronError:
+    def _unavailable(self, reason: str) -> AgentSaffronError:
         logger.warning("Claude model %s unavailable: %s", self.model_id, reason)
         return _provider_error()
 
@@ -245,7 +245,7 @@ class AnthropicProvider:
                         if text:
                             yield ModelEvent(type="delta", text=text, provider_id=self.provider_id, model_id=self.model_id)
                     message = await stream.get_final_message()
-        except AgenticSaffronError:
+        except AgentSaffronError:
             raise
         except Exception as exc:  # noqa: BLE001 - classified by _describe_failure
             raise self._unavailable(_describe_failure(exc)) from exc
@@ -291,7 +291,7 @@ class AnthropicProvider:
                         return await stream.get_final_message()
         except TimeoutError as exc:
             raise self._unavailable(f"no reply within {self.timeout_seconds:g}s") from exc
-        except AgenticSaffronError:
+        except AgentSaffronError:
             raise
         except Exception as exc:  # noqa: BLE001 - classified by _describe_failure
             raise self._unavailable(_describe_failure(exc)) from exc

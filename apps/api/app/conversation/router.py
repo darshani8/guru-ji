@@ -38,14 +38,14 @@ _SMALL_TALK: tuple[tuple[SmallTalkKind, re.Pattern[str]], ...] = (
     )),
     ("goodbye", re.compile(r"\b(bye|goodbye|good bye|see you|see ya|good night|alvida|phir milenge|tata|hogi baruttini)\b|अलविदा|फिर मिलेंगे|ಬಾಯ್|ಹೋಗಿ ಬರುತ್ತೇನೆ|ಶುಭ ರಾತ್ರಿ")),
     ("greeting", re.compile(
-        r"^(hi+|hello+|hey+|hai|helo|namaste|namaskar|namaskara|namaskaram|vanakkam|good (morning|afternoon|evening)|guru ?ji|ok guru ?ji|hello guru ?ji|hi guru ?ji|(?:ok )?agentic saffron)\b"
+        r"^(hi+|hello+|hey+|hai|helo|namaste|namaskar|namaskara|namaskaram|vanakkam|good (morning|afternoon|evening)|guru ?ji|ok guru ?ji|hello guru ?ji|hi guru ?ji|(?:ok )?agent(?:ic)? saffron)\b"
         r"|^(नमस्ते|नमस्कार|हेलो|हाय|प्रणाम|ನಮಸ್ಕಾರ|ಹಲೋ|ಹಾಯ್)"
     )),
     ("ack", re.compile(r"^(ok|okay|fine|great|nice|cool|good|super|perfect|alright|all right|got it|theek hai|thik hai|accha|acha|achha|haan|sari|ಸರಿ|ठीक है|अच्छा|हाँ)$")),
 )
 _SMALL_TALK_FILLERS = frozenset({
-    "guru", "ji", "gurují", "agentic", "saffron", "please", "so", "much", "very", "a", "lot", "again", "there", "dear", "sir", "madam", "mam", "maam", "bhai", "and", "you", "u",
-    "जी", "गुरु", "गुरुजी", "एजेंटिक", "सैफ्रन", "ಗುರು", "ಗುರೂಜಿ", "ಏಜೆಂಟಿಕ್", "ಸ್ಯಾಫ್ರನ್", "ಜೀ", "बहुत", "ತುಂಬಾ", "friend", "buddy", "today", "aaj",
+    "guru", "ji", "gurují", "agent", "agentic", "saffron", "please", "so", "much", "very", "a", "lot", "again", "there", "dear", "sir", "madam", "mam", "maam", "bhai", "and", "you", "u",
+    "जी", "गुरु", "गुरुजी", "एजेंट", "एजेंटिक", "सैफ्रन", "ಗುರು", "ಗುರೂಜಿ", "ಏಜೆಂಟ್", "ಏಜೆಂಟಿಕ್", "ಸ್ಯಾಫ್ರನ್", "ಜೀ", "बहुत", "ತುಂಬಾ", "friend", "buddy", "today", "aaj",
 })
 
 _WEB_ANCHOR = re.compile(
@@ -75,7 +75,7 @@ _SELF_REFERENCE = re.compile(
 _QUERY_NOISE = re.compile(
     r"\b(internet|net|google) (pe|par|mein)\b|\b(search|google) (karo|kariye|kijiye|karke batao)\b|\bke baa?re (mein|me)\b"
     r"|\b(dhoondo|dhundo|khojo|batao|bataiye|dekho)\b"
-    r"|^((please|can you|could you|would you|kindly|hey|ok|okay|sure|alright|go and|guru ?ji|agentic saffron)\s+)+"
+    r"|^((please|can you|could you|would you|kindly|hey|ok|okay|sure|alright|go and|guru ?ji|agent(?:ic)? saffron)\s+)+"
     r"|\b(please|kindly)\b"
     # "Google" is the verb in "google who won", but the subject in "Google reviews".
     r"|\b(search|google(?!\s+(reviews?|ratings?|maps))|look up|lookup|find|check|browse)( (for|about|on))?\b"

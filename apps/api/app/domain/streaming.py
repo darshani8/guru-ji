@@ -1,4 +1,4 @@
-"""Closed Agentic Saffron-owned streaming event contracts."""
+"""Closed Agent Saffron-owned streaming event contracts."""
 
 from __future__ import annotations
 

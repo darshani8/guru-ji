@@ -1,5 +1,5 @@
 /*
- * Service worker for the Agentic Saffron assistant. It makes the page installable and
+ * Service worker for the Agent Saffron assistant. It makes the page installable and
  * lets it open without a connection; it never touches the API.
  *
  * Only the page and its static files are handled, always network first so
@@ -56,7 +56,7 @@ async function networkFirst(request, key) {
     if (request.mode === 'navigate') {
       return new Response(
         '<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">'
-        + '<title>Agentic Saffron — Offline</title><p>Agentic Saffron needs an internet connection. Reconnect and reload.</p>',
+        + '<title>Agent Saffron — Offline</title><p>Agent Saffron needs an internet connection. Reconnect and reload.</p>',
         { status: 503, headers: { 'Content-Type': 'text/html; charset=utf-8' } },
       );
     }
