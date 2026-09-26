@@ -806,6 +806,36 @@ class InstitutionDataStore:
             for row in rows
         ]
 
+    def fee_breakdown(self, institution_id: str, *, program: str | None = None, academic_year: str | None = None) -> list[dict[str, Any]]:
+        """Fee totals per program and academic year, for year-wise and program-wise answers."""
+        clauses = ["f.institution_id = ?"]
+        params: list[Any] = [institution_id]
+        if program:
+            clauses.append("(LOWER(f.program) = ? OR (f.program IS NULL AND LOWER(s.program) = ?))")
+            params.extend([program.lower(), program.lower()])
+        if academic_year:
+            clauses.append("LOWER(f.academic_year) = ?")
+            params.append(academic_year.lower())
+        sql = f"""
+            SELECT UPPER(COALESCE(f.program, s.program)) AS program, f.academic_year AS academic_year,
+                   COUNT(DISTINCT f.student_id) AS students, COUNT(*) AS payments,
+                   SUM(COALESCE(f.amount_due, 0)) AS amount_due, SUM(COALESCE(f.amount_paid, 0)) AS amount_paid
+            FROM fees f
+            LEFT JOIN students s ON s.institution_id = f.institution_id AND LOWER(s.student_id) = LOWER(f.student_id)
+            WHERE {' AND '.join(clauses)}
+            GROUP BY UPPER(COALESCE(f.program, s.program)), f.academic_year
+            ORDER BY academic_year, program
+        """
+        with self._tenant(institution_id):
+            rows = self.backend.fetchall(sql, tuple(params))
+        return [
+            {
+                "program": row.get("program"), "academic_year": row.get("academic_year"), "students": int(row.get("students") or 0), "payments": int(row.get("payments") or 0),
+                "amount_due": round(float(row.get("amount_due") or 0), 2), "amount_paid": round(float(row.get("amount_paid") or 0), 2),
+            }
+            for row in rows
+        ]
+
     def exam_rollup(self, institution_id: str, *, program: str | None = None, semester: int | None = None, course_code: str | None = None, exam_name: str | None = None) -> list[dict[str, Any]]:
         clauses = ["e.institution_id = ?"]
         params: list[Any] = [institution_id]
