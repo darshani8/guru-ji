@@ -158,6 +158,16 @@ Names shared with systems outside this repository keep the old spelling:
 
 The crawler now sends the User-Agent `AgenticSaffron-InstitutionIntelligence/1.0`; robots.txt groups written for `GuruJi-InstitutionIntelligence` still apply to it.
 
+## Deployment
+
+The API runs on the Amazon Lightsail container service `agentic-saffron` in `ap-south-1`, served at https://agentic-saffron.sast-skills.com. Each push to `main` that changes the app runs `.github/workflows/deploy-agentic-saffron.yml`, which:
+
+1. builds `infra/docker/Dockerfile.api`;
+2. pushes the image to the ECR repository `agentic-saffron-api`, tagged with the commit;
+3. copies the running Lightsail deployment with only the image changed, then waits until the new deployment passes its health check (`/v1/health/live`).
+
+If the new deployment fails, Lightsail keeps the previous one serving and the workflow fails. The service's environment, ports and health check are managed in Lightsail, not in this repository, so the workflow never reads or changes them. The workflow signs in to AWS through GitHub OIDC as `agentic-saffron-github-deploy`. That role can only push to that ECR repository and deploy that one container service. The job runs once the repository variable `AWS_DEPLOY_ROLE_ARN` holds that role's ARN; `workflow_dispatch` redeploys `main` by hand.
+
 ## Example request
 
     curl -X POST http://localhost:8000/v1/chat \

@@ -1,12 +1,18 @@
 name: deploy-agentic-saffron
 
-# Builds the portal image and pushes it to ECR. Credentials come from GitHub's
-# OIDC provider, so no AWS keys are stored in this repository.
+# Builds the portal image, pushes it to ECR, and rolls the Lightsail container
+# service that serves it (agentic-saffron) onto the new image. Credentials come
+# from GitHub's OIDC provider, so no AWS keys are stored in this repository.
 #
-# The job is skipped until the repository variable AWS_DEPLOY_ROLE_ARN is set,
-# which keeps main green before the role exists. Set it to the ARN of a role
-# whose trust policy names this repository's main branch and which may push to
-# the agentic-saffron-api repository only.
+# The job is skipped until the repository variable AWS_DEPLOY_ROLE_ARN is set.
+# Set it to the ARN of a role whose trust policy names this repository's main
+# branch and which may push to the agentic-saffron-api repository and read and
+# deploy the agentic-saffron container service only.
+#
+# The rollout copies the running deployment and changes only the image, so the
+# service's environment, ports and health check stay as configured in
+# Lightsail. If the new deployment fails its health check, Lightsail keeps the
+# previous one serving and this job fails.
 
 on:
   push:
@@ -32,10 +38,12 @@ jobs:
   build-and-push:
     if: vars.AWS_DEPLOY_ROLE_ARN != ''
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     env:
       AWS_REGION: ap-south-1
       ECR_REPOSITORY: agentic-saffron-api
+      LIGHTSAIL_SERVICE: agentic-saffron
+      LIGHTSAIL_CONTAINER: api
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -51,6 +59,7 @@ jobs:
         uses: aws-actions/amazon-ecr-login@v2
 
       - name: Build and push the image
+        id: image
         env:
           REGISTRY: ${{ steps.login-ecr.outputs.registry }}
         run: |
@@ -61,9 +70,67 @@ jobs:
           docker push "$image:${GITHUB_SHA}"
           docker push "$image:latest"
           echo "Pushed $image:${GITHUB_SHA}"
+          echo "uri=$image:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
 
-      - name: Report the pushed image
+      - name: Roll the Lightsail service onto the new image
+        env:
+          IMAGE_URI: ${{ steps.image.outputs.uri }}
         run: |
-          echo "### Image pushed" >> "$GITHUB_STEP_SUMMARY"
+          set -euo pipefail
+          # The deployment holds the service's environment, secrets included, so
+          # it is written only to files under RUNNER_TEMP and never printed.
+          work="$RUNNER_TEMP/lightsail"
+          mkdir -p "$work" && chmod 700 "$work"
+          state() { aws lightsail get-container-services --service-name "$LIGHTSAIL_SERVICE" --query 'containerServices[0].state' --output text; }
+
+          # Lightsail refuses a deployment while another one is rolling out.
+          for _ in $(seq 1 60); do
+            current_state="$(state)"
+            [ "$current_state" != "DEPLOYING" ] && [ "$current_state" != "UPDATING" ] && break
+            sleep 15
+          done
+
+          aws lightsail get-container-services --service-name "$LIGHTSAIL_SERVICE" --query 'containerServices[0].currentDeployment' --output json > "$work/current.json"
+          python3 - "$work" <<'PY'
+          import json, os, sys
+          work = sys.argv[1]
+          current = json.load(open(f"{work}/current.json"))
+          name = os.environ["LIGHTSAIL_CONTAINER"]
+          containers = current["containers"]
+          if name not in containers:
+              sys.exit(f"container {name!r} is not in the running deployment")
+          containers[name]["image"] = os.environ["IMAGE_URI"]
+          json.dump(containers, open(f"{work}/containers.json", "w"))
+          json.dump(current["publicEndpoint"], open(f"{work}/endpoint.json", "w"))
+          PY
+
+          version="$(aws lightsail create-container-service-deployment --service-name "$LIGHTSAIL_SERVICE" \
+            --containers "file://$work/containers.json" --public-endpoint "file://$work/endpoint.json" \
+            --query 'containerService.nextDeployment.version' --output text)"
+          rm -rf "$work"
+          echo "Started deployment $version with $IMAGE_URI"
+
+          for _ in $(seq 1 100); do
+            deployment_state="$(aws lightsail get-container-service-deployments --service-name "$LIGHTSAIL_SERVICE" \
+              --query "deployments[?version==\`$version\`].state | [0]" --output text)"
+            case "$deployment_state" in
+              ACTIVE) echo "Deployment $version is serving"; break ;;
+              FAILED) echo "::error::Lightsail deployment $version failed; the previous deployment is still serving"; exit 1 ;;
+            esac
+            sleep 15
+          done
+          if [ "$deployment_state" != "ACTIVE" ]; then
+            echo "::error::Lightsail deployment $version did not become active in 25 minutes (last state: $deployment_state)"
+            exit 1
+          fi
+
+          url="$(aws lightsail get-container-services --service-name "$LIGHTSAIL_SERVICE" --query 'containerServices[0].url' --output text)"
+          curl --fail --silent --show-error --retry 5 --retry-delay 5 --retry-all-errors "${url%/}/v1/health/live" > /dev/null
+          echo "deployment=$version" >> "$GITHUB_ENV"
+          echo "service_url=$url" >> "$GITHUB_ENV"
+
+      - name: Report the deployment
+        run: |
+          echo "### Deployed" >> "$GITHUB_STEP_SUMMARY"
           echo "" >> "$GITHUB_STEP_SUMMARY"
-          echo '`'"${ECR_REPOSITORY}:${GITHUB_SHA}"'`' >> "$GITHUB_STEP_SUMMARY"
+          echo '`'"${ECR_REPOSITORY}:${GITHUB_SHA}"'`'" is serving as Lightsail deployment ${deployment} of ${LIGHTSAIL_SERVICE} (${service_url})." >> "$GITHUB_STEP_SUMMARY"

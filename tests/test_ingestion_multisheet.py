@@ -125,6 +125,14 @@ class MultiSheetUploadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(failed["status"], JOB_FAILED)
         self.assertIn("Sheet3: fewer than two columns", failed["error"])
 
+    async def test_a_two_column_sheet_whose_data_counts_up_is_still_imported(self):
+        # Only a row-number column ("Sl no") counting 1, 2, 3 is discounted; a
+        # data column that happens to count (a semester) keeps the sheet usable.
+        semesters = roster("Semester list", ["USN No", "Semester"], [["1AB25MBA001", 1], ["1AB25MBA002", 2], ["1AB25MBA003", 3]])
+        job = await self.service.process("college_a", self._upload({"Sem": semesters}, entity_hint="student")["job_id"])
+        self.assertNotIn("fewer than two columns", job.get("error") or "")
+        self.assertEqual(job["row_count"], 3)
+
     async def test_an_explicit_sheet_imports_only_that_sheet(self):
         job = await self.service.process("college_a", self._upload({"GM": GM, "DM": DM}, entity_hint="student", options={"sheet": "DM"})["job_id"])
         self.assertEqual(job["status"], JOB_IMPORTED, job.get("error"))

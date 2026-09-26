@@ -330,8 +330,9 @@
     const box = $('upload-result');
     box.hidden = false;
     const more = (job.sibling_job_ids || []).length;
+    const sheets = ((job.report && job.report.sheets && job.report.sheets.other_jobs) || []).reduce((n, other) => n + ((other.sheets || []).length || 1), 0) || more;
     box.innerHTML = `${jobPill(job)} Job ${escapeHtml(job.job_id)} · stage ${escapeHtml(job.stage)} · entity ${escapeHtml(job.entity || 'detecting')}\n${escapeHtml(jobSummary(job))}`
-      + (more ? `\n${more} more sheet${more === 1 ? ' was' : 's were'} queued as separate jobs (see Recent jobs).` : '');
+      + (more ? `\n${sheets} more sheet${sheets === 1 ? ' was' : 's were'} queued as ${more === 1 ? 'a separate job' : `${more} separate jobs`} (see Recent jobs).` : '');
   }
 
   // After every step: show the job, then open what needs the person next, or
